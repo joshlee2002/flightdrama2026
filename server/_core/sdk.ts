@@ -258,8 +258,19 @@ class SDKServer {
 
   async authenticateRequest(req: Request): Promise<AuthenticatedUser> {
     // Regular authentication flow
+    // Try cookie first, then fall back to Authorization header or x-session-token
+    // (needed for browsers that block SameSite=None cookies in iframes)
     const cookies = this.parseCookies(req.headers.cookie);
-    const sessionCookie = cookies.get(COOKIE_NAME);
+    let sessionCookie = cookies.get(COOKIE_NAME);
+    if (!sessionCookie) {
+      const authHeader = req.headers['authorization'] as string | undefined;
+      if (authHeader?.startsWith('Bearer ')) {
+        sessionCookie = authHeader.slice(7);
+      }
+    }
+    if (!sessionCookie) {
+      sessionCookie = req.headers['x-session-token'] as string | undefined;
+    }
     const session = await this.verifySession(sessionCookie);
 
     if (!session) {
@@ -273,6 +284,22 @@ class SDKServer {
         throw ForbiddenError("Cron session missing task_uid");
       }
       return buildCronUser(userInfo);
+    }
+
+    // Password-auth sessions: openId is "password-auth-user", skip OAuth sync
+    if (session.openId === PASSWORD_AUTH_OPEN_ID) {
+      const signedInAt = new Date();
+      await db.upsertUser({
+        openId: PASSWORD_AUTH_OPEN_ID,
+        name: session.name || "Admin",
+        email: null,
+        loginMethod: "password",
+        role: "admin",
+        lastSignedIn: signedInAt,
+      });
+      const user = await db.getUserByOpenId(PASSWORD_AUTH_OPEN_ID);
+      if (!user) throw ForbiddenError("Failed to create password-auth user");
+      return user;
     }
 
     const sessionUserId = session.openId;
@@ -311,6 +338,7 @@ class SDKServer {
 }
 
 const CRON_OPEN_ID_PREFIX = "cron_";
+const PASSWORD_AUTH_OPEN_ID = "password-auth-user";
 
 /** Result of `sdk.authenticateRequest`. Cron callbacks set `isCron=true` and `taskUid`; see `references/periodic-updates.md`. */
 export type AuthenticatedUser = User & {

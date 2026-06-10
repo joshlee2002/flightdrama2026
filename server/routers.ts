@@ -167,6 +167,8 @@ export const appRouter = router({
           ? (existingPkg.allHeadlines as string[])
           : [];
         const snapshotSelected: string | null = existingPkg?.selectedHeadline ?? null;
+        // Mark as processing immediately so the UI shows the spinner
+        await updateStoryPackage(input.id, { processingStatus: "processing", processingError: null });
         // Fire-and-forget: run full Soyunci pipeline in background after approval
         setImmediate(async () => {
           try {

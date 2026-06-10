@@ -22,5 +22,5 @@
 
 ## Phase 4: Tests & Publish
 - [x] Run vitest tests (20/20 passed)
-- [ ] Save checkpoint
-- [ ] Publish
+- [x] Save checkpoint
+- [x] Publish (ready — click Publish button in Management UI)
