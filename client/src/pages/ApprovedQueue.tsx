@@ -387,25 +387,43 @@ function WikimediaSearchModal({ open, onClose, initialQuery, storyId, slotIndex,
     }
   }, [open, initialQuery]);
 
+  // Track which query the current pageResults belong to — prevents stale results
+  // from a previous query overwriting the cleared state when submittedQuery changes.
+  const lastFetchedQuery = useRef(initialQuery);
+  const lastFetchedOffset = useRef(0);
+
   const { data: pageResults = [], isFetching, isError } = trpc.wikimediaSearch.useQuery(
     { query: submittedQuery, limit: 40, offset },
     { enabled: open && submittedQuery.trim().length > 0, refetchOnWindowFocus: false, refetchOnReconnect: false }
   );
 
-  // Accumulate results across pages
+  // Accumulate results — only apply when results belong to the current query+offset
   useEffect(() => {
-    if (pageResults.length > 0) {
-      if (offset === 0) {
-        setAllResults(pageResults);
-      } else {
-        setAllResults(prev => [...prev, ...pageResults]);
-      }
+    if (isFetching) return; // Wait until settled
+    if (lastFetchedQuery.current !== submittedQuery) return; // Stale result from old query
+    if (lastFetchedOffset.current !== offset) return; // Stale result from old offset
+    if (offset === 0) {
+      setAllResults(pageResults);
+    } else if (pageResults.length > 0) {
+      setAllResults(prev => [...prev, ...pageResults]);
     }
-  }, [pageResults, offset]);
+  }, [pageResults, isFetching, submittedQuery, offset]);
 
   const results = allResults;
 
-  useEffect(() => { setSelectedIdx(null); setOffset(0); setAllResults([]); }, [submittedQuery]);
+  useEffect(() => {
+    // Reset state and record the new query being fetched
+    setSelectedIdx(null);
+    setOffset(0);
+    setAllResults([]);
+    lastFetchedQuery.current = submittedQuery;
+    lastFetchedOffset.current = 0;
+  }, [submittedQuery]);
+
+  // Track offset changes too
+  useEffect(() => {
+    lastFetchedOffset.current = offset;
+  }, [offset]);
 
   const pickImage = trpc.stories.pickWikimediaImage.useMutation({
     onSuccess: () => {
