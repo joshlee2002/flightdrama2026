@@ -150,7 +150,7 @@ export async function searchWikimedia(query: string, limit = 6, offset = 0): Pro
 
       results.push({
         url: proxyUrl(rawUrl),
-        thumbUrl: rawThumb,  // Direct CDN URL — Wikimedia has open CORS, no proxy needed for thumbnails
+        thumbUrl: proxyUrl(rawThumb),  // Route through proxy — Wikimedia CDN blocks direct browser requests from non-Wikimedia origins
         title: page.title?.replace(/^File:/, "").replace(/\.[^.]+$/, "") ?? query,
         source: "wikimedia",
         licence,
