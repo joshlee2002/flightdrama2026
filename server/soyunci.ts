@@ -231,7 +231,7 @@ export interface DeepResearchResult {
   primarySourceText: string;
 }
 
-async function deepResearch(title: string, sourceUrl: string): Promise<DeepResearchResult> {
+async function deepResearch(title: string, sourceUrl: string, rssContent = ""): Promise<DeepResearchResult> {
   try {
     const searchQuery = title.replace(/[^\w\s]/g, " ").trim().slice(0, 120);
     const sourceParts: string[] = [];
@@ -250,11 +250,58 @@ async function deepResearch(title: string, sourceUrl: string): Promise<DeepResea
         sourcesResearched++;
         console.log(`[Soyunci] Primary source: ${originalArticle.wordCount} words from ${sourceUrl}`);
       } else {
-        console.warn(`[Soyunci] *** PRIMARY SOURCE FETCH FAILED (${originalArticle.error ?? 'unknown'}) — ${sourceUrl} ***`);
-        console.warn(`[Soyunci] Will rely on secondary sources only. Article quality may be reduced.`);
+        // First attempt failed — retry with a Safari UA (some sites block Chrome bots)
+        console.warn(`[Soyunci] Primary fetch attempt 1 failed (${originalArticle.error ?? 'unknown'}) — retrying with alternate UA`);
+        try {
+          const retryRes = await fetch(sourceUrl, {
+            headers: {
+              "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+              "Accept-Language": "en-US,en;q=0.9",
+              "Referer": "https://www.google.com/",
+            },
+            redirect: "follow",
+            signal: AbortSignal.timeout(12000),
+          });
+          if (retryRes.ok) {
+            const { extractFromHtml } = await import("./articleFetcher");
+            const html = await retryRes.text();
+            const retryArticle = extractFromHtml(sourceUrl, html);
+            if (retryArticle.success && retryArticle.bodyText.length > 200) {
+              primarySourceText = retryArticle.bodyText;
+              sourceParts.push(`=== PRIMARY SOURCE: ${sourceUrl} ===`);
+              sourceParts.push(retryArticle.bodyText);
+              sourcesResearched++;
+              console.log(`[Soyunci] Primary source (retry UA): ${retryArticle.wordCount} words from ${sourceUrl}`);
+            } else {
+              throw new Error("Retry extraction insufficient");
+            }
+          } else {
+            throw new Error(`HTTP ${retryRes.status}`);
+          }
+        } catch {
+          // Both fetch attempts failed — use RSS content as fallback
+          if (rssContent && rssContent.trim().length > 100) {
+            primarySourceText = rssContent.trim();
+            sourceParts.push(`=== PRIMARY SOURCE (RSS snippet — full fetch failed): ${sourceUrl} ===`);
+            sourceParts.push(rssContent.trim());
+            sourcesResearched++;
+            console.warn(`[Soyunci] Using RSS content as fallback primary source (${rssContent.trim().split(/\s+/).length} words)`);
+          } else {
+            console.warn(`[Soyunci] *** ALL PRIMARY SOURCE FETCHES FAILED — ${sourceUrl} ***`);
+          }
+        }
       }
     } catch (err) {
-      console.warn("[Soyunci] *** PRIMARY ARTICLE FETCH FAILED — will rely on secondary sources:", err);
+      if (rssContent && rssContent.trim().length > 100) {
+        primarySourceText = rssContent.trim();
+        sourceParts.push(`=== PRIMARY SOURCE (RSS snippet — full fetch failed): ${sourceUrl} ===`);
+        sourceParts.push(rssContent.trim());
+        sourcesResearched++;
+        console.warn(`[Soyunci] Using RSS content as fallback primary source after exception`);
+      } else {
+        console.warn("[Soyunci] *** PRIMARY ARTICLE FETCH FAILED — will rely on secondary sources:", err);
+      }
     }
 
     // ── Source 2+: Bing/Google News RSS — find and fetch secondary articles ─────
@@ -305,8 +352,8 @@ async function deepResearch(title: string, sourceUrl: string): Promise<DeepResea
 
     // ── No LLM synthesis step — raw sources passed directly to researchAndWrite ──
     // Eliminates one full LLM call per story. The article writer handles raw text fine.
-    // Cap at 8,000 chars to keep token cost low.
-    const context = combinedSources.slice(0, 8000) || `Story: ${title}\nSource: ${sourceUrl}`;
+    // Cap at 16,000 chars — Groq llama-3.3-70b has 128k context, use more of it.
+    const context = combinedSources.slice(0, 16000) || `Story: ${title}\nSource: ${sourceUrl}`;
     return { context, sourcesResearched, primarySourceText };
   } catch (err) {
     console.warn("[Soyunci] deepResearch failed:", err);
@@ -1128,7 +1175,7 @@ async function researchAndWrite(
   sourcesResearched: number
 ): Promise<{ facts: string[]; angle: string; article: string; hashtags: string[] }> {
   const sourceBlock = primarySourceText.length > 200
-    ? `FULL PRIMARY SOURCE ARTICLE:\n${primarySourceText.slice(0, 10000)}`
+    ? `FULL PRIMARY SOURCE ARTICLE:\n${primarySourceText.slice(0, 20000)}`
     : `(Primary source unavailable — use research brief only)`;
 
   const examplesBlock = [voiceExamples, feedbackExamples].filter(Boolean).join("\n\n");
@@ -1163,7 +1210,7 @@ ${perfContext ? `\n${perfContext}` : ""}`,
       },
       {
         role: "user",
-        content: `STORY TITLE: ${title}\n\n${sourceBlock}\n\nRESEARCH BRIEF (${sourcesResearched} sources):\n${researchContext.slice(0, 6000)}\n\nReturn ONLY valid JSON with fields: facts, angle, article, hashtags`,
+        content: `STORY TITLE: ${title}\n\n${sourceBlock}\n\nRESEARCH BRIEF (${sourcesResearched} sources):\n${researchContext.slice(0, 10000)}\n\nReturn ONLY valid JSON with fields: facts, angle, article, hashtags`,
       },
     ],
   });
@@ -1288,7 +1335,7 @@ export async function runFullSoyunciPipeline(
 
   // Fetch sources + load context in parallel (all free, no LLM tokens)
   const [researchResult, perfInsights, feedbackExamples, voiceExamples, styleContext] = await Promise.all([
-    deepResearch(title, sourceUrl),
+    deepResearch(title, sourceUrl, content),
     getPerformanceInsights(),
     loadFeedbackExamples(),
     loadVoiceExamples(),
@@ -1299,17 +1346,17 @@ export async function runFullSoyunciPipeline(
   const perfContext = [buildPerformanceContext(perfInsights), styleContext].filter(Boolean).join("\n");
 
   if (!primarySourceText) {
-    console.warn(`[Soyunci] No primary source text for "${title}" — using secondary sources only`);
+    console.warn(`[Soyunci] No primary source text for "${title}" — RSS content used as fallback`);
   } else {
     console.log(`[Soyunci] Primary source: ${primarySourceText.split(/\s+/).length} words | Secondary sources: ${sourcesResearched}`);
   }
 
-  // ── CALL 1: Research + Facts + Angle + Article (one shot) ────────────────
+  // ── CALL 1: Research + Facts + Angle + Article (one shot) ────────────
   const { facts, angle, article, hashtags } = await researchAndWrite(
     title, primarySourceText, researchContext, feedbackExamples, voiceExamples, perfContext, sourcesResearched
   );
 
-  // ── CALL 2: Headlines + Canva brief (one shot) ────────────────────────────
+  // ── CALL 2: Headlines + Canva brief (one shot) ────────────────────────────────────────────
   const [headlinesResult, imagesResult] = await Promise.all([
     generateHeadlinesAndCanva(title, article, angle, facts, perfInsights?.headlinePatterns ?? []),
     researchImages(title, article, angle),
@@ -1366,7 +1413,7 @@ export async function runResearchAndWrite(
 }> {
     console.log(`[Soyunci] Re-research + write for: "${title}"`);
   const [researchResult, perfInsights, feedbackExamples, voiceExamples, styleContext] = await Promise.all([
-    deepResearch(title, sourceUrl),
+    deepResearch(title, sourceUrl, content),
     getPerformanceInsights(),
     loadFeedbackExamples(),
     loadVoiceExamples(),
@@ -1376,7 +1423,7 @@ export async function runResearchAndWrite(
   const perfContext = [buildPerformanceContext(perfInsights), styleContext].filter(Boolean).join("\n");
 
   if (!primarySourceText) {
-    console.warn(`[Soyunci] No primary source text for re-research of "${title}" — using secondary sources only`);
+    console.warn(`[Soyunci] No primary source text for re-research of "${title}" — RSS content used as fallback`);
   }
 
   // 2-call optimised pipeline
