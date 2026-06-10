@@ -175,6 +175,12 @@ function HeroImageSlot({
 }) {
   const [loaded, setLoaded] = useState(false);
   const [errored, setErrored] = useState(false);
+  // Reset load/error state whenever the URL changes so stale errored state
+  // doesn't permanently hide a valid image after tab switches or URL updates.
+  useEffect(() => {
+    setLoaded(false);
+    setErrored(false);
+  }, [thumbUrl]);
   return (
     <div className="relative mx-3 mb-2 rounded overflow-hidden bg-muted/30" style={{ aspectRatio: "16/9" }}>
       {/* Skeleton shimmer shown until image loads */}
@@ -242,6 +248,11 @@ interface GridTileProps {
 function GridTile({ url, title, attribution, licence, pageUrl, selected, onSelect, onUse, isSaving, source }: GridTileProps) {
   const [loaded, setLoaded] = useState(false);
   const [errored, setErrored] = useState(false);
+  // Reset when URL changes so a new search doesn't inherit stale error state
+  useEffect(() => {
+    setLoaded(false);
+    setErrored(false);
+  }, [url]);
 
   // Hide tiles where the image completely failed to load
   if (errored) return null;
@@ -1042,6 +1053,7 @@ function ApprovedCard({ story, pkg, onUnapprove, isUnapproving }: ApprovedCardPr
                       {/* ── Current selected image ── */}
                       {!isTextRec && img.thumbUrl && (
                         <HeroImageSlot
+                          key={img.thumbUrl}
                           thumbUrl={img.thumbUrl}
                           description={img.description ?? img.title ?? ""}
                           isAiGenerated={img.imageSource === "ai-generated"}
