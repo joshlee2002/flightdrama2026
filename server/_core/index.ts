@@ -42,6 +42,30 @@ async function startServer() {
   registerStorageProxy(app);
   registerOAuthRoutes(app);
 
+  // In-memory image cache — avoids re-fetching the same image from Wikimedia/Pexels
+  // and prevents rate-limit 429s when the browse modal renders 40 tiles at once.
+  const IMG_CACHE_MAX = 300;
+  const IMG_CACHE_TTL = 30 * 60 * 1000; // 30 minutes
+  const imgCache = new Map<string, { buf: Buffer; ct: string; ts: number }>();
+  function imgCacheGet(key: string) {
+    const entry = imgCache.get(key);
+    if (!entry) return null;
+    if (Date.now() - entry.ts > IMG_CACHE_TTL) { imgCache.delete(key); return null; }
+    return entry;
+  }
+  function imgCacheSet(key: string, buf: Buffer, ct: string) {
+    if (imgCache.size >= IMG_CACHE_MAX) {
+      // Evict oldest entry
+      const oldest = Array.from(imgCache.entries()).sort((a, b) => a[1].ts - b[1].ts)[0];
+      if (oldest) imgCache.delete(oldest[0]);
+    }
+    imgCache.set(key, { buf, ct, ts: Date.now() });
+  }
+
+  // In-flight deduplication — if two requests for the same URL arrive simultaneously,
+  // the second waits for the first fetch to complete rather than firing a duplicate upstream request.
+  const imgInFlight = new Map<string, Promise<{ buf: Buffer; ct: string } | null>>();
+
   // Image proxy — serves Wikimedia/Pexels images to avoid CORS/hotlink blocks
   app.get("/api/image-proxy", async (req, res) => {
     const url = req.query.url as string;
@@ -55,29 +79,53 @@ async function startServer() {
       if (!allowed.some(h => parsed.hostname === h || parsed.hostname.endsWith("." + h))) {
         return res.status(403).send("Host not allowed");
       }
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s hard timeout
-      try {
-        const upstream = await fetch(url, {
-          signal: controller.signal,
-          headers: {
-            "User-Agent": "FlightDrama/1.0 (aviation-content-tool)",
-            "Referer": "https://commons.wikimedia.org/",
-          },
-        });
-        clearTimeout(timeoutId);
-        if (!upstream.ok) return res.status(upstream.status).send("Upstream error");
-        const ct = upstream.headers.get("content-type") ?? "image/jpeg";
-        res.setHeader("Content-Type", ct);
+
+      // Serve from cache if available
+      const cached = imgCacheGet(url);
+      if (cached) {
+        res.setHeader("Content-Type", cached.ct);
         res.setHeader("Cache-Control", "public, max-age=86400");
-        const buf = await upstream.arrayBuffer();
-        return res.send(Buffer.from(buf));
-      } catch (e: any) {
-        clearTimeout(timeoutId);
-        if (e?.name === "AbortError") return res.status(504).send("Proxy timeout");
-        console.error("[ImageProxy] error:", e);
-        return res.status(502).send("Proxy error");
+        res.setHeader("X-Cache", "HIT");
+        return res.send(cached.buf);
       }
+
+      // Deduplicate in-flight requests for the same URL
+      let fetchPromise = imgInFlight.get(url);
+      if (!fetchPromise) {
+        fetchPromise = (async () => {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 12000);
+          try {
+            const upstream = await fetch(url, {
+              signal: controller.signal,
+              headers: {
+                "User-Agent": "Mozilla/5.0 (compatible; FlightDrama/1.0; +https://flightdrama.com)",
+                "Referer": "https://commons.wikimedia.org/",
+                "Accept": "image/webp,image/jpeg,image/*,*/*;q=0.8",
+              },
+            });
+            clearTimeout(timeoutId);
+            if (!upstream.ok) return null;
+            const ct = upstream.headers.get("content-type") ?? "image/jpeg";
+            const buf = Buffer.from(await upstream.arrayBuffer());
+            imgCacheSet(url, buf, ct);
+            return { buf, ct };
+          } catch {
+            clearTimeout(timeoutId);
+            return null;
+          } finally {
+            imgInFlight.delete(url);
+          }
+        })();
+        imgInFlight.set(url, fetchPromise);
+      }
+
+      const result = await fetchPromise;
+      if (!result) return res.status(502).send("Proxy error");
+      res.setHeader("Content-Type", result.ct);
+      res.setHeader("Cache-Control", "public, max-age=86400");
+      res.setHeader("X-Cache", "MISS");
+      return res.send(result.buf);
     } catch (e) {
       console.error("[ImageProxy] outer error:", e);
       return res.status(502).send("Proxy error");

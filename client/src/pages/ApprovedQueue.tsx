@@ -245,25 +245,48 @@ interface GridTileProps {
   source?: "wikimedia" | "pexels";
 }
 
-function GridTile({ url, title, attribution, licence, pageUrl, selected, onSelect, onUse, isSaving, source }: GridTileProps) {
+function GridTile({ url, title, attribution, licence, pageUrl, selected, onSelect, onUse, isSaving, source, loadDelay = 0 }: GridTileProps & { loadDelay?: number }) {
   const [loaded, setLoaded] = useState(false);
   const [errored, setErrored] = useState(false);
-  // Reset when URL changes so a new search doesn't inherit stale error state
+  const [activeSrc, setActiveSrc] = useState<string | null>(null);
+  const retryCount = useRef(0);
+  const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Reset when URL changes
   useEffect(() => {
     setLoaded(false);
     setErrored(false);
+    setActiveSrc(null);
+    retryCount.current = 0;
+    if (retryTimer.current) clearTimeout(retryTimer.current);
+    // Stagger load start to avoid hammering the proxy with 40 simultaneous requests
+    const t = setTimeout(() => setActiveSrc(url), loadDelay);
+    return () => clearTimeout(t);
+  }, [url, loadDelay]);
+
+  const handleError = useCallback(() => {
+    // Retry up to 3 times with exponential backoff for rate-limited responses
+    if (retryCount.current < 3) {
+      retryCount.current += 1;
+      const delay = retryCount.current * 800;
+      retryTimer.current = setTimeout(() => {
+        setActiveSrc(null);
+        requestAnimationFrame(() => setActiveSrc(url));
+      }, delay);
+    } else {
+      setErrored(true);
+    }
   }, [url]);
 
-  // Hide tiles where the image completely failed to load
-  if (errored) return null;
-
+  // Don't permanently hide — show placeholder so grid layout stays intact
   return (
     <div
       onClick={onSelect}
       className={cn(
         "group relative rounded-lg overflow-hidden cursor-pointer bg-muted/30 transition-all duration-150",
         "hover:ring-2 hover:ring-primary/60 hover:ring-offset-1 hover:ring-offset-background",
-        selected && "ring-2 ring-primary ring-offset-1 ring-offset-background"
+        selected && "ring-2 ring-primary ring-offset-1 ring-offset-background",
+        errored && "opacity-40 cursor-not-allowed"
       )}
       style={{ aspectRatio: "4/3" }}
     >
@@ -272,17 +295,19 @@ function GridTile({ url, title, attribution, licence, pageUrl, selected, onSelec
         <div className="absolute inset-0 bg-muted/50 animate-pulse" />
       )}
 
-      {/* Image — loads immediately */}
-      <img
-        src={url}
-        alt={title}
-        className={cn(
-          "absolute inset-0 w-full h-full object-cover transition-opacity duration-200",
-          loaded ? "opacity-100" : "opacity-0"
-        )}
-        onLoad={() => setLoaded(true)}
-        onError={() => setErrored(true)}
-      />
+      {/* Image — staggered load with retry */}
+      {activeSrc && (
+        <img
+          src={activeSrc}
+          alt={title}
+          className={cn(
+            "absolute inset-0 w-full h-full object-cover transition-opacity duration-200",
+            loaded ? "opacity-100" : "opacity-0"
+          )}
+          onLoad={() => setLoaded(true)}
+          onError={handleError}
+        />
+      )}
 
       {/* Hover overlay — title + attribution + Use button */}
       <div className={cn(
@@ -507,6 +532,7 @@ function WikimediaSearchModal({ open, onClose, initialQuery, storyId, slotIndex,
                   onUse={() => handleUse(img)}
                   isSaving={pickImage.isPending}
                   source="wikimedia"
+                  loadDelay={i * 80}
                 />
               ))}
             </div>
@@ -651,6 +677,7 @@ function PexelsSearchModal({ open, onClose, initialQuery, storyId, slotIndex, sl
                   onUse={() => handleUse(img)}
                   isSaving={pickImage.isPending}
                   source="pexels"
+                  loadDelay={i * 80}
                 />
               ))}
             </div>
