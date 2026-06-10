@@ -362,8 +362,10 @@ export async function invokeLLM(params: InvokeParams): Promise<InvokeResult> {
     messages: messages.map(normalizeMessage),
   };
 
-  if (model) {
-    payload.model = model;
+  // Always include model — Groq requires it explicitly (unlike Manus Forge which auto-selects)
+  const resolvedModel = model || ENV.defaultLlmModel || undefined;
+  if (resolvedModel) {
+    payload.model = resolvedModel;
   }
 
   if (tools && tools.length > 0) {

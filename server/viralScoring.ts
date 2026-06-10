@@ -1,0 +1,1017 @@
+/**
+ * FlightDrama Viral Scoring Engine — v2
+ * Calibrated against 100+ real FlightDrama posts with measured engagement data.
+ *
+ * Category ranking by average engagement (from data analysis):
+ * 1. Boeing Safety + Rivalry         avg 3,777
+ * 2. Money Shock (exact figures)     avg 3,513
+ * 3. Weird Human Moments             avg 3,508
+ * 4. Celebrity + Political           avg 2,642
+ * 5. Passenger Outrage               avg 2,583
+ * 6. Safety + Accountability + Death avg 1,706
+ * 7. Pilot + Crew Pay                avg 1,378
+ * 8. Superlatives (first/last/only)  avg 1,270
+ * 9. Nostalgia + Old Aircraft        avg   638
+ * 10. Route launches (weak)          avg    12  ← 314x lower than top
+ */
+
+export type StatusLabel = "must_post" | "strong_candidate" | "maybe" | "reject";
+
+export interface ScoringResult {
+  score: number;
+  statusLabel: StatusLabel;
+  category: string;
+  viralReason: string;
+  triggers: string[];
+  /** Human-readable 1-2 sentence explanation of why this story scored the way it did. */
+  viralExplanation: string;
+}
+
+// ── Stat-performance score adjustment (free, no LLM) ─────────────────────────
+// Applied on top of the rule-based score using learned data from historical posts.
+// Loaded once per process and refreshed every 10 minutes to avoid DB hammering.
+
+let _statAdjustCache: {
+  catBoosts: Record<string, number>;   // category name → score delta
+  highKws: Set<string>;                // words in high-engagement headlines
+  lowKws: Set<string>;                 // words in low-engagement headlines
+  loadedAt: number;
+} | null = null;
+
+const STAT_CACHE_TTL_MS = 10 * 60 * 1000; // refresh every 10 minutes
+
+async function loadStatAdjustments() {
+  if (_statAdjustCache && Date.now() - _statAdjustCache.loadedAt < STAT_CACHE_TTL_MS) {
+    return _statAdjustCache;
+  }
+  try {
+    const { getAllScoringConfig } = await import("./db");
+    const config = await getAllScoringConfig();
+
+    // Parse category boosts from stat_perf_top_categories
+    const catBoosts: Record<string, number> = {};
+    const catRaw = config["stat_perf_top_categories"];
+    if (catRaw) {
+      const cats: Array<{ category: string; avgEngagement: number }> = JSON.parse(catRaw);
+      const avgEng = parseInt(config["stat_perf_avg_engagement"] ?? "0", 10);
+      if (avgEng > 0) {
+        for (const c of cats) {
+          const ratio = c.avgEngagement / avgEng;
+          // Scale: 2× avg → +10 pts, 0.5× avg → -8 pts, capped at ±15
+          const delta = Math.max(-15, Math.min(15, Math.round((ratio - 1) * 12)));
+          if (Math.abs(delta) >= 2) catBoosts[c.category.toLowerCase()] = delta;
+        }
+      }
+    }
+
+    // Parse high/low engagement keywords
+    const highKws = new Set<string>(
+      (config["stat_perf_high_keywords"] ?? "").split(", ").filter(Boolean)
+    );
+    const lowKws = new Set<string>(
+      (config["stat_perf_low_keywords"] ?? "").split(", ").filter(Boolean)
+    );
+
+    _statAdjustCache = { catBoosts, highKws, lowKws, loadedAt: Date.now() };
+    return _statAdjustCache;
+  } catch {
+    return { catBoosts: {}, highKws: new Set<string>(), lowKws: new Set<string>(), loadedAt: Date.now() };
+  }
+}
+
+/**
+ * Applies learned statistical adjustments to a rule-based score.
+ * Async because it reads from the DB (cached, refreshed every 10 min).
+ * Returns the adjusted score clamped to 0–100.
+ */
+export async function applyStatAdjustments(
+  score: number,
+  category: string,
+  title: string
+): Promise<number> {
+  try {
+    const adj = await loadStatAdjustments();
+    let delta = 0;
+
+    // Category boost/penalty
+    const catKey = category.toLowerCase();
+    for (const [cat, boost] of Object.entries(adj.catBoosts)) {
+      if (catKey.includes(cat) || cat.includes(catKey)) {
+        delta += boost;
+        break;
+      }
+    }
+
+    // Keyword boost/penalty from headline
+    const words = title.toLowerCase().match(/\b[a-z][a-z-]{2,}\b/g) ?? [];
+    for (const w of words) {
+      if (adj.highKws.has(w)) delta += 2;
+      if (adj.lowKws.has(w)) delta -= 2;
+    }
+
+    // Cap total delta at ±20 to avoid overriding the rule-based system entirely
+    delta = Math.max(-20, Math.min(20, delta));
+    return Math.max(0, Math.min(100, score + delta));
+  } catch {
+    return score; // safe fallback
+  }
+}
+
+// ─── Tier 1: Highest-impact triggers (proven 1M+ view potential) ─────────────
+
+/** Boeing safety failures, 737 MAX, 777X problems, FAA confrontations */
+const BOEING_SAFETY_KEYWORDS = [
+  "boeing 737 max", "737 max", "boeing grounded", "boeing faa", "boeing crash",
+  "boeing fault", "boeing flaw", "boeing whistleblower", "boeing investigation",
+  "boeing certification", "777x problem", "777x delay", "boeing safety",
+  "boeing unresolved", "boeing defect", "boeing penalty", "boeing lawsuit",
+  "boeing settlement", "boeing recall", "boeing probe",
+  "boeing asks faa", "boeing requests faa", "boeing waiver", "boeing exemption",
+  "boeing emissions", "boeing rules", "boeing regulations", "boeing compliance",
+  "boeing faces", "boeing under fire", "boeing blamed", "boeing at fault",
+  "boeing faces", "boeing pushes back", "boeing challenges",
+];
+
+/** Boeing + FAA combined — any story with both Boeing and FAA is high-value */
+const BOEING_FAA_COMBINED_PATTERN = /boeing.{0,100}faa|faa.{0,100}boeing/i;
+
+/** Airbus vs Boeing rivalry — proven debate driver */
+const BOEING_AIRBUS_RIVALRY_KEYWORDS = [
+  // Airbus safety/defect stories (Emirates A350 defective = 150k)
+  "airbus defect", "airbus fault", "airbus flaw", "airbus problem",
+  "airbus grounded", "airbus investigation", "airbus probe",
+  "airbus safety", "airbus recall", "airbus penalty",
+  "a350 defective", "a350 fault", "a350 problem", "a350 grounded",
+  "a380 defective", "a380 fault", "a380 problem",
+  "a320 defective", "a320 fault", "a320 problem",
+  "engine defective", "engine called defective", "called defective",
+  "engine problem", "engine issue", "engine fault",
+  "airbus faces", "airbus under fire", "airbus blamed",
+  "airbus vs boeing", "boeing vs airbus", "airbus beats boeing", "boeing loses",
+  "airbus wins", "dumps boeing", "ditches boeing", "cancels boeing",
+  "switches to airbus", "switches to boeing", "airbus order", "boeing order cancelled",
+  "boeing loses contract", "airbus extends lead", "737 max vs a320",
+  "777x vs a350", "a350 killer", "777-9 killer",
+];
+
+/** Exact death/fatality counts — highest single engagement driver */
+const FATAL_DEATH_KEYWORDS = [
+  // Pilot/crew safety under threat
+  "airstrikes", "war zone", "conflict zone", "combat zone", "military zone",
+  "near airstrikes", "fly near", "flew near", "flying near",
+  "quarantine", "quarantined", "detained", "arrested", "jailed",
+  "suspended", "grounded pilots", "pilots suspended",
+  "audited", "audit", "investigation", "probe",
+  // Passenger died / medical
+  "died while", "died on", "died after", "died during",
+  "died disembarking", "died boarding", "died on board",
+  "collapsed", "heart attack", "medical emergency",
+  "survived but", "survived the flight",
+  // Structural/safety failure
+  "defective", "defect", "faulty", "fault",
+  "engine defective", "engine faulty", "engine fault",
+  "grounded aircraft", "grounded planes", "grounded jets",
+  "airworthiness", "unairworthy", "not airworthy",
+  "damaged", "too damaged", "structurally",
+  "parts could separate", "parts may separate", "parts separating",
+  "separation", "detach", "detached", "detaching",
+  "cracks", "cracked", "cracking", "fracture", "fractured",
+  "metal debris", "debris found", "foreign object",
+  "hit the runway", "overran", "overrun", "runway excursion",
+  "clipped", "struck", "hit another", "collided with",
+  "diverted", "diversion", "emergency diversion",
+  "threw", "thrown", "flung", "hurled",
+  "turbulence", "severe turbulence", "extreme turbulence",
+  "injured", "injuries", "hurt", "hospitalised", "hospitalized",
+  "five people", "seven people", "ten people", "multiple people",
+  "without touching", "wake turbulence",
+  // Scandal / accountability
+  "fired", "dismissed", "terminated", "sacked",
+  "viral video", "cockpit video", "leaked video",
+  "whistleblower", "retaliation", "cover-up", "coverup",
+  "not guilty", "acquitted", "cleared",
+  "found guilty", "convicted", "sentenced",
+  "years after", "decade after", "anniversary",
+  "still no answer", "still no explanation", "unanswered",
+  "deadliest", "deadliest crash", "deadliest in",
+  "killed", "dead", "deaths", "fatalities", "fatal crash", "fatal flight",
+  "passengers died", "crew died", "pilot died", "people died",
+  "perished", "lost their lives", "body found", "bodies found",
+  "never found", "disappeared after", "dies mid-flight",
+  "crash", "crashed", "collision", "collided", "wreckage",
+  "no survivors", "all aboard", "death toll", "casualty", "casualties",
+  "victim", "victims", "tragedy", "tragic", "catastrophe",
+  "not qualified", "unqualified pilot", "pilot error", "crew error",
+  "not properly qualified", "improperly qualified", "lacked qualifications",
+  "fatal", "fatally", "ntsb says", "ntsb finds", "ntsb report",
+  "investigation finds", "investigation reveals", "probe finds",
+  "neither pilot", "both pilots", "crew not", "pilot not",
+];
+
+/** Death count patterns — "67 dead", "260 deaths", "all 4 aboard", "after X deaths" */
+const DEATH_COUNT_PATTERN = /\b(\d+)\s*(dead|killed|deaths|fatalities|victims|aboard|on board)\b|\ball\s+(\d+)\s+(aboard|on board|killed|dead)\b/i;
+
+// ─── Tier 2: Strong consistent performers ────────────────────────────────────
+
+/** Pilot and crew pay — consistently 1k+ reactions, 500+ comments */
+const PILOT_PAY_KEYWORDS = [
+  "pilot pay", "pilot salary", "pilot earn", "captain pay", "captain salary",
+  "captain earn", "first officer pay", "pilot wage", "pilot income",
+  "flight attendant pay", "flight attendant salary", "cabin crew pay",
+  "crew pay", "crew salary", "crew earn", "crew wage",
+  "pilots make", "captains make", "pilots earn", "captains earn",
+  "per hour", "an hour", "a year", "annually",
+  "paycheck", "pay check", "pay rise", "pay cut", "pay raise",
+  "how much", "what pilots", "what captains", "what flight attendant",
+  "reveal", "revealed", "shows paycheck", "shows pay",
+];
+
+/** Passenger outrage and unfair policy */
+const PASSENGER_OUTRAGE_KEYWORDS = [
+  // Left behind / abandoned passengers
+  "took off without", "left behind", "left passengers behind", "abandoned passengers",
+  "passengers left", "passengers stranded", "stranded passengers",
+  "without passengers", "without boarding", "boarded without",
+  // Paid premium, got nothing
+  "paid for business class", "paid for first class", "paid for premium",
+  "business class", "first class", "premium cabin", "premium seat",
+  "stuck sitting", "stuck flat", "stuck in", "couldn't sit", "couldn't recline",
+  "seat broken", "broken seat", "seat wouldn't", "seat didn't",
+  "spent hours", "14 hours", "12 hours", "10 hours", "8 hours",
+  // Fake boarding pass / security breach
+  "fake boarding pass", "fake ticket", "forged boarding",
+  "boarded without", "got on without", "snuck on",
+  "security breach", "security failure", "bypassed security",
+  // Cancelled routes / flights
+  "cancelled flights", "cancelled all flights", "cancelled routes",
+  "cancelled for the entire", "cancelled for summer", "cancelled for winter",
+  "entire summer", "entire winter", "entire season",
+  "suspended flights", "suspended routes", "suspended service",
+  "grounded by", "grounded due",
+  // Existing keywords
+  "duct-taped", "duct taped", "duct tape", "taped to seat", "tied to seat",
+  "bed bugs", "no window", "window seat no window", "window seat without a window",
+  "child goes hungry", "child went hungry", "baby goes hungry", "child starved",
+  "plus-size", "plus size", "second seat", "pay for second seat", "buy second seat",
+  "refused refund", "denied boarding", "kicked off", "removed from flight", "thrown off",
+  "dragged", "humiliated", "stranded for days", "stuck on tarmac", "left stranded",
+  "wheelchair abuse", "wheelchair fraud", "boarding abuse", "wheelchair requests",
+  "wheelchair-first", "wheelchair boarding", "wheelchair policy", "wheelchair ends",
+  "wheelchair ban", "wheelchair rule", "wheelchair scam", "wheelchair cheating",
+  "no pay until doors close", "unpaid boarding",
+  "passenger duct", "passenger taped", "passenger restrained", "passenger tied",
+  "furious", "outraged", "disgusted", "appalled", "shocking treatment",
+  "no food", "denied food", "refused food", "hungry passenger", "starving passenger",
+  "lost luggage", "luggage destroyed", "bag destroyed", "bag lost",
+  "overbooked", "bumped from flight", "involuntary denied",
+  "seat sold twice", "double booked", "wrong seat",
+  "window seat", "no window seat",
+];
+
+/** Policy controversy — unfair or shocking rules */
+const POLICY_CONTROVERSY_KEYWORDS = [
+  "banned for life", "banned him", "banned her", "banned passenger",
+  "policy change", "new rule", "new policy", "ends free", "removes free",
+  "now charges", "will charge", "must pay", "required to pay",
+  "no longer free", "cuts free", "scraps free",
+  "whistleblower", "retaliation", "fired for reporting",
+];
+
+/** Money shock — exact large figures drive engagement */
+const MONEY_EXACT_KEYWORDS = [
+  "billion", "million", "\\$[0-9]", "£[0-9]", "€[0-9]",
+  "revenue", "profit", "net income", "loss", "losses",
+  "compensation", "settlement", "lawsuit", "suing for",
+  "pays out", "awarded", "fine", "penalty",
+  // Value-collapse / contradiction money signals
+  "break even", "break-even", "couldn't profit", "never profitable",
+  "barely profited", "still losing", "still in the red",
+  "cost overrun", "over budget", "billions over",
+];
+
+/** Exact money pattern — "$54.6 billion", "€338,282", "$200,000" */
+const MONEY_AMOUNT_PATTERN = /[\$£€]\s*[\d,]+(\.\d+)?\s*(billion|million|thousand|k\b)?/i;
+
+// ─── Tier 3: Reliable mid-range performers ───────────────────────────────────
+
+/** NTSB, FAA, court, official accountability */
+const AUTHORITY_KEYWORDS = [
+  "ntsb", "faa", "easa", "caa", "dot ", "department of transport",
+  "court filing", "lawsuit", "sued", "suing", "legal action",
+  "investigation", "probe", "inquiry", "ruling", "verdict",
+  "grounded by", "banned by", "fined by", "penalised",
+  "official report", "safety board", "air accident",
+];
+
+/** Celebrity or famous person involvement */
+const CELEBRITY_KEYWORDS = [
+  "gayle king", "elon musk", "trump", "taylor swift", "king charles",
+  "prince", "princess", "president", "prime minister", "billionaire",
+  "celebrity", "famous", "star passenger", "footballer", "striker",
+  "athlete", "actor", "politician", "royal family",
+];
+
+/** Superlatives — first, last, only, biggest, fastest, longest */
+const SUPERLATIVE_KEYWORDS = [
+  "first time", "first ever", "first u.s.", "first american", "first airline",
+  "last flight", "final flight", "last ever", "last remaining", "final ever",
+  "only airline", "only jet", "only aircraft", "only operator",
+  "biggest", "largest", "fastest", "longest", "highest", "oldest",
+  "never before", "record-breaking", "world record", "history made",
+  "milestone", "first in history", "last in history",
+  // Route superlatives — first transatlantic, world's longest, etc.
+  "first transatlantic", "first transpacific", "first nonstop", "first direct",
+  "world's longest", "world's first", "longest nonstop", "longest flight",
+  // Network/carrier milestones — "longest flight in its network history", "longest domestic route"
+  "network history", "in its history", "in the airline's history", "in carrier history",
+  "longest domestic", "longest ever", "longest route ever",
+];
+
+/** Old aircraft, nostalgia, finality — also catches "last" in title */
+const NOSTALGIA_KEYWORDS = [
+  "a380", "747", "747-400", "747-8", "747-100", "jumbo jet",
+  "a340", "md-11", "dc-10", "dc-8", "dc-9", "727", "707",
+  "concorde", "l-1011", "tristar", "lockheed",
+  "still flying", "oldest jet", "oldest aircraft", "built in 19",
+  "final flight", "last flight", "farewell flight", "retirement",
+  "retires", "retired", "heading to the desert", "scrapped",
+  "museum", "preserved", "classic jet", "vintage aircraft",
+  "dc-3", "dc-4", "dc-6", "dc-7", "dc-8", "dc-9", "dc-10", "md-11", "md-80", "md-90",
+  "l-1011", "tristar", "concorde", "tu-144", "comet",
+  "vintage aircraft", "vintage plane", "vintage jet", "vintage airliner",
+  "warbird", "classic airliner", "historic aircraft", "historic plane",
+  // A380 / programme-level nostalgia: '251 deliveries later', 'couldn't break even'
+  "deliveries later", "couldn't break even", "still couldn't", "never broke even",
+  "the last ", "its final", "her final", "his final",
+  "last flight", "final landing", "farewell flight", "retirement flight",
+  "oldest aircraft", "oldest plane", "oldest jet", "oldest airline",
+  "built in 19", "built in 20", "years old aircraft", "year old aircraft",
+];
+
+/** Weird human moments — unpredictable but can hit 5M+ */
+const WEIRD_HUMAN_KEYWORDS = [
+  "eats passport", "ate passport", "eating passport", "eating his passport", "eating her passport",
+  "eating his own passport", "eating her own passport", "eats his passport", "eats her passport",
+  "man eats", "woman eats", "passenger eats", "man ate", "woman ate", "passenger ate",
+  "eating own passport", "ate his passport", "ate her passport",
+  "farting", "fart", "flatulence", "smells", "body odour", "body odor",
+  "baby born", "born on board", "born mid-flight", "gives birth", "gave birth", "born during",
+  "puppy", "dog on flight", "animal on board", "cat on board", "pet on flight",
+  "cannabis", "cannabis sweets", "drugs on board", "cocaine", "heroin", "smuggling drugs",
+  "drunk passenger", "intoxicated passenger", "drunk pilot", "drunk crew",
+  "naked", "streaker", "stowaway", "stowaways",
+  "snakes", "live snakes", "smuggled", "live animals", "live reptiles",
+  "captain faints", "pilot faints", "pilot loses consciousness", "pilot unconscious",
+  "copilot loses consciousness", "copilot unconscious",
+  "atc meltdown", "atc audio", "live atc", "air traffic control meltdown",
+  "bizarre", "strange passenger", "unusual passenger", "odd passenger",
+  "fight on board", "brawl on board", "passenger fight", "passenger brawl",
+  "passenger arrested", "passenger handcuffed", "passenger detained",
+  "opens emergency exit", "opened emergency door", "opened exit door",
+  "slides deployed", "evacuation slide",
+  "passenger strips", "passenger undresses",
+];
+
+/** Safety incidents — emergency, mayday, engine failure */
+const SAFETY_INCIDENT_KEYWORDS = [
+  "mayday", "emergency declared", "engine failure", "engine fire",
+  "engine shut down", "engine flame", "engine detached",
+  "cockpit window crack", "windshield crack", "windshield shatter",
+  "oxygen masks deploy", "oxygen masks dropped", "decompression",
+  "runway incursion", "wrong runway", "taxiway takeoff", "took off from taxiway",
+  "near miss", "near collision", "close call",
+  "bird strike", "hydraulic failure", "landing gear failure",
+  "smoke in cabin", "fire on board", "diverted after",
+  "emergency landing", "forced landing",
+  "maintenance issues", "unresolved maintenance", "maintenance problems",
+  "attacking crew", "attacked crew", "assaulted crew", "assault on crew",
+  "crew assault", "passenger attack", "passenger attacks",
+];
+
+/** Child or family involved — emotional multiplier */
+const CHILD_FAMILY_KEYWORDS = [
+  "child", "children", "baby", "infant", "toddler",
+  "family", "mother", "father", "parent", "parents",
+  "goes hungry", "went hungry", "denied food", "no food",
+  "43 children", "kids", "young passenger",
+];
+
+/** Mystery, unsolved tragedy, historical drama */
+const MYSTERY_TRAGEDY_KEYWORDS = [
+  "mh370", "malaysia airlines 370", "missing plane", "disappeared",
+  "never found", "unsolved", "mystery", "still searching",
+  "hijacked", "hijacking", "voicemail", "final call",
+  "last words", "last message", "9/11", "world trade center",
+  "lockerbie", "tenerife", "disaster",
+];
+
+/**
+ * "I didn't know that" aviation facts — evergreen, highly shareable
+ * These work when the fact is simple, visual, and surprising.
+ * Examples: "The oxygen masks are not meant to keep you alive for long"
+ *           "The 777's engines are massive because two had to do the job of four"
+ */
+const AVIATION_FACT_KEYWORDS = [
+  "why ", "how ", "the reason", "the truth about", "you didn't know",
+  "most people don't know", "here's why", "this is why", "that's why",
+  "not meant to", "not designed to", "not actually", "never actually",
+  "the real reason", "the secret", "the hidden", "the surprising",
+  "did you know", "fact:", "myth:", "explained",
+  "how pilots", "what pilots", "why pilots", "how airlines", "what airlines",
+  "how planes", "what planes", "why planes", "how aircraft",
+  "oxygen mask", "oxygen masks", "black box", "flight recorder",
+  "autopilot", "turbulence", "contrails", "chemtrails",
+  "brace position", "emergency exit", "life vest",
+  "cockpit", "flight deck", "altimeter", "transponder",
+  "etops", "twin engine", "four engine", "quadjet",
+  "thrust", "lift", "drag", "stall speed",
+  // Explanatory connectors — only specific compound phrases, not bare 'because'
+  // Bare 'because' caused false boosts on weak stories like 'JetBlue adds route because demand is high'
+  "the reason why", "here is why", "this is how",
+  "massive because", "huge because", "enormous because", "wide because",
+  "never worked", "doesn't work", "can't work", "won't work",
+  "almost gone", "nearly gone", "disappearing", "dying out",
+  // NOTE: 'still flying' removed here — it is already in NOSTALGIA_KEYWORDS
+  // Adding it here caused double-counting on nostalgia stories
+];
+
+/** Contradiction / value-collapse patterns — "made billions but barely profited", "sold window seat with no window" */
+const CONTRADICTION_PATTERN = /(once|was|were|used\s+to\s+be|originally|formerly|new|brand.?new)\s.{0,60}(now|today|currently|but\s+now|but\s+today)|(\$[\d,.]+[mb]?|[\d,.]+\s*(million|billion)).{0,80}(\$[\d,.]+[mb]?|[\d,.]+\s*(million|billion))|(safest|best|top|world.?class|award.?winning).{0,60}(worst|failed|banned|grounded|crashed|sued|scandal)|(sold|bought|purchased|listed).{0,40}(million|billion|thousand).{0,40}(million|billion|thousand)/i;
+
+/**
+ * Industry-scale crisis / systemic failure — "900 planes grounded", "global engine crisis"
+ * These score high because the scale is shocking and affects everyone.
+ */
+const INDUSTRY_CRISIS_KEYWORDS = [
+  "global engine crisis", "engine crisis", "engine shortage",
+  "grounded fleet", "entire fleet grounded", "mass grounding", "widespread grounding",
+  "hundreds of aircraft", "hundreds of planes", "hundreds of jets",
+  "sitting idle", "parked", "stored in desert", "mothballed",
+  "supply chain crisis", "parts shortage", "maintenance backlog",
+  "pilot shortage", "crew shortage", "staffing crisis",
+  "air traffic control failure", "atc outage", "radar failure",
+  "system failure", "system outage", "it outage", "it failure",
+  "cancelled flights", "mass cancellations", "thousands of flights",
+];
+
+/**
+ * Irony / contradiction punchline — "finally did X, but Y", "promised X, delivered Y"
+ * Pattern: "ADDED X, BUT CANT Y", "LAUNCHED X, THEN Y", "X, BUT PASSENGERS STILL CANT"
+ * These drive debate and sharing because they feel unfair or absurd.
+ */
+const IRONY_PUNCHLINE_PATTERN = /\b(finally|at last|after\s+\d+\s+years?|after\s+years?).{0,80}(but|however|yet|still|except|only to|turns out)/i;
+const IRONY_TITLE_PATTERN = /,\s*(but|however|yet|still|except|turns out|only to)\b|\bbut.{0,50}(still|never|cant|cannot|wont|refused|failed|collapsed|turned around|went wrong)/i;
+
+/**
+ * Salary / pay controversy — cabin crew, pilot pay debates
+ * "Emirates cabin crew salaries have gone viral" = 108k views
+ * "Delta reopened applications for most competitive job" = 310k views
+ */
+const SALARY_DEBATE_KEYWORDS = [
+  "salary", "salaries", "gone viral", "people can't agree", "people cant agree",
+  "debate", "arguing", "divided", "sparked debate", "sparked outrage",
+  "most competitive", "competitive job", "coveted job", "dream job",
+  "applications open", "hiring again", "applications reopened",
+  "cabin crew salary", "cabin crew pay", "flight attendant salary",
+  "pilot applications", "pilot hiring", "pilot recruitment",
+  // Career-ending / viral pilot story
+  "cost him his career", "cost her his career", "ended his career", "ended her career",
+  "fired after viral", "fired over viral", "fired for viral", "fired following viral",
+  "may have cost", "could have cost", "ruined his career", "ruined her career",
+];
+
+/**
+ * Systemic failure / scandal — airline caught doing something wrong at scale
+ * "SWISS breaking up jets", "777X flying but no passengers", "A350 looks fine but damaged"
+ */
+const SYSTEMIC_FAILURE_KEYWORDS = [
+  "breaking up", "cannibalising", "cannibalizing", "stripping for parts",
+  "grounded indefinitely", "still grounded", "never flew", "never entered service",
+  "looks fine", "appears fine", "looks normal", "appears normal",
+  "hidden damage", "invisible damage", "undetectable", "can't be seen",
+  "still no passengers", "no passengers yet", "passengers still can't",
+  "still hasn't", "still can't", "still won't", "still not",
+  "seven years", "five years", "years of delays", "years of problems",
+  "most tested", "most scrutinised", "most delayed",
+  // Pre-service order irony — "ordered more before it even entered service"
+  "before the aircraft even", "before it even enters", "before entering service",
+  "before a single passenger", "before carrying a single",
+];
+
+/**
+ * Comeback / return story — airline returns after years, route revived
+ * "SAS returned to India after 17 years" = 70k views
+ * "Delta returning to Hong Kong after 7 years" = 21k
+ * "Delta returning to LA-Vancouver after 7 years" = 16.7k
+ * High when combined with drama (first flight turned around)
+ */
+const COMEBACK_KEYWORDS = [
+  "after \\d+ years", "returns after", "returned after", "back after",
+  "first time since", "first flight since", "resumes", "resumed",
+  "comeback", "returning to", "returns to", "back to",
+];
+
+/**
+ * Viral debate / opinion story — "should X be allowed", "people are arguing"
+ * "Should airline pilots be allowed to fly until 67?" = 55k views
+ * "Paul Rudd says airplane mode is nonsense" = 22k
+ */
+const VIRAL_DEBATE_KEYWORDS = [
+  "should ", "is it right", "is it fair", "people are arguing", "fans are arguing",
+  "divided opinion", "sparks debate", "sparked debate", "controversial",
+  "people disagree", "people cant agree", "people can't agree",
+  "do you think", "would you", "what do you think",
+];
+
+/** Weak story patterns — route launches, generic corporate */
+const WEAK_STORY_KEYWORDS = [
+  "new route", "route launch", "launches flights to", "adds flights to",
+  "new service to", "begins service to", "starts flying to",
+  "new nonstop", "adds nonstop", "new daily flight",
+  "codeshare", "alliance", "partnership announced",
+  "terminal opens", "terminal expansion", "airport expansion",
+  "fleet order", "orders aircraft", "signs deal for",
+  "quarterly results", "annual report", "earnings call",
+  "ceo appointed", "new ceo", "leadership change",
+];
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function countMatches(text: string, keywords: string[]): number {
+  const lower = text.toLowerCase();
+  return keywords.filter((kw) => lower.includes(kw.toLowerCase())).length;
+}
+
+function getMatchedKeywords(text: string, keywords: string[]): string[] {
+  const lower = text.toLowerCase();
+  return keywords.filter((kw) => lower.includes(kw.toLowerCase()));
+}
+
+function hasPattern(text: string, pattern: RegExp): boolean {
+  return pattern.test(text);
+}
+
+// ─── Main scoring function ────────────────────────────────────────────────────
+
+export function scoreStory(title: string, content: string): ScoringResult {
+  const fullText = `${title} ${content}`;
+  const titleLower = title.toLowerCase();
+  const triggers: string[] = [];
+  let score = 20; // baseline
+
+  // ── Tier 1: Boeing safety + rivalry (avg 3,777 engagement) ──────────────
+  const boeingSafetyMatches = getMatchedKeywords(fullText, BOEING_SAFETY_KEYWORDS);
+  const boeingRivalryMatches = getMatchedKeywords(fullText, BOEING_AIRBUS_RIVALRY_KEYWORDS);
+  const hasBoeingFaaCombined = BOEING_FAA_COMBINED_PATTERN.test(fullText);
+
+  if (boeingSafetyMatches.length >= 2 || hasBoeingFaaCombined) {
+    score += 40;
+    triggers.push(`Boeing safety crisis: ${boeingSafetyMatches.slice(0, 2).join(", ") || "Boeing + FAA confrontation"}`);
+  } else if (boeingSafetyMatches.length === 1) {
+    score += 28;
+    triggers.push(`Boeing safety: ${boeingSafetyMatches[0]}`);
+  }
+
+  if (boeingRivalryMatches.length >= 1) {
+    score += 22;
+    triggers.push(`Boeing vs Airbus rivalry: ${boeingRivalryMatches[0]}`);
+  }
+
+  // ── Tier 1: Death count (proven 1M+ driver) ──────────────────────────────
+  const fatalMatches = getMatchedKeywords(fullText, FATAL_DEATH_KEYWORDS);
+  const hasDeathCount = hasPattern(fullText, DEATH_COUNT_PATTERN);
+
+  if (hasDeathCount && fatalMatches.length >= 2) {
+    score += 45;
+    triggers.push("Specific death count + fatal crash — highest engagement driver");
+  } else if (hasDeathCount) {
+    score += 35;
+    triggers.push("Specific death count mentioned");
+  } else if (fatalMatches.length >= 3) {
+    score += 30;
+    triggers.push("Fatal crash or multiple death references");
+  } else if (fatalMatches.length >= 2) {
+    score += 22;
+    triggers.push("Fatal crash or death references");
+  } else if (fatalMatches.length === 1) {
+    score += 14;
+    triggers.push(`Death/fatality reference: ${fatalMatches[0]}`);
+  }
+
+  // ── Tier 2: Money shock with exact figure (avg 3,513 engagement) ─────────
+  const hasExactMoney = hasPattern(fullText, MONEY_AMOUNT_PATTERN);
+  const moneyMatches = getMatchedKeywords(fullText, MONEY_EXACT_KEYWORDS);
+
+  if (hasExactMoney && moneyMatches.length >= 2) {
+    score += 35;
+    triggers.push("Exact money figure + financial context — strong engagement driver");
+  } else if (hasExactMoney) {
+    score += 25;
+    triggers.push("Exact money figure in story");
+  } else if (moneyMatches.length >= 2) {
+    score += 15;
+    triggers.push("Financial angle");
+  } else if (moneyMatches.length === 1) {
+    score += 8;
+    triggers.push("Financial element");
+  }
+
+  // ── Tier 2: Weird human moments (avg 3,508 engagement, ceiling 5.5M) ─────
+  const weirdMatches = getMatchedKeywords(fullText, WEIRD_HUMAN_KEYWORDS);
+  if (weirdMatches.length >= 2) {
+    score += 50;
+    triggers.push(`Weird human moment: ${weirdMatches.slice(0, 2).join(", ")}`);
+  } else if (weirdMatches.length === 1) {
+    score += 40;
+    triggers.push(`Weird human moment: ${weirdMatches[0]}`);
+  }
+
+  // ── Tier 2: Celebrity involvement (avg 2,642 engagement, ceiling 3M) ─────
+  const celebMatches = getMatchedKeywords(fullText, CELEBRITY_KEYWORDS);
+  if (celebMatches.length >= 1) {
+    score += 28;
+    triggers.push(`Celebrity/public figure: ${celebMatches[0]}`);
+  }
+
+  // ── Tier 2: Passenger outrage (avg 2,583 engagement) ─────────────────────
+  const outrageMatches = getMatchedKeywords(fullText, PASSENGER_OUTRAGE_KEYWORDS);
+  const policyMatches = getMatchedKeywords(fullText, POLICY_CONTROVERSY_KEYWORDS);
+
+  const hasAbuseKeyword = /\b(abuse|abused|abusing|years of abuse|widespread abuse)\b/i.test(fullText);
+
+  if (outrageMatches.length >= 2) {
+    score += 42;
+    triggers.push(`Strong passenger outrage: ${outrageMatches.slice(0, 2).join(", ")}`);
+  } else if (outrageMatches.length === 1) {
+    score += 30;
+    triggers.push(`Passenger outrage: ${outrageMatches[0]}`);
+  }
+
+  if (policyMatches.length >= 1) {
+    score += 22;
+    triggers.push(`Policy controversy: ${policyMatches[0]}`);
+  }
+
+  // Abuse + policy combo — e.g. wheelchair abuse + ends policy = very high engagement
+  if (hasAbuseKeyword && (outrageMatches.length >= 1 || policyMatches.length >= 1)) {
+    score += 18;
+    triggers.push("Abuse + policy change combo — proven high engagement");
+  }
+
+  // ── Tier 3: Safety + accountability (avg 1,706 engagement) ───────────────
+  const authorityMatches = getMatchedKeywords(fullText, AUTHORITY_KEYWORDS);
+  if (authorityMatches.length >= 2) {
+    score += 22;
+    triggers.push(`Official action: ${authorityMatches.slice(0, 2).join(", ")}`);
+  } else if (authorityMatches.length === 1) {
+    score += 14;
+    triggers.push(`Official action: ${authorityMatches[0]}`);
+  }
+
+  const safetyMatches = getMatchedKeywords(fullText, SAFETY_INCIDENT_KEYWORDS);
+  if (safetyMatches.length >= 3) {
+    score += 20;
+    triggers.push(`High-consequence safety incident: ${safetyMatches.slice(0, 2).join(", ")}`);
+  } else if (safetyMatches.length >= 1) {
+    score += 12;
+    triggers.push(`Safety incident: ${safetyMatches[0]}`);
+  }
+
+  // ── Tier 3: Pilot/crew pay (avg 1,378 engagement) ────────────────────────
+  const pilotPayMatches = getMatchedKeywords(fullText, PILOT_PAY_KEYWORDS);
+  if (pilotPayMatches.length >= 3) {
+    score += 30;
+    triggers.push("Pilot/crew pay story with specific figures");
+  } else if (pilotPayMatches.length >= 2) {
+    score += 24;
+    triggers.push("Pilot/crew pay story with figures");
+  } else if (pilotPayMatches.length === 1) {
+    score += 16;
+    triggers.push("Pilot or crew pay story");
+  }
+
+  // ── Tier 3: Superlatives (avg 1,270 engagement) ──────────────────────────
+  const superlativeMatches = getMatchedKeywords(fullText, SUPERLATIVE_KEYWORDS);
+  if (superlativeMatches.length >= 2) {
+    score += 20;
+    triggers.push(`Strong superlative angle: ${superlativeMatches.slice(0, 2).join(", ")}`);
+  } else if (superlativeMatches.length === 1) {
+    score += 12;
+    triggers.push(`Superlative: ${superlativeMatches[0]}`);
+  }
+
+  // ── Tier 4: Nostalgia + old aircraft (avg 638 engagement) ────────────────
+  // Data calibration: Last DC-8 = 413k views, Delta oldest jet = 330k,
+  // Korean Air 747 return = 4.5k reactions, A380 break-even = 688k views.
+  // Nostalgia is category 4 per FlightDrama formula — raised from under-weighted tier.
+  const nostalgiaMatches = getMatchedKeywords(fullText, NOSTALGIA_KEYWORDS);
+  if (nostalgiaMatches.length >= 3) {
+    score += 32;
+    triggers.push(`Strong nostalgia: ${nostalgiaMatches.slice(0, 3).join(", ")}`);
+  } else if (nostalgiaMatches.length >= 2) {
+    score += 26;
+    triggers.push(`Nostalgia: ${nostalgiaMatches.slice(0, 2).join(", ")}`);
+  } else if (nostalgiaMatches.length === 1) {
+    score += 18;
+    triggers.push(`Nostalgia: ${nostalgiaMatches[0]}`);
+  }
+
+  // ── Bonus: Nostalgia + crash combo (old aircraft crash = proven high engagement) ──
+  const hasCrashOrFatal = fatalMatches.length >= 1 || hasDeathCount;
+  if (nostalgiaMatches.length >= 1 && hasCrashOrFatal) {
+    score += 8;
+    triggers.push("Old aircraft crash — nostalgia + tragedy combo");
+  }
+
+  // ── Bonus: Child or family involved ──────────────────────────────────────
+  const childMatches = getMatchedKeywords(fullText, CHILD_FAMILY_KEYWORDS);
+  if (childMatches.length >= 2) {
+    score += 12;
+    triggers.push("Child or family involved — emotional multiplier");
+  } else if (childMatches.length === 1) {
+    score += 6;
+    triggers.push("Family/child element");
+  }
+
+  // ── Bonus: Mystery or unsolved tragedy ───────────────────────────────────
+  const mysteryMatches = getMatchedKeywords(fullText, MYSTERY_TRAGEDY_KEYWORDS);
+  if (mysteryMatches.length >= 1) {
+    score += 15;
+    triggers.push(`Mystery/tragedy angle: ${mysteryMatches[0]}`);
+  }
+
+  // ── Bonus: "I didn't know that" aviation facts (evergreen, highly shareable) ────
+  // Title must start with "Why", "How", "The reason", etc. AND mention a specific aircraft/system
+  const factKeywordsInTitle = getMatchedKeywords(title, AVIATION_FACT_KEYWORDS);
+  const hasNamedAircraftInTitle = /\b(777|787|747|a380|a350|a321|737|a320|dc-8|dc-10|md-11|concorde|airbus|boeing)\b/i.test(title);
+  if (factKeywordsInTitle.length >= 1 && hasNamedAircraftInTitle) {
+    score += 38;
+    triggers.push(`Aviation fact: ${factKeywordsInTitle[0]} + named aircraft`);
+  } else if (factKeywordsInTitle.length >= 2) {
+    // Strong explanatory headline even without named aircraft
+    score += 35;
+    triggers.push(`Aviation explainer: ${factKeywordsInTitle.slice(0, 2).join(", ")}`);
+  } else if (factKeywordsInTitle.length >= 1) {
+    // Single fact keyword in title — mild boost only
+    score += 12;
+    triggers.push(`Aviation explainer: ${factKeywordsInTitle[0]}`);
+  }
+
+  // ── Bonus: Contradiction / value-collapse ("once $400M, now $21M") ─────────────
+  const hasContradiction = CONTRADICTION_PATTERN.test(fullText);
+  if (hasContradiction && (nostalgiaMatches.length >= 1 || moneyMatches.length >= 1)) {
+    score += 18;
+    triggers.push("Contradiction/value-collapse angle — strong engagement driver");
+  } else if (hasContradiction) {
+    score += 10;
+    triggers.push("Contradiction angle");
+  }
+
+  // ── Bonus: Named aircraft + safety failure combo (Air India 787 with faults) ────
+  // Formula: death/injury + official failure + named aircraft + consequence
+  const hasNamedAircraft = /\b(777|787|747|a380|a350|a321|a320|737|a340|a330|a220|dc-8|dc-10|md-11|concorde|dreamliner|jumbo)\b/i.test(fullText);
+  if (hasNamedAircraft && safetyMatches.length >= 1 && authorityMatches.length >= 1) {
+    score += 15;
+    triggers.push("Named aircraft + safety failure + official action — proven formula");
+  } else if (hasNamedAircraft && (safetyMatches.length >= 2 || (safetyMatches.length >= 1 && fatalMatches.length >= 1))) {
+    score += 10;
+    triggers.push("Named aircraft + safety incident");
+  }
+
+  // ── Bonus: Exact numbers in title (specificity = credibility = shares) ───
+  const numberInTitle = /\b\d[\d,]*(\.\d+)?\s*(million|billion|thousand|k\b|%|mph|km|ft|hours?|minutes?|years?|days?|passengers?|jobs?|aircraft|jets?|planes?|seats?|routes?|flights?|pilots?|crew)?\b/i.test(title);
+  if (numberInTitle) {
+    score += 6;
+    triggers.push("Specific number in headline");
+  }
+
+  // ── Bonus: Industry-scale crisis (900 planes grounded, global engine crisis) ──────
+  const industryCrisisMatches = getMatchedKeywords(fullText, INDUSTRY_CRISIS_KEYWORDS);
+  if (industryCrisisMatches.length >= 2) {
+    score += 38;
+    triggers.push(`Industry-scale crisis: ${industryCrisisMatches.slice(0, 2).join(", ")}`);
+  } else if (industryCrisisMatches.length === 1) {
+    score += 22;
+    triggers.push(`Industry crisis: ${industryCrisisMatches[0]}`);
+  }
+
+  // ── Bonus: Irony / punchline contradiction ("finally added X, but can't use it") ──
+  const hasIronyPunchline = IRONY_PUNCHLINE_PATTERN.test(fullText) || IRONY_TITLE_PATTERN.test(title);
+  if (hasIronyPunchline) {
+    score += 36;
+    triggers.push("Irony/punchline structure — promised X, delivered Y");
+  }
+
+  // ── Bonus: Salary debate / viral pay story ────────────────────────────────────────
+  const salaryDebateMatches = getMatchedKeywords(fullText, SALARY_DEBATE_KEYWORDS);
+  if (salaryDebateMatches.length >= 2) {
+    score += 40;
+    triggers.push(`Viral salary/job debate: ${salaryDebateMatches.slice(0, 2).join(", ")}`);
+  } else if (salaryDebateMatches.length === 1) {
+    score += 24;
+    triggers.push(`Salary/job story: ${salaryDebateMatches[0]}`);
+  }
+
+  // ── Bonus: Systemic failure / hidden damage / years of delays ────────────────────
+  const systemicFailureMatches = getMatchedKeywords(fullText, SYSTEMIC_FAILURE_KEYWORDS);
+  if (systemicFailureMatches.length >= 2) {
+    score += 42;
+    triggers.push(`Systemic failure: ${systemicFailureMatches.slice(0, 2).join(", ")}`);
+  } else if (systemicFailureMatches.length === 1) {
+    score += 26;
+    triggers.push(`Systemic failure: ${systemicFailureMatches[0]}`);
+  }
+
+  // ── Bonus: Comeback / return after years ─────────────────────────────────────────
+  // "SAS returned to India after 17 years, first flight turned around" = 70k
+  const comebackPattern = /\b(after\s+\d+\s+years?|returns?\s+after|returned\s+after|back\s+after|first\s+time\s+since|resumes?|resumed)\b/i;
+  const hasComebackAngle = comebackPattern.test(fullText);
+  if (hasComebackAngle) {
+    score += 18;
+    triggers.push("Comeback/return story — airline or route returns after years");
+  }
+
+  // ── Bonus: Viral debate / opinion angle ("should pilots fly until 67?") ──────────
+  const viralDebateMatches = getMatchedKeywords(fullText, VIRAL_DEBATE_KEYWORDS);
+  if (viralDebateMatches.length >= 2) {
+    score += 25;
+    triggers.push(`Viral debate angle: ${viralDebateMatches.slice(0, 2).join(", ")}`);
+  } else if (viralDebateMatches.length === 1) {
+    score += 14;
+    triggers.push(`Debate/opinion angle: ${viralDebateMatches[0]}`);
+  }
+
+  // ── Penalty: Weak story types ─────────────────────────────────────────────
+  // ── Bonus: Historic / huge / unusual route launch ─────────────────────────────────
+  // FlightDrama formula rule 7: route launches work ONLY when historic, huge, or unusual.
+  // Data: Emirates Denver (2.1k), Alaska transatlantic (1k), World's longest (2.8k),
+  //       United SF-Tahiti (300k), Korean Air 747 return (4.5k), Iberia Madrid-Dallas (1.9k)
+  // ── Bonus: "Loves to hate" / underdog / surprise ranking story ─────────────────────
+  // "The airline everyone loves to hate now owns 620 Boeing 737s debt-free" = 280k
+  // "The airport everyone complained about last year is now beating JFK" = 91k
+  const lovesToHatePattern = /\b(everyone\s+(loves\s+to\s+hate|hates|complained\s+about|criticized|criticised)|most\s+(hated|complained|criticized)|airline\s+everyone|airport\s+everyone)\b/i;
+  const surpriseRankingPattern = /\b(now\s+(beating|outperforming|ahead\s+of|surpassing|overtaking|overtaken|largest|biggest|first)|officially\s+(overtaken|surpassed|become|is\s+now)|has\s+(overtaken|surpassed|become\s+the\s+largest|become\s+the\s+biggest))\b/i;
+  if (lovesToHatePattern.test(fullText) || surpriseRankingPattern.test(fullText)) {
+    score += 32;
+    triggers.push("Surprise ranking / underdog story — loves to hate or unexpected leader");
+  }
+
+  // ── Bonus: Fleet order irony — ordered more before first delivery ("Air China increased A350 order before it enters service") ──
+  const fleetOrderIronyPattern = /\b(increased?|expanded?|doubled?|added\s+more|ordered\s+more|boosted?).{0,60}(order|orders|fleet).{0,60}(before|even\s+before|despite|without).{0,60}(enter|service|delivery|delivered|flies?|flying|passengers?)\b/i;
+  const preServiceOrderPattern = /\b(before.{0,30}(enters?\s+service|first\s+delivery|even\s+enters|even\s+flies?|first\s+passenger)|increased?.{0,40}order.{0,40}before)\b/i;
+  if (fleetOrderIronyPattern.test(fullText) || preServiceOrderPattern.test(fullText)) {
+    score += 20;
+    triggers.push("Fleet order irony — ordered more before first delivery/service");
+  }
+
+  // ── Bonus: Debt-free / ownership milestone ("owns 620 737s debt-free") ──────────────
+  const ownershipMilestonePattern = /\b(debt.?free|owns\s+\d+|owns\s+over|owns\s+more\s+than|fleet\s+of\s+\d+|\d+\s+(aircraft|planes|jets|737s|a320s|airbus|boeing)\s+(debt.?free|outright|fully\s+owned))\b/i;
+  if (ownershipMilestonePattern.test(fullText)) {
+    score += 20;
+    triggers.push("Ownership milestone — debt-free fleet or large ownership number");
+  }
+
+  const HISTORIC_ROUTE_SIGNALS = [
+    "world's longest", "world's first", "longest flight", "longest nonstop",
+    "first transatlantic", "first nonstop", "first direct", "first ever",
+    "nonstop from", "nonstop to", "direct from", "direct to",
+    "returns to", "brings back", "revives", "resumes",
+    "dreamliner", "787", "a380", "747", "a350",
+    // Big-name airlines to exotic/unusual destinations = notable
+    "dubai", "tahiti", "north pole", "antarctica",
+    "emirates", "qatar airways", "singapore airlines", "etihad",
+    "overnight", "transatlantic", "transpacific", "ultra-long",
+    // Plain 'nonstop' counts as a signal — 'nonstop Emirates flights' should qualify
+    "nonstop",
+  ];
+  const historicRouteMatches = getMatchedKeywords(fullText, HISTORIC_ROUTE_SIGNALS);
+  // Broad route launch detection: catches all patterns including 'launches new overnight flights',
+  // 'could soon get nonstop', 'teases first transatlantic', 'brings back', 'returns on', etc.
+  const isRouteLaunch = /\b(launch(?:es)?|debut(?:s)?|add(?:s)?|start(?:s)?|begin(?:s)?|open(?:s)?|introduce(?:s)?|unveil(?:s)?|tease(?:s)?|announce(?:s)?|confirm(?:s)?|reveal(?:s)?).{0,80}(route|flights?|service|nonstop|direct|transatlantic|transpacific)\b/i.test(fullText)
+    || /\b(returns?|brings?\s+back|revives?|resumes?).{0,40}(route|flight|service|on\s+the)\b/i.test(fullText)
+    || /\b(nonstop|direct).{0,40}(from|to|between|flights?|service)\b/i.test(fullText)
+    || /\b(could\s+soon|will\s+soon|set\s+to).{0,40}(get|receive|have|launch|start).{0,40}(flight|route|nonstop|direct)\b/i.test(fullText)
+    || /\b(world.?s\s+longest|first\s+transatlantic|first\s+nonstop|first\s+direct)\b/i.test(fullText);
+
+  if (isRouteLaunch && historicRouteMatches.length >= 3) {
+    score += 36;
+    triggers.push(`Historic/unusual route launch: ${historicRouteMatches.slice(0, 2).join(", ")}`);
+  } else if (isRouteLaunch && historicRouteMatches.length >= 2) {
+    score += 22;
+    triggers.push(`Notable route launch: ${historicRouteMatches.slice(0, 2).join(", ")}`);
+  } else if (isRouteLaunch && historicRouteMatches.length >= 1) {
+    score += 16;
+    triggers.push(`Route launch with notable element: ${historicRouteMatches[0]}`);
+  }
+
+  // Extra milestone bonus: 'first transatlantic', 'world's longest', 'first nonstop' in title
+  // These are genuine aviation milestones that always get traction regardless of other signals
+  const hasMilestoneInTitle = /\b(first\s+transatlantic|first\s+transpacific|world.?s\s+longest|first\s+nonstop\s+to|first\s+direct\s+to)\b/i.test(title);
+  if (hasMilestoneInTitle) {
+    score += 14;
+    triggers.push("Aviation milestone in headline — first/longest route");
+  }
+
+  const weakMatches = getMatchedKeywords(fullText, WEAK_STORY_KEYWORDS);
+  const hasStrongTrigger = triggers.some(t =>
+    t.includes("Boeing") || t.includes("death") || t.includes("fatal") ||
+    t.includes("outrage") || t.includes("pay") || t.includes("weird") ||
+    t.includes("celebrity") || t.includes("money") || t.includes("safety") ||
+    t.includes("NTSB") || t.includes("FAA") || t.includes("lawsuit") ||
+    t.includes("nostalgia") || t.includes("Nostalgia") || t.includes("route launch")
+  );
+
+  if (weakMatches.length >= 2 && !hasStrongTrigger) {
+    score -= 25;
+    triggers.push("Routine route/schedule/corporate story — penalised");
+  } else if (weakMatches.length >= 1 && !hasStrongTrigger && triggers.length <= 1) {
+    score -= 12;
+    triggers.push("Weak story type — limited viral potential");
+  }
+
+  // ── Cap ───────────────────────────────────────────────────────────────────
+  score = Math.min(100, Math.max(0, score));
+
+  // ── Status label ──────────────────────────────────────────────────────────
+  // Thresholds: must_post raised to 88 so it requires 2+ strong signals.
+  // A single weird/outrage story alone should be strong_candidate, not must_post.
+  let statusLabel: StatusLabel;
+  if (score >= 88) statusLabel = "must_post";
+  else if (score >= 70) statusLabel = "strong_candidate";
+  else if (score >= 55) statusLabel = "maybe";
+  else statusLabel = "reject";
+
+  // ── Primary category ──────────────────────────────────────────────────────
+  let category = "General Aviation";
+
+  if (boeingSafetyMatches.length >= 1 && (fatalMatches.length >= 1 || authorityMatches.length >= 1)) {
+    category = "Boeing Safety Crisis";
+  } else if (boeingRivalryMatches.length >= 1) {
+    category = "Boeing vs Airbus";
+  } else if (hasDeathCount || (fatalMatches.length >= 2 && authorityMatches.length >= 1)) {
+    category = "Safety Failure & Accountability";
+  } else if (weirdMatches.length >= 1) {
+    category = "Weird Human Moments";
+  } else if (celebMatches.length >= 1) {
+    category = "Celebrity Involvement";
+  } else if (outrageMatches.length >= 1 || policyMatches.length >= 1) {
+    category = "Passenger Outrage";
+  } else if (pilotPayMatches.length >= 1 && hasExactMoney) {
+    category = "Pilot & Crew Pay";
+  } else if (hasExactMoney && moneyMatches.length >= 2) {
+    category = "Money Shock";
+  } else if (mysteryMatches.length >= 1) {
+    category = "Mystery & Tragedy";
+  } else if (authorityMatches.length >= 1 || safetyMatches.length >= 2) {
+    category = "Safety & Accountability";
+  } else if (superlativeMatches.length >= 1) {
+    category = "First / Last / Only / Biggest";
+  } else if (nostalgiaMatches.length >= 2) {
+    category = "Nostalgia & Finality";
+  } else if (pilotPayMatches.length >= 1) {
+    category = "Pilot & Crew Pay";
+  }
+
+  const viralReason =
+    triggers.length > 0
+      ? triggers.join(". ")
+      : "No strong viral triggers detected.";
+
+  // ── Human-readable explanation (shown on story cards) ─────────────────────
+  const topTriggers = triggers.slice(0, 2);
+  let viralExplanation: string;
+  if (score >= 88) {
+    viralExplanation = topTriggers.length >= 2
+      ? `Scores high: ${topTriggers[0].toLowerCase()}. Also: ${topTriggers[1].toLowerCase()}.`
+      : topTriggers.length === 1
+      ? `Scores high: ${topTriggers[0].toLowerCase()}.`
+      : "Multiple strong viral signals detected.";
+  } else if (score >= 70) {
+    viralExplanation = topTriggers.length >= 1
+      ? `Strong candidate: ${topTriggers[0].toLowerCase()}${topTriggers[1] ? `. Also: ${topTriggers[1].toLowerCase()}` : ""}.`
+      : "Good viral potential but no single dominant signal.";
+  } else if (score >= 55) {
+    viralExplanation = topTriggers.length >= 1
+      ? `Possible post: ${topTriggers[0].toLowerCase()}. Lacks a second strong signal to push it higher.`
+      : "Some aviation interest but limited viral hooks.";
+  } else {
+    viralExplanation = topTriggers.length >= 1
+      ? `Low score: ${topTriggers[0].toLowerCase()}, but not enough to drive significant engagement.`
+      : "No strong viral triggers — routine aviation news.";
+  }
+
+  return { score, statusLabel, category, viralReason, triggers, viralExplanation };
+}
+
+export function getStatusConfig(label: StatusLabel) {
+  switch (label) {
+    case "must_post":
+      return { label: "Must Post", color: "emerald", range: "88–100" };
+    case "strong_candidate":
+      return { label: "Strong Candidate", color: "blue", range: "70–84" };
+    case "maybe":
+      return { label: "Maybe", color: "amber", range: "55–69" };
+    case "reject":
+      return { label: "Reject", color: "red", range: "Below 55" };
+  }
+}
