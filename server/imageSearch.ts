@@ -92,7 +92,7 @@ export async function searchWikimedia(query: string, limit = 6, offset = 0): Pro
         titles: titles.join("|"),
         prop: "imageinfo",
         iiprop: "url|extmetadata|mime",
-        iiurlwidth: "400",  // Smaller thumbs = faster proxy streaming on production
+        iiurlwidth: "320",  // API returns 330px URLs which are on Wikimedia's allowed-sizes list (400px is NOT allowed and returns HTTP 400)
         format: "json",
       });
       const res = await fetch("https://commons.wikimedia.org/w/api.php", {
