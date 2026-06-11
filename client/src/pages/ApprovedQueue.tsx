@@ -21,12 +21,17 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 import { useLocation } from "wouter";
 
-/** Ensure any direct Wikimedia/Pexels URL goes through the server-side proxy to avoid CORS/hotlink blocks */
+/** Return the best URL to load an image in the browser.
+ * Wikimedia/Commons images load fine directly in the browser (no CORS block).
+ * Only proxy Pexels and other sources that require server-side auth headers.
+ */
 function ensureProxied(url: string | undefined | null): string {
   if (!url) return "";
-  // Already proxied or a relative path — leave as-is
-  if (url.startsWith("/api/image-proxy") || url.startsWith("/manus-storage") || url.startsWith("/")) return url;
-  // Proxy external image URLs
+  // Already a relative path or already proxied — leave as-is
+  if (url.startsWith("/")) return url;
+  // Wikimedia images load directly in the browser — no proxy needed
+  if (/upload\.wikimedia\.org|commons\.wikimedia\.org/i.test(url)) return url;
+  // Pexels and other external sources need the server proxy
   if (/^https?:\/\//i.test(url)) return `/api/image-proxy?url=${encodeURIComponent(url)}`;
   return url;
 }
@@ -306,7 +311,6 @@ function GridTile({ url, title, attribution, licence, pageUrl, selected, onSelec
           src={ensureProxied(url)}
           alt={title}
           referrerPolicy="no-referrer"
-          crossOrigin="anonymous"
           className={cn(
             "absolute inset-0 w-full h-full object-cover transition-opacity duration-200",
             loaded ? "opacity-100" : "opacity-0"
@@ -557,7 +561,7 @@ function WikimediaSearchModal({ open, onClose, initialQuery, storyId, slotIndex,
                   onUse={() => handleUse(img)}
                   isSaving={pickImage.isPending}
                   source="wikimedia"
-                  batchDelay={Math.floor(i / 6) * 800}
+                  batchDelay={0}
                 />
               ))}
             </div>
