@@ -257,10 +257,18 @@ interface GridTileProps {
   source?: "wikimedia" | "pexels";
 }
 
-function GridTile({ url, title, attribution, licence, pageUrl, selected, onSelect, onUse, isSaving, source }: GridTileProps) {
+function GridTile({ url, title, attribution, licence, pageUrl, selected, onSelect, onUse, isSaving, source, batchDelay = 0 }: GridTileProps & { batchDelay?: number }) {
   const [loaded, setLoaded] = useState(false);
   const [errored, setErrored] = useState(false);
+  const [active, setActive] = useState(batchDelay === 0); // Start immediately if no delay
   const prevUrl = useRef<string | null>(null);
+
+  // Staggered activation — wait batchDelay ms before starting the image request
+  useEffect(() => {
+    if (batchDelay === 0) { setActive(true); return; }
+    const t = setTimeout(() => setActive(true), batchDelay);
+    return () => clearTimeout(t);
+  }, [batchDelay]);
 
   // Reset state when URL changes
   useEffect(() => {
@@ -268,8 +276,13 @@ function GridTile({ url, title, attribution, licence, pageUrl, selected, onSelec
       prevUrl.current = url;
       setLoaded(false);
       setErrored(false);
+      setActive(batchDelay === 0);
+      if (batchDelay > 0) {
+        const t = setTimeout(() => setActive(true), batchDelay);
+        return () => clearTimeout(t);
+      }
     }
-  }, [url]);
+  }, [url, batchDelay]);
 
   return (
     <div
@@ -287,8 +300,8 @@ function GridTile({ url, title, attribution, licence, pageUrl, selected, onSelec
         <div className="absolute inset-0 bg-muted/50 animate-pulse" />
       )}
 
-      {/* Image — routed through server proxy to avoid CORS/hotlink blocks */}
-      {!errored && (
+      {/* Image — only rendered after batchDelay to stagger proxy requests */}
+      {!errored && active && (
         <img
           src={ensureProxied(url)}
           alt={title}
@@ -544,6 +557,7 @@ function WikimediaSearchModal({ open, onClose, initialQuery, storyId, slotIndex,
                   onUse={() => handleUse(img)}
                   isSaving={pickImage.isPending}
                   source="wikimedia"
+                  batchDelay={Math.floor(i / 6) * 300}
                 />
               ))}
             </div>

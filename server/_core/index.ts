@@ -46,7 +46,7 @@ async function startServer() {
   // Uses streaming (no full-buffer) to keep memory low on the 512MB production instance.
   // A concurrency semaphore limits simultaneous upstream fetches to avoid overwhelming
   // Wikimedia's CDN and exhausting the server's RAM/connections.
-  const PROXY_CONCURRENCY = 8; // max simultaneous upstream fetches
+  const PROXY_CONCURRENCY = 20; // max simultaneous upstream fetches (staggered client batches of 6 mean peak is ~6-12 at once)
   let proxyActive = 0;
   const proxyQueue: Array<() => void> = [];
   function proxyAcquire(): Promise<void> {
