@@ -262,9 +262,10 @@ interface GridTileProps {
   source?: "wikimedia" | "pexels";
 }
 
-function GridTile({ url, title, attribution, licence, pageUrl, selected, onSelect, onUse, isSaving, source, batchDelay = 0 }: GridTileProps & { batchDelay?: number }) {
+function GridTile({ url, title, attribution, licence, pageUrl, selected, onSelect, onUse, isSaving, source, batchDelay = 0, fullResUrl }: GridTileProps & { batchDelay?: number; fullResUrl?: string }) {
   const [loaded, setLoaded] = useState(false);
   const [errored, setErrored] = useState(false);
+  const [useFallback, setUseFallback] = useState(false);
   const [active, setActive] = useState(batchDelay === 0); // Start immediately if no delay
   const prevUrl = useRef<string | null>(null);
 
@@ -308,7 +309,7 @@ function GridTile({ url, title, attribution, licence, pageUrl, selected, onSelec
       {/* Image — only rendered after batchDelay to stagger proxy requests */}
       {!errored && active && (
         <img
-          src={ensureProxied(url)}
+          src={useFallback && fullResUrl ? ensureProxied(fullResUrl) : ensureProxied(url)}
           alt={title}
           referrerPolicy="no-referrer"
           className={cn(
@@ -316,8 +317,24 @@ function GridTile({ url, title, attribution, licence, pageUrl, selected, onSelec
             loaded ? "opacity-100" : "opacity-0"
           )}
           onLoad={() => setLoaded(true)}
-          onError={() => setErrored(true)}
+          onError={() => {
+            if (!useFallback && fullResUrl && fullResUrl !== url) {
+              // Try full-res URL as fallback
+              setUseFallback(true);
+              setLoaded(false);
+            } else {
+              setErrored(true);
+            }
+          }}
         />
+      )}
+
+      {/* No-preview placeholder for permanently errored tiles */}
+      {errored && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 text-muted-foreground/40">
+          <ImageIcon className="w-6 h-6" />
+          <span className="text-[9px]">No preview</span>
+        </div>
       )}
 
       {/* Hover overlay — title + attribution + Use button */}
@@ -552,6 +569,7 @@ function WikimediaSearchModal({ open, onClose, initialQuery, storyId, slotIndex,
                 <GridTile
                   key={img.thumbUrl + i}
                   url={img.thumbUrl}
+                  fullResUrl={img.url}
                   title={img.title}
                   attribution={img.attribution ?? undefined}
                   licence={img.licence ?? undefined}
