@@ -92,7 +92,7 @@ export async function searchWikimedia(query: string, limit = 6, offset = 0): Pro
         titles: titles.join("|"),
         prop: "imageinfo",
         iiprop: "url|extmetadata|mime",
-        iiurlwidth: "800",
+        iiurlwidth: "400",  // Smaller thumbs = faster proxy streaming on production
         format: "json",
       });
       const res = await fetch("https://commons.wikimedia.org/w/api.php", {
