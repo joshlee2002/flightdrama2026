@@ -115,6 +115,9 @@ const MAX_CHARS = 12000;
 /** Fetch timeout in milliseconds */
 const FETCH_TIMEOUT_MS = 12000;
 
+/** Jina AI Reader base URL — renders JS, bypasses most bot blocks, returns clean markdown */
+const JINA_READER_BASE = "https://r.jina.ai/";
+
 // ── Google News redirect resolver ─────────────────────────────────────────────
 
 /**
@@ -154,57 +157,187 @@ async function resolveGoogleNewsUrl(url: string): Promise<string> {
 // ── Core fetcher ──────────────────────────────────────────────────────────────
 
 /**
+ * Attempt 1: Direct fetch with Chrome-like headers.
+ * Works on most open news sites.
+ */
+async function fetchDirect(url: string): Promise<FetchedArticle> {
+  const blank: FetchedArticle = { url, title: "", bodyText: "", wordCount: 0, success: false };
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Upgrade-Insecure-Requests": "1",
+      },
+      redirect: "follow",
+    });
+    if (!response.ok) return { ...blank, error: `HTTP ${response.status}` };
+    const ct = response.headers.get("content-type") ?? "";
+    if (!ct.includes("text/html") && !ct.includes("application/xhtml")) return { ...blank, error: `Non-HTML: ${ct}` };
+    const html = await response.text();
+    return extractFromHtml(url, html);
+  } catch (err) {
+    return { ...blank, error: err instanceof Error ? err.message : String(err) };
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+/**
+ * Attempt 2: Safari UA with Google Referer — bypasses some bot-detection that blocks Chrome bots.
+ */
+async function fetchWithSafariUA(url: string): Promise<FetchedArticle> {
+  const blank: FetchedArticle = { url, title: "", bodyText: "", wordCount: 0, success: false };
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-GB,en;q=0.9",
+        "Referer": "https://www.google.com/",
+        "Cache-Control": "no-cache",
+      },
+      redirect: "follow",
+    });
+    if (!response.ok) return { ...blank, error: `HTTP ${response.status}` };
+    const html = await response.text();
+    return extractFromHtml(url, html);
+  } catch (err) {
+    return { ...blank, error: err instanceof Error ? err.message : String(err) };
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+/**
+ * Attempt 3: Jina AI Reader (r.jina.ai) — renders JavaScript, bypasses Cloudflare and most
+ * bot-detection, and returns clean markdown text. Free tier, no API key required.
+ * Works on: The Aviation Herald, FlightGlobal, Reuters, AP, most paywalled sites.
+ */
+async function fetchViaJina(url: string): Promise<FetchedArticle> {
+  const blank: FetchedArticle = { url, title: "", bodyText: "", wordCount: 0, success: false };
+  const jinaUrl = `${JINA_READER_BASE}${url}`;
+  try {
+    const response = await fetch(jinaUrl, {
+      headers: {
+        "Accept": "text/plain, text/markdown, */*",
+        "User-Agent": "Mozilla/5.0 (compatible; FlightDrama/2.0 aviation-research-bot)",
+        "X-Return-Format": "markdown",
+        "X-Timeout": "20",
+      },
+      signal: AbortSignal.timeout(25000),
+      redirect: "follow",
+    });
+    if (!response.ok) return { ...blank, error: `Jina HTTP ${response.status}` };
+    const markdown = await response.text();
+    // Jina returns clean markdown — strip markdown syntax for plain text
+    const plainText = markdown
+      .replace(/^#{1,6}\s+/gm, "")       // headings
+      .replace(/\*\*(.+?)\*\*/g, "$1")   // bold
+      .replace(/\*(.+?)\*/g, "$1")       // italic
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1") // links
+      .replace(/^[\-*>]\s+/gm, "")       // list markers / blockquotes
+      .replace(/`{1,3}[^`]*`{1,3}/g, "") // code
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+    const wc = plainText.split(/\s+/).filter(w => w.length > 0).length;
+    if (wc < MIN_WORD_COUNT) return { ...blank, error: `Jina returned too little text (${wc} words)` };
+    // Extract title from first heading line if present
+    const titleMatch = markdown.match(/^#\s+(.+)/m);
+    const title = titleMatch ? titleMatch[1].trim() : "";
+    return {
+      url,
+      title,
+      bodyText: plainText.slice(0, MAX_CHARS),
+      wordCount: wc,
+      success: true,
+    };
+  } catch (err) {
+    return { ...blank, error: `Jina failed: ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
+/**
+ * Attempt 4: ScraperAPI-style fallback using a public web scraping proxy.
+ * Uses allorigins.win which proxies the request through their servers.
+ */
+async function fetchViaProxy(url: string): Promise<FetchedArticle> {
+  const blank: FetchedArticle = { url, title: "", bodyText: "", wordCount: 0, success: false };
+  try {
+    const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
+    const response = await fetch(proxyUrl, {
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!response.ok) return { ...blank, error: `Proxy HTTP ${response.status}` };
+    const json = await response.json() as { contents?: string; status?: { http_code: number } };
+    if (!json.contents || json.contents.length < 200) return { ...blank, error: "Proxy returned empty content" };
+    return extractFromHtml(url, json.contents);
+  } catch (err) {
+    return { ...blank, error: `Proxy failed: ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
+/**
  * Fetch a URL and extract the main article body text.
- * Returns a FetchedArticle with success=false on any error so callers
- * can safely continue without crashing the pipeline.
+ * Uses a 4-layer fallback chain to maximise success rate:
+ *   1. Direct fetch with Chrome headers (fast, works on most open sites)
+ *   2. Safari UA with Google Referer (bypasses some bot detection)
+ *   3. Jina AI Reader (renders JS, bypasses Cloudflare — works on most blocked sites)
+ *   4. AllOrigins proxy (last resort for anything still blocked)
+ *
+ * Returns a FetchedArticle with success=false only if ALL layers fail.
  */
 export async function fetchArticleText(url: string): Promise<FetchedArticle> {
-  const blank: FetchedArticle = { url, title: "", bodyText: "", wordCount: 0, success: false };
+  // Resolve Google News redirect URLs to the real article URL first
+  const resolvedUrl = await resolveGoogleNewsUrl(url);
 
-  try {
-    // Resolve Google News redirect URLs to the real article URL
-    const resolvedUrl = await resolveGoogleNewsUrl(url);
-
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-
-    let response: Response;
-    try {
-      response = await fetch(resolvedUrl, {
-        signal: controller.signal,
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          "Accept-Language": "en-US,en;q=0.9",
-          "Accept-Encoding": "gzip, deflate, br",
-          "Cache-Control": "no-cache",
-          "Pragma": "no-cache",
-        },
-        redirect: "follow",
-      });
-    } finally {
-      clearTimeout(timeoutId);
-    }
-
-    if (!response.ok) {
-      return { ...blank, error: `HTTP ${response.status} ${response.statusText}` };
-    }
-
-    const contentType = response.headers.get("content-type") ?? "";
-    if (!contentType.includes("text/html") && !contentType.includes("application/xhtml")) {
-      return { ...blank, error: `Non-HTML content type: ${contentType}` };
-    }
-
-    const html = await response.text();
-    return extractFromHtml(resolvedUrl, html);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    if (message.includes("aborted") || message.includes("timeout")) {
-      return { ...blank, error: "Fetch timed out" };
-    }
-    return { ...blank, error: message };
+  // Layer 1: Direct fetch
+  const direct = await fetchDirect(resolvedUrl);
+  if (direct.success && direct.wordCount >= MIN_WORD_COUNT) {
+    return direct;
   }
+  console.log(`[Fetcher] Layer 1 failed for ${resolvedUrl.slice(0, 80)}: ${direct.error ?? 'insufficient content'} — trying Safari UA`);
+
+  // Layer 2: Safari UA
+  const safari = await fetchWithSafariUA(resolvedUrl);
+  if (safari.success && safari.wordCount >= MIN_WORD_COUNT) {
+    console.log(`[Fetcher] Layer 2 (Safari UA) succeeded for ${resolvedUrl.slice(0, 80)}`);
+    return safari;
+  }
+  console.log(`[Fetcher] Layer 2 failed: ${safari.error ?? 'insufficient content'} — trying Jina AI Reader`);
+
+  // Layer 3: Jina AI Reader (JS rendering, Cloudflare bypass)
+  const jina = await fetchViaJina(resolvedUrl);
+  if (jina.success && jina.wordCount >= MIN_WORD_COUNT) {
+    console.log(`[Fetcher] Layer 3 (Jina) succeeded for ${resolvedUrl.slice(0, 80)} — ${jina.wordCount} words`);
+    return jina;
+  }
+  console.log(`[Fetcher] Layer 3 failed: ${jina.error ?? 'insufficient content'} — trying proxy`);
+
+  // Layer 4: AllOrigins proxy
+  const proxy = await fetchViaProxy(resolvedUrl);
+  if (proxy.success && proxy.wordCount >= MIN_WORD_COUNT) {
+    console.log(`[Fetcher] Layer 4 (proxy) succeeded for ${resolvedUrl.slice(0, 80)}`);
+    return proxy;
+  }
+
+  // All layers failed — return the best result we got (most words)
+  const best = [direct, safari, jina, proxy].sort((a, b) => b.wordCount - a.wordCount)[0];
+  console.warn(`[Fetcher] ALL 4 LAYERS FAILED for ${resolvedUrl.slice(0, 80)} — best: ${best.wordCount} words`);
+  return { ...best, success: false, error: `All fetch layers failed. Last error: ${proxy.error ?? jina.error ?? safari.error ?? direct.error}` };
 }
 
 /**

@@ -904,19 +904,36 @@ function ApprovedCard({ story, pkg, onUnapprove, isUnapproving }: ApprovedCardPr
           <div className="flex items-center gap-2 mt-1 flex-wrap">
             <span className="text-xs text-muted-foreground">{story.sourceName}</span>
             {story.category && <Badge variant="outline" className="text-[10px] h-4 px-1.5">{story.category}</Badge>}
-            {pkg?.sourcesResearched != null && (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-400 border border-sky-500/20 cursor-default">
-                    <FlaskConical className="w-2.5 h-2.5" />
-                    {pkg.sourcesResearched} source{pkg.sourcesResearched !== 1 ? 's' : ''}
-                  </span>
-                </TooltipTrigger>
-                <TooltipContent side="bottom" className="text-xs max-w-[200px]">
-                  {pkg.sourcesResearched} source{pkg.sourcesResearched !== 1 ? 's' : ''} fetched during the Soyunci pipeline research step
-                </TooltipContent>
-              </Tooltip>
-            )}
+            {pkg?.sourcesResearched != null && (() => {
+              const n = pkg.sourcesResearched;
+              const quality = n >= 3 ? 'full' : n >= 1 ? 'partial' : 'rss';
+              const colours = {
+                full:    'bg-emerald-500/10 text-emerald-400 border-emerald-500/20',
+                partial: 'bg-amber-500/10 text-amber-400 border-amber-500/20',
+                rss:     'bg-red-500/10 text-red-400 border-red-500/20',
+              }[quality];
+              const label = {
+                full:    `${n} sources`,
+                partial: `${n} source${n !== 1 ? 's' : ''}`,
+                rss:     'RSS only',
+              }[quality];
+              const tip = {
+                full:    `Full research: ${n} articles fetched and read`,
+                partial: `Partial research: only ${n} source${n !== 1 ? 's' : ''} fetched — consider Re-Research`,
+                rss:     'Article scraping failed — written from RSS snippet only. Click Re-Research & Rewrite to retry.',
+              }[quality];
+              return (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span className={`inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border cursor-default ${colours}`}>
+                      <FlaskConical className="w-2.5 h-2.5" />
+                      {label}
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" className="text-xs max-w-[220px]">{tip}</TooltipContent>
+                </Tooltip>
+              );
+            })()}
             <span className="text-xs text-muted-foreground ml-auto">Approved {formatDate(story.updatedAt)}</span>
           </div>
         </div>

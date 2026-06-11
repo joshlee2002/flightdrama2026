@@ -239,8 +239,9 @@ async function deepResearch(title: string, sourceUrl: string, rssContent = ""): 
     let primarySourceText = "";
 
     // ── Source 1: Fetch the original article for full text ────────────────────────────────────
-    // This is the most important step. We MUST read the full article before
-    // extracting facts or building a viral angle. The RSS snippet is not enough.
+    // fetchArticleText now uses a 4-layer fallback chain:
+    //   1. Direct Chrome headers  2. Safari UA  3. Jina AI Reader (JS rendering)  4. AllOrigins proxy
+    // This covers the vast majority of sites including Cloudflare-protected and JS-rendered pages.
     try {
       const originalArticle = await fetchArticleText(sourceUrl);
       if (originalArticle.success && originalArticle.bodyText.length > 200) {
@@ -250,55 +251,24 @@ async function deepResearch(title: string, sourceUrl: string, rssContent = ""): 
         sourcesResearched++;
         console.log(`[Soyunci] Primary source: ${originalArticle.wordCount} words from ${sourceUrl}`);
       } else {
-        // First attempt failed — retry with a Safari UA (some sites block Chrome bots)
-        console.warn(`[Soyunci] Primary fetch attempt 1 failed (${originalArticle.error ?? 'unknown'}) — retrying with alternate UA`);
-        try {
-          const retryRes = await fetch(sourceUrl, {
-            headers: {
-              "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
-              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-              "Accept-Language": "en-US,en;q=0.9",
-              "Referer": "https://www.google.com/",
-            },
-            redirect: "follow",
-            signal: AbortSignal.timeout(12000),
-          });
-          if (retryRes.ok) {
-            const { extractFromHtml } = await import("./articleFetcher");
-            const html = await retryRes.text();
-            const retryArticle = extractFromHtml(sourceUrl, html);
-            if (retryArticle.success && retryArticle.bodyText.length > 200) {
-              primarySourceText = retryArticle.bodyText;
-              sourceParts.push(`=== PRIMARY SOURCE: ${sourceUrl} ===`);
-              sourceParts.push(retryArticle.bodyText);
-              sourcesResearched++;
-              console.log(`[Soyunci] Primary source (retry UA): ${retryArticle.wordCount} words from ${sourceUrl}`);
-            } else {
-              throw new Error("Retry extraction insufficient");
-            }
-          } else {
-            throw new Error(`HTTP ${retryRes.status}`);
-          }
-        } catch {
-          // Both fetch attempts failed — use RSS content as fallback
-          if (rssContent && rssContent.trim().length > 100) {
-            primarySourceText = rssContent.trim();
-            sourceParts.push(`=== PRIMARY SOURCE (RSS snippet — full fetch failed): ${sourceUrl} ===`);
-            sourceParts.push(rssContent.trim());
-            sourcesResearched++;
-            console.warn(`[Soyunci] Using RSS content as fallback primary source (${rssContent.trim().split(/\s+/).length} words)`);
-          } else {
-            console.warn(`[Soyunci] *** ALL PRIMARY SOURCE FETCHES FAILED — ${sourceUrl} ***`);
-          }
+        // All 4 fetch layers failed — fall back to RSS content
+        if (rssContent && rssContent.trim().length > 100) {
+          primarySourceText = rssContent.trim();
+          sourceParts.push(`=== PRIMARY SOURCE (RSS snippet — all fetch layers failed): ${sourceUrl} ===`);
+          sourceParts.push(rssContent.trim());
+          sourcesResearched++;
+          console.warn(`[Soyunci] All fetch layers failed — using RSS content (${rssContent.trim().split(/\s+/).length} words) for ${sourceUrl}`);
+        } else {
+          console.warn(`[Soyunci] *** ALL FETCH LAYERS FAILED AND NO RSS CONTENT — ${sourceUrl} ***`);
         }
       }
     } catch (err) {
       if (rssContent && rssContent.trim().length > 100) {
         primarySourceText = rssContent.trim();
-        sourceParts.push(`=== PRIMARY SOURCE (RSS snippet — full fetch failed): ${sourceUrl} ===`);
+        sourceParts.push(`=== PRIMARY SOURCE (RSS snippet — fetch exception): ${sourceUrl} ===`);
         sourceParts.push(rssContent.trim());
         sourcesResearched++;
-        console.warn(`[Soyunci] Using RSS content as fallback primary source after exception`);
+        console.warn(`[Soyunci] Fetch exception — using RSS content as fallback`);
       } else {
         console.warn("[Soyunci] *** PRIMARY ARTICLE FETCH FAILED — will rely on secondary sources:", err);
       }
@@ -310,15 +280,16 @@ async function deepResearch(title: string, sourceUrl: string, rssContent = ""): 
     try {
       const newsItems = await fetchNewsRss(searchQuery);
       if (newsItems.length > 0) {
-        // Fetch full text from up to 2 secondary articles (free, no API cost)
+        // Fetch full text from up to 5 secondary articles using the 4-layer fetcher
         const secondaryUrls = newsItems
-          .slice(0, 2)
+          .slice(0, 6)
           .map((item) => item.url)
-          .filter((u) => u && u !== sourceUrl);
+          .filter((u) => u && u !== sourceUrl)
+          .slice(0, 5);
 
         if (secondaryUrls.length > 0) {
           console.log(`[Soyunci] Fetching ${secondaryUrls.length} secondary articles from news search...`);
-          const secondaryArticles = await fetchArticlesBatch(secondaryUrls, 2);
+          const secondaryArticles = await fetchArticlesBatch(secondaryUrls, 3);
           let secondaryCount = 0;
           for (const article of secondaryArticles) {
             if (article.success && article.bodyText.length > 200) {
@@ -328,7 +299,7 @@ async function deepResearch(title: string, sourceUrl: string, rssContent = ""): 
               secondaryCount++;
               console.log(`[Soyunci] Secondary source: ${article.wordCount} words from ${article.url}`);
             } else {
-              console.warn(`[Soyunci] Secondary fetch failed: ${article.error ?? 'unknown'} — ${article.url}`);
+              console.warn(`[Soyunci] Secondary fetch failed (all layers): ${article.error ?? 'unknown'} — ${article.url}`);
             }
           }
           console.log(`[Soyunci] ${secondaryCount}/${secondaryUrls.length} secondary articles fetched`);
