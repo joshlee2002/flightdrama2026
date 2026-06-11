@@ -21,6 +21,16 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 import { useLocation } from "wouter";
 
+/** Ensure any direct Wikimedia/Pexels URL goes through the server-side proxy to avoid CORS/hotlink blocks */
+function ensureProxied(url: string | undefined | null): string {
+  if (!url) return "";
+  // Already proxied or a relative path — leave as-is
+  if (url.startsWith("/api/image-proxy") || url.startsWith("/manus-storage") || url.startsWith("/")) return url;
+  // Proxy external image URLs
+  if (/^https?:\/\//i.test(url)) return `/api/image-proxy?url=${encodeURIComponent(url)}`;
+  return url;
+}
+
 function copyText(text: string, label: string) {
   navigator.clipboard.writeText(text);
   toast.success(`${label} copied`);
@@ -198,8 +208,10 @@ function HeroImageSlot({
       {/* Actual image — invisible until loaded */}
       {!errored && (
         <img
-          src={thumbUrl}
+          src={ensureProxied(thumbUrl)}
           alt={description}
+          referrerPolicy="no-referrer"
+          crossOrigin="anonymous"
           className={cn(
             "w-full h-full object-cover transition-opacity duration-300",
             loaded ? "opacity-100" : "opacity-0"
@@ -245,40 +257,20 @@ interface GridTileProps {
   source?: "wikimedia" | "pexels";
 }
 
-function GridTile({ url, title, attribution, licence, pageUrl, selected, onSelect, onUse, isSaving, source, loadDelay = 0 }: GridTileProps & { loadDelay?: number }) {
+function GridTile({ url, title, attribution, licence, pageUrl, selected, onSelect, onUse, isSaving, source }: GridTileProps) {
   const [loaded, setLoaded] = useState(false);
   const [errored, setErrored] = useState(false);
-  const [activeSrc, setActiveSrc] = useState<string | null>(null);
-  const retryCount = useRef(0);
-  const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const prevUrl = useRef<string | null>(null);
 
-  // Reset when URL changes
+  // Reset state when URL changes
   useEffect(() => {
-    setLoaded(false);
-    setErrored(false);
-    setActiveSrc(null);
-    retryCount.current = 0;
-    if (retryTimer.current) clearTimeout(retryTimer.current);
-    // Stagger load start to avoid hammering the proxy with 40 simultaneous requests
-    const t = setTimeout(() => setActiveSrc(url), loadDelay);
-    return () => clearTimeout(t);
-  }, [url, loadDelay]);
-
-  const handleError = useCallback(() => {
-    // Retry up to 3 times with exponential backoff for rate-limited responses
-    if (retryCount.current < 3) {
-      retryCount.current += 1;
-      const delay = retryCount.current * 800;
-      retryTimer.current = setTimeout(() => {
-        setActiveSrc(null);
-        requestAnimationFrame(() => setActiveSrc(url));
-      }, delay);
-    } else {
-      setErrored(true);
+    if (prevUrl.current !== url) {
+      prevUrl.current = url;
+      setLoaded(false);
+      setErrored(false);
     }
   }, [url]);
 
-  // Don't permanently hide — show placeholder so grid layout stays intact
   return (
     <div
       onClick={onSelect}
@@ -291,21 +283,23 @@ function GridTile({ url, title, attribution, licence, pageUrl, selected, onSelec
       style={{ aspectRatio: "4/3" }}
     >
       {/* Skeleton shimmer while loading */}
-      {!loaded && (
+      {!loaded && !errored && (
         <div className="absolute inset-0 bg-muted/50 animate-pulse" />
       )}
 
-      {/* Image — staggered load with retry */}
-      {activeSrc && (
+      {/* Image — routed through server proxy to avoid CORS/hotlink blocks */}
+      {!errored && (
         <img
-          src={activeSrc}
+          src={ensureProxied(url)}
           alt={title}
+          referrerPolicy="no-referrer"
+          crossOrigin="anonymous"
           className={cn(
             "absolute inset-0 w-full h-full object-cover transition-opacity duration-200",
             loaded ? "opacity-100" : "opacity-0"
           )}
           onLoad={() => setLoaded(true)}
-          onError={handleError}
+          onError={() => setErrored(true)}
         />
       )}
 
@@ -550,7 +544,6 @@ function WikimediaSearchModal({ open, onClose, initialQuery, storyId, slotIndex,
                   onUse={() => handleUse(img)}
                   isSaving={pickImage.isPending}
                   source="wikimedia"
-                  loadDelay={i * 80}
                 />
               ))}
             </div>
@@ -695,7 +688,6 @@ function PexelsSearchModal({ open, onClose, initialQuery, storyId, slotIndex, sl
                   onUse={() => handleUse(img)}
                   isSaving={pickImage.isPending}
                   source="pexels"
-                  loadDelay={i * 80}
                 />
               ))}
             </div>
