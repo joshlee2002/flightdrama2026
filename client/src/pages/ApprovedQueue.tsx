@@ -557,7 +557,7 @@ function WikimediaSearchModal({ open, onClose, initialQuery, storyId, slotIndex,
                   onUse={() => handleUse(img)}
                   isSaving={pickImage.isPending}
                   source="wikimedia"
-                  batchDelay={Math.floor(i / 6) * 300}
+                  batchDelay={Math.floor(i / 6) * 800}
                 />
               ))}
             </div>

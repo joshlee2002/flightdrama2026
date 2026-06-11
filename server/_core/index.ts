@@ -43,10 +43,15 @@ async function startServer() {
   registerOAuthRoutes(app);
 
   // Image proxy — streams Wikimedia/Pexels images to avoid CORS/hotlink blocks.
-  // Uses streaming (no full-buffer) to keep memory low on the 512MB production instance.
-  // A concurrency semaphore limits simultaneous upstream fetches to avoid overwhelming
-  // Wikimedia's CDN and exhausting the server's RAM/connections.
-  const PROXY_CONCURRENCY = 20; // max simultaneous upstream fetches (staggered client batches of 6 mean peak is ~6-12 at once)
+  // Key constraints:
+  //   - Wikimedia rate-limits (HTTP 429) if too many requests hit the CDN simultaneously
+  //   - Wikimedia only allows specific thumbnail sizes (330px, 640px, etc.) — others return 400
+  //   - Production has 512MB RAM so we stream instead of buffering full images
+  //
+  // Strategy: concurrency=4 so at most 4 upstream fetches run at once; the rest queue.
+  // Client-side staggered batches (6 images per 300ms) mean peak load is ~6 in-flight,
+  // but the queue ensures Wikimedia never sees more than 4 simultaneous connections from us.
+  const PROXY_CONCURRENCY = 4;
   let proxyActive = 0;
   const proxyQueue: Array<() => void> = [];
   function proxyAcquire(): Promise<void> {
@@ -60,10 +65,7 @@ async function startServer() {
     if (next) { next(); } else { proxyActive--; }
   }
 
-  // Tiny metadata cache — only stores content-type + content-length, NOT the full buffer.
-  // Full image bytes are streamed directly; this just avoids a HEAD request on repeat visits.
-  const imgMetaCache = new Map<string, { ct: string; ts: number }>();
-  const IMG_META_TTL = 60 * 60 * 1000; // 1 hour
+  const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
   app.get("/api/image-proxy", async (req, res) => {
     const url = req.query.url as string;
@@ -78,70 +80,84 @@ async function startServer() {
         return res.status(403).send("Host not allowed");
       }
 
-      // Acquire concurrency slot (queues if too many in-flight)
+      // Acquire concurrency slot
       await proxyAcquire();
 
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 20000); // 20s timeout
-
-      try {
-        const upstream = await fetch(url, {
-          signal: controller.signal,
-          headers: {
-            "User-Agent": "Mozilla/5.0 (compatible; FlightDrama/1.0; +https://flightdrama.com)",
-            "Referer": "https://commons.wikimedia.org/",
-            "Accept": "image/webp,image/jpeg,image/*,*/*;q=0.8",
-          },
-        });
-        clearTimeout(timeoutId);
-
-        if (!upstream.ok || !upstream.body) {
-          proxyRelease();
-          return res.status(502).send("Upstream error");
-        }
-
-        const ct = upstream.headers.get("content-type") ?? "image/jpeg";
-        const cl = upstream.headers.get("content-length");
-
-        // Cache content-type metadata for future requests
-        imgMetaCache.set(url, { ct, ts: Date.now() });
-        // Evict stale entries periodically
-        if (imgMetaCache.size > 500) {
-          const now = Date.now();
-          Array.from(imgMetaCache.entries()).forEach(([k, v]) => {
-            if (now - v.ts > IMG_META_TTL) imgMetaCache.delete(k);
+      // Retry loop — handles 429 rate-limit responses from Wikimedia CDN
+      let attempt = 0;
+      const maxAttempts = 3;
+      while (attempt < maxAttempts) {
+        attempt++;
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 25000);
+        try {
+          const upstream = await fetch(url, {
+            signal: controller.signal,
+            headers: {
+              // Use a real browser UA — Wikimedia is more lenient with browser UAs
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+              "Referer": "https://commons.wikimedia.org/",
+              "Accept": "image/webp,image/jpeg,image/*,*/*;q=0.8",
+              "Accept-Language": "en-US,en;q=0.9",
+            },
           });
-        }
+          clearTimeout(timeoutId);
 
-        res.setHeader("Content-Type", ct);
-        res.setHeader("Cache-Control", "public, max-age=86400");
-        if (cl) res.setHeader("Content-Length", cl);
-        res.setHeader("X-Cache", "MISS");
-
-        // Stream the response body directly — no buffering, low memory footprint
-        const reader = upstream.body.getReader();
-        const pump = async () => {
-          try {
-            while (true) {
-              const { done, value } = await reader.read();
-              if (done) { res.end(); break; }
-              const ok = res.write(value);
-              if (!ok) await new Promise(r => res.once("drain", r));
-            }
-          } catch {
-            res.destroy();
-          } finally {
+          // 429 = rate limited — wait and retry
+          if (upstream.status === 429) {
+            const retryAfter = parseInt(upstream.headers.get("retry-after") ?? "2", 10);
+            const waitMs = Math.min((retryAfter || 2) * 1000, 5000) * attempt;
+            console.warn(`[ImageProxy] 429 rate-limit on attempt ${attempt}, waiting ${waitMs}ms`);
+            await upstream.body?.cancel();
+            if (attempt < maxAttempts) { await sleep(waitMs); continue; }
             proxyRelease();
+            return res.status(429).send("Rate limited");
           }
-        };
-        pump();
-        return;
-      } catch (e) {
-        clearTimeout(timeoutId);
-        proxyRelease();
-        console.error("[ImageProxy] fetch error:", e);
-        return res.status(502).send("Proxy error");
+
+          if (!upstream.ok || !upstream.body) {
+            await upstream.body?.cancel();
+            proxyRelease();
+            return res.status(502).send(`Upstream ${upstream.status}`);
+          }
+
+          const ct = upstream.headers.get("content-type") ?? "image/jpeg";
+          const cl = upstream.headers.get("content-length");
+
+          res.setHeader("Content-Type", ct);
+          res.setHeader("Cache-Control", "public, max-age=86400");
+          if (cl) res.setHeader("Content-Length", cl);
+          res.setHeader("X-Cache", "MISS");
+
+          // Stream directly — no buffering
+          const reader = upstream.body.getReader();
+          const pump = async () => {
+            try {
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) { res.end(); break; }
+                const ok = res.write(value);
+                if (!ok) await new Promise(r => res.once("drain", r));
+              }
+            } catch {
+              res.destroy();
+            } finally {
+              proxyRelease();
+            }
+          };
+          pump();
+          return; // success — exit retry loop
+        } catch (e) {
+          clearTimeout(timeoutId);
+          if (attempt >= maxAttempts) {
+            proxyRelease();
+            console.error("[ImageProxy] fetch error after retries:", e);
+            return res.status(502).send("Proxy error");
+          }
+          await sleep(1000 * attempt);
+        }
       }
+      proxyRelease();
+      return res.status(502).send("Proxy error");
     } catch (e) {
       console.error("[ImageProxy] outer error:", e);
       return res.status(502).send("Proxy error");
