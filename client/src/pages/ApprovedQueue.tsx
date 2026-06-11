@@ -402,7 +402,7 @@ function WikimediaSearchModal({ open, onClose, initialQuery, storyId, slotIndex,
   const inputRef = useRef<HTMLInputElement>(null);
 
   const CHIPS = slotRole === "aircraft"
-    ? ["Boeing 737", "Airbus A320", "Boeing 777", "Airbus A380", "Boeing 787", "Airbus A350"]
+    ? ["Boeing 737", "Airbus A320", "Boeing 777", "Airbus A380", "Boeing 787", "Airbus A350", "Boeing 757", "Airbus A220"]
     : ["Airport terminal", "Runway", "Air traffic control", "Aircraft cockpit", "Baggage claim"];
 
   useEffect(() => {
@@ -585,17 +585,18 @@ function WikimediaSearchModal({ open, onClose, initialQuery, storyId, slotIndex,
             </div>
           )}
 
-          {/* Load next 40 */}
+          {/* Load more */}
           {!isFetching && results.length > 0 && pageResults.length === 40 && (
-            <div className="flex justify-center mt-4 pb-2">
+            <div className="flex flex-col items-center gap-1 mt-4 pb-2">
               <Button
                 variant="outline"
                 size="sm"
                 className="gap-2"
                 onClick={() => setOffset(prev => prev + 200)}
               >
-                Load next 40
+                Load more photos
               </Button>
+              <span className="text-[10px] text-muted-foreground/50">{results.length} loaded so far</span>
             </div>
           )}
 
