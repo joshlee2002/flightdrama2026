@@ -203,6 +203,10 @@ export const appRouter = router({
               alternativeHeadlines: JSON.stringify(pkg.alternativeHeadlines),
               researchContext: pkg.researchContext.slice(0, 12000),
               sourcesResearched: pkg.sourcesResearched ?? 0,
+              sourceConfirmation: pkg.sourceConfirmation ?? null,
+              headlineObjects: pkg.headlineObjects ?? [],
+              selectedViralityScore: pkg.selectedViralityScore ?? null,
+              selectedHeadlineType: pkg.selectedHeadlineType ?? null,
             });
 
             // Auto-log to historical_posts so performance data feeds the model.
@@ -218,6 +222,10 @@ export const appRouter = router({
                       ?? snapshotSelected
                       ?? pkg.selectedHeadline
                     : snapshotSelected ?? pkg.selectedHeadline;
+              // Find the virality score and type for the chosen headline variant
+              const chosenHeadlineObj = variant === "selected"
+                ? { viralityScore: pkg.selectedViralityScore, type: pkg.selectedHeadlineType }
+                : (pkg.headlineObjects ?? []).find((_: any, i: number) => `alt_${i + 1}` === variant) ?? {};
               await createHistoricalPost({
                 headline: usedHeadline ?? story.title,
                 article: pkg.article ?? null,
@@ -228,6 +236,8 @@ export const appRouter = router({
                 usedHeadlineVariant: variant,
                 storyId: input.id,
                 sourceType: "approved_story",
+                headlineType: (chosenHeadlineObj as any).type ?? null,
+                headlineViralityScore: (chosenHeadlineObj as any).viralityScore ?? null,
               });
               console.log(`[Soyunci] Auto-logged historical post for story ${input.id}`);
             } catch (logErr) {

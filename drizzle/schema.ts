@@ -138,6 +138,12 @@ export const storyPackages = mysqlTable("story_packages", {
   sourcesResearched: int("sourcesResearched").default(0),
   /** Human-readable confirmation of what source material was read (e.g. "✅ Read 1,247 words from primary source + 3 secondary sources") */
   sourceConfirmation: text("sourceConfirmation"),
+  /** All 10 headline objects with virality scores and types (JSON array) */
+  headlineObjects: json("headlineObjects").$type<Array<{ headline: string; viralityScore: number | null; type: string | null; reason: string | null; rank: number }>>(),
+  /** Virality score (1-10) for the selected headline */
+  selectedViralityScore: int("selectedViralityScore"),
+  /** Structural type of the selected headline (e.g. CONTRADICTION, MONEY, FACT) */
+  selectedHeadlineType: varchar("selectedHeadlineType", { length: 64 }),
   /** FlightDrama Editor quality review (JSON) */
   editorReview: json("editorReview").$type<{
     storyAngle: string;
@@ -177,6 +183,10 @@ export const historicalPosts = mysqlTable("historical_posts", {
   usedHeadlineVariant: varchar("usedHeadlineVariant", { length: 32 }),
   instagramPostId: varchar("instagramPostId", { length: 64 }),
   reach: int("reach"),
+  /** Structural type of the headline used (CONTRADICTION, MONEY, FACT, HUMAN, VIRAL) */
+  headlineType: varchar("headlineType", { length: 64 }),
+  /** Virality score assigned by the LLM at generation time (1-10) */
+  headlineViralityScore: int("headlineViralityScore"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 });
 

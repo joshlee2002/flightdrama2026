@@ -1845,11 +1845,22 @@ FlightDrama style: specific numbers, airline names, consequences. Title Case. 6-
 NEVER: vague teasers, "You won't believe", trade journal style, question headlines.
 ${styleGuide}${patternsBlock}
 
+You must generate exactly 10 headlines covering different angles and structures:
+- 2 CONTRADICTION headlines (X but Y, unexpected contrast)
+- 2 HUMAN-FOCUSED headlines (passenger, pilot, crew, family — the person affected)
+- 2 MONEY/DEBATE headlines (cost, salary, fine, compensation, argument)
+- 2 FACT-DRIVEN headlines (number, record, first, last, only, age, distance)
+- 2 EXPERIMENTAL/VIRAL headlines (unexpected angle, social debate, hidden truth)
+
+For each headline also provide a virality score (1-10) and the headline type.
+
 Also produce a Canva visual brief for the Instagram post.
 
 Return ONLY valid JSON with these fields:
-- "selected": the single best headline
-- "alternatives": array of 4 alternative headlines
+- "selected": the single best headline (most viral + credible)
+- "selectedViralityScore": number 1-10 for the selected headline
+- "selectedType": the type of the selected headline (e.g. CONTRADICTION, MONEY, FACT)
+- "alternatives": array of exactly 9 alternative headline objects, each with: { "headline": string, "viralityScore": number, "type": string, "reason": string }
 - "canvaHeadline": max 10 words for the poster
 - "aspectRatio": "4:5" or "1:1"
 - "visualIdea": specific hero image description
@@ -1861,7 +1872,7 @@ Return ONLY valid JSON with these fields:
       },
       {
         role: "user",
-        content: `TITLE: ${title}\nVIRAL ANGLE: ${angle}\nARTICLE: ${article.slice(0, 600)}\nKEY FACTS:\n${factsBlock}\n\nReturn ONLY valid JSON.`,
+        content: `TITLE: ${title}\nVIRAL ANGLE: ${angle}\nARTICLE: ${article.slice(0, 600)}\nKEY FACTS:\n${factsBlock}\n\nReturn ONLY valid JSON with exactly 10 headlines total (1 selected + 9 alternatives).`,
       },
     ],
   });
@@ -1872,9 +1883,25 @@ Return ONLY valid JSON with these fields:
     const e = raw.lastIndexOf("}");
     if (s !== -1 && e > s) {
       const p = JSON.parse(raw.slice(s, e + 1)) as any;
+      // Normalise alternatives — support both string array (old) and object array (new)
+      const rawAlts = Array.isArray(p.alternatives) ? p.alternatives : [];
+      const alternatives: string[] = rawAlts.map((a: any) =>
+        typeof a === "string" ? a : (a.headline ?? "")
+      ).filter(Boolean).slice(0, 9);
+      // Build enriched headline objects for the DB
+      const headlineObjects = rawAlts.map((a: any, i: number) => ({
+        headline: typeof a === "string" ? a : (a.headline ?? ""),
+        viralityScore: typeof a === "object" ? (a.viralityScore ?? null) : null,
+        type: typeof a === "object" ? (a.type ?? null) : null,
+        reason: typeof a === "object" ? (a.reason ?? null) : null,
+        rank: i + 2, // selected is rank 1
+      }));
       return {
         selected: p.selected ?? title,
-        alternatives: Array.isArray(p.alternatives) ? p.alternatives.slice(0, 5) : [],
+        selectedViralityScore: p.selectedViralityScore ?? null,
+        selectedType: p.selectedType ?? null,
+        alternatives,
+        headlineObjects,
         canvaBrief: {
           headline: p.canvaHeadline ?? (p.selected ?? title).slice(0, 80),
           aspectRatio: p.aspectRatio ?? "4:5",
@@ -1890,7 +1917,10 @@ Return ONLY valid JSON with these fields:
   } catch { /* fall through */ }
   return {
     selected: title,
+    selectedViralityScore: null,
+    selectedType: null,
     alternatives: [],
+    headlineObjects: [],
     canvaBrief: { headline: title.slice(0, 80), aspectRatio: "4:5", visualIdea: "", aircraftToShow: "", circleInsert: "None", mood: "dramatic", background: "", hierarchy: "" },
   };
 }
@@ -1935,7 +1965,7 @@ export async function runFullSoyunciPipeline(
     researchImages(title, article, angle),
   ]);
 
-  const { selected: selectedHeadline, alternatives: alternativeHeadlines, canvaBrief } = headlinesResult;
+  const { selected: selectedHeadline, alternatives: alternativeHeadlines, headlineObjects, selectedViralityScore, selectedType, canvaBrief } = headlinesResult;
   const { recs: imageRecommendations, candidates: imageCandidates } = imagesResult;
 
   // Build a fun human-readable source confirmation
@@ -1961,7 +1991,10 @@ export async function runFullSoyunciPipeline(
     article,
     hashtags,
     selectedHeadline,
+    selectedViralityScore: selectedViralityScore ?? null,
+    selectedHeadlineType: selectedType ?? null,
     alternativeHeadlines,
+    headlineObjects: headlineObjects ?? [],
     imageRecommendations,
     imageCandidates,
     canvaBrief,
