@@ -1592,7 +1592,7 @@ async function runEditorReview(
 
 You do not rewrite the article. You identify weaknesses with precision.
 
-Review the article against these 10 questions:
+Review the article against these 12 questions:
 1. What is the story in one sentence?
 2. Is the article built around that story, or does it drift?
 3. What is the most interesting angle available in this story?
@@ -1603,6 +1603,13 @@ Review the article against these 10 questions:
 8. Does the article explain why readers should care?
 9. Does the article teach the reader something beyond what the source states?
 10. Does the article feel like an editor wrote it, or an AI summarised it?
+11. FABRICATED CONCERN CHECK: Does the article state that something "raises concerns," "poses risks," "introduces challenges," or "has raised eyebrows" without naming a specific person, organisation, or source who expressed that concern? If yes, this is a fabricated claim. Score must be 4 or below.
+12. INVENTED NARRATIVE CHECK: Does the article reframe the story into a different narrative than what the source supports? For example: the source describes an achievement (NASA's X-59 went supersonic) but the article frames it as a safety risk story. Or the source describes a route launch but the article invents strategic significance. If the article's central argument cannot be supported by the source, score must be 4 or below.
+
+SCORING RULES — these override everything else:
+- If question 11 or 12 is YES, score must be 4 or below regardless of writing quality.
+- If the article contains affiliate language, recommendation language, or tells readers what to buy, score must be 5 or below.
+- If the final sentence is a generic summary, lesson, or "this highlights" conclusion, deduct 1 point.
 
 Scoring:
 - 9-10: Excellent. Publishes immediately.
