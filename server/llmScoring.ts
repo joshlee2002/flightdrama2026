@@ -68,7 +68,8 @@ Score from 0–100 where:
 - 88–100 = must_post (extremely viral: shocking safety failure, celebrity, major outrage, death toll, record-breaking)
 - 70–87 = strong_candidate (very shareable: Boeing drama, pilot pay, passenger outrage, weird incident)
 - 55–69 = maybe (moderately interesting: route news with a hook, minor controversy)
-- 0–54 = reject (routine: schedule changes, earnings reports, generic fleet updates)`;
+- 0–54 = reject (routine: schedule changes, earnings reports, generic fleet updates)
+- AUTOMATIC REJECT (score 0-15): listicles ("best hotels", "top 10", "X things you didn't know"), travel guides, product reviews, opinion columns with no concrete news event, sponsored content, award announcements with no newsworthy context, and any article whose headline starts with a number followed by a noun (e.g. "16 Hotels...", "5 Reasons...", "10 Best...").`;
 
   if (learnedRules) {
     systemPrompt += `\n\n## Learned Scoring Rules (from editor override analysis)\n${learnedRules}`;
