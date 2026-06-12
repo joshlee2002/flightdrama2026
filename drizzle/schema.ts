@@ -136,6 +136,8 @@ export const storyPackages = mysqlTable("story_packages", {
   alternativeHeadlines: text("alternativeHeadlines"),
   /** Number of sources successfully fetched and used during the Soyunci research step. */
   sourcesResearched: int("sourcesResearched").default(0),
+  /** Human-readable confirmation of what source material was read (e.g. "✅ Read 1,247 words from primary source + 3 secondary sources") */
+  sourceConfirmation: text("sourceConfirmation"),
   /** FlightDrama Editor quality review (JSON) */
   editorReview: json("editorReview").$type<{
     storyAngle: string;

@@ -767,6 +767,7 @@ export const appRouter = router({
             alternativeHeadlines: JSON.stringify(pkg.alternativeHeadlines),
             researchContext: pkg.researchContext.slice(0, 12000),
             sourcesResearched: pkg.sourcesResearched ?? 0,
+            sourceConfirmation: pkg.sourceConfirmation ?? null,
             editorReview: pkg.editorReview ?? null,
             editorScore: pkg.editorReview?.soyunciScore ?? null,
           });
@@ -816,6 +817,7 @@ export const appRouter = router({
             alternativeHeadlines: JSON.stringify(result.alternativeHeadlines),
             researchContext: result.researchContext.slice(0, 12000),
             sourcesResearched: result.sourcesResearched,
+            sourceConfirmation: result.sourceConfirmation ?? null,
             editorReview: result.editorReview ?? null,
             editorScore: result.editorReview?.soyunciScore ?? null,
           });

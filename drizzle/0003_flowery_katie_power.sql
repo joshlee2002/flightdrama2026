@@ -1,0 +1,1 @@
+ALTER TABLE `story_packages` ADD `sourceConfirmation` text;

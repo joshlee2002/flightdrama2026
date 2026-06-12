@@ -141,96 +141,119 @@ function stripHtml(html: string, maxLen = 4000): string {
 }
 
 /**
- * Fetch Bing News RSS and return top article items with REAL article URLs.
+ * Fetch news articles from Bing News RSS and Google News RSS in PARALLEL.
  *
- * Bing News RSS wraps article URLs in redirect links of the form:
- *   http://www.bing.com/news/apiclick.aspx?...&url=https%3a%2f%2factual-site.com%2farticle
- * We decode the `url=` query parameter to get the real article URL.
+ * Both sources are queried simultaneously and results are merged and deduplicated
+ * by URL. This gives the widest possible pool of secondary sources for every story.
  *
- * Falls back to Google News RSS if Bing fails, extracting source URLs from
- * the `url=` parameter in Google's redirect links where available.
+ * Bing returns real article URLs via redirect params.
+ * Google News returns redirect URLs — the 4-layer scraper handles these.
  */
 async function fetchNewsRss(query: string): Promise<Array<{ title: string; source: string; url: string }>> {
   const encoded = encodeURIComponent(query);
 
-  // ── Try Bing News RSS first (returns real URLs in redirect params) ────────
-  try {
-    const bingUrl = `https://www.bing.com/news/search?q=${encoded}&format=rss`;
-    const res = await fetch(bingUrl, {
-      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" },
-      signal: AbortSignal.timeout(8000),
-    });
-    if (res.ok) {
-      const xml = await res.text();
-      const items: Array<{ title: string; source: string; url: string }> = [];
-      const itemRe = /<item>([\s\S]*?)<\/item>/g;
-      let match: RegExpExecArray | null;
-      while ((match = itemRe.exec(xml)) !== null) {
-        const block = match[1];
-        const titleMatch = block.match(/<title><!\[CDATA\[(.+?)\]\]><\/title>/) ||
-                           block.match(/<title>([^<]+)<\/title>/);
-        const linkMatch = block.match(/<link>([^<]+)<\/link>/);
-        if (!titleMatch || !linkMatch) continue;
-
-        // Extract real URL from Bing redirect: ...&url=https%3a%2f%2factual.com%2farticle&...
-        const rawLink = linkMatch[1].trim();
-        let realUrl = rawLink;
-        try {
-          const urlParam = new URL(rawLink.replace(/&amp;/g, "&")).searchParams.get("url");
-          if (urlParam && urlParam.startsWith("http")) realUrl = urlParam;
-        } catch { /* keep rawLink */ }
-
-        // Skip MSN aggregator pages — they're paywalled or JS-rendered
-        if (realUrl.includes("msn.com")) continue;
-
-        const sourceMatch = block.match(/<source[^>]*>([^<]+)<\/source>/);
-        items.push({
-          title: titleMatch[1].trim(),
-          source: sourceMatch ? sourceMatch[1].trim() : new URL(realUrl).hostname.replace(/^www\./, ""),
-          url: realUrl,
+  // ── Query Bing and Google News in parallel ─────────────────────────────────────────
+  const [bingItems, googleItems] = await Promise.all([
+    // Bing News RSS — real article URLs via redirect params
+    (async (): Promise<Array<{ title: string; source: string; url: string }>> => {
+      try {
+        const bingUrl = `https://www.bing.com/news/search?q=${encoded}&format=rss`;
+        const res = await fetch(bingUrl, {
+          headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" },
+          signal: AbortSignal.timeout(8000),
         });
-        if (items.length >= 20) break;
-      }
-      if (items.length > 0) {
-        console.log(`[Soyunci] Bing News: ${items.length} articles found for "${query.slice(0, 60)}"`);
+        if (!res.ok) return [];
+        const xml = await res.text();
+        const items: Array<{ title: string; source: string; url: string }> = [];
+        const itemRe = /<item>([\s\S]*?)<\/item>/g;
+        let match: RegExpExecArray | null;
+        while ((match = itemRe.exec(xml)) !== null) {
+          const block = match[1];
+          const titleMatch = block.match(/<title><!\[CDATA\[(.+?)\]\]><\/title>/) ||
+                             block.match(/<title>([^<]+)<\/title>/);
+          const linkMatch = block.match(/<link>([^<]+)<\/link>/);
+          if (!titleMatch || !linkMatch) continue;
+          const rawLink = linkMatch[1].trim();
+          let realUrl = rawLink;
+          try {
+            const urlParam = new URL(rawLink.replace(/&amp;/g, "&")).searchParams.get("url");
+            if (urlParam && urlParam.startsWith("http")) realUrl = urlParam;
+          } catch { /* keep rawLink */ }
+          if (realUrl.includes("msn.com")) continue;
+          const sourceMatch = block.match(/<source[^>]*>([^<]+)<\/source>/);
+          items.push({
+            title: titleMatch[1].trim(),
+            source: sourceMatch ? sourceMatch[1].trim() : new URL(realUrl).hostname.replace(/^www\./, ""),
+            url: realUrl,
+          });
+          if (items.length >= 20) break;
+        }
+        console.log(`[Soyunci] Bing News: ${items.length} articles for "${query.slice(0, 60)}"`);
         return items;
+      } catch (err) {
+        console.warn("[Soyunci] Bing News RSS failed:", err);
+        return [];
       }
-    }
-  } catch (err) {
-    console.warn("[Soyunci] Bing News RSS failed:", err);
-  }
+    })(),
 
-  // ── Fallback: Google News RSS ─────────────────────────────────────────────
-  try {
-    const googleUrl = `https://news.google.com/rss/search?q=${encoded}&hl=en-US&gl=US&ceid=US:en`;
-    const res = await fetch(googleUrl, {
-      headers: { "User-Agent": "Mozilla/5.0 (compatible; FlightDrama/1.0)" },
-      signal: AbortSignal.timeout(8000),
-    });
-    if (!res.ok) return [];
-    const xml = await res.text();
-    const items: Array<{ title: string; source: string; url: string }> = [];
-    const itemRe = /<item>([\s\S]*?)<\/item>/g;
-    let match: RegExpExecArray | null;
-    while ((match = itemRe.exec(xml)) !== null) {
-      const block = match[1];
-      const titleMatch = block.match(/<title><!\[CDATA\[(.+?)\]\]><\/title>/) ||
-                         block.match(/<title>([^<]+)<\/title>/);
-      const linkMatch = block.match(/<link>([^<]+)<\/link>/);
-      const sourceMatch = block.match(/<source[^>]*>([^<]+)<\/source>/);
-      if (titleMatch && linkMatch) {
-        items.push({
-          title: titleMatch[1].trim(),
-          source: sourceMatch ? sourceMatch[1].trim() : "Unknown",
-          url: linkMatch[1].trim(), // Google News redirect URL — will fail fetch, but title/source are still useful
+    // Google News RSS — broad coverage, different sources to Bing
+    (async (): Promise<Array<{ title: string; source: string; url: string }>> => {
+      try {
+        const googleUrl = `https://news.google.com/rss/search?q=${encoded}&hl=en-US&gl=US&ceid=US:en`;
+        const res = await fetch(googleUrl, {
+          headers: { "User-Agent": "Mozilla/5.0 (compatible; FlightDrama/1.0)" },
+          signal: AbortSignal.timeout(8000),
         });
+        if (!res.ok) return [];
+        const xml = await res.text();
+        const items: Array<{ title: string; source: string; url: string }> = [];
+        const itemRe = /<item>([\s\S]*?)<\/item>/g;
+        let match: RegExpExecArray | null;
+        while ((match = itemRe.exec(xml)) !== null) {
+          const block = match[1];
+          const titleMatch = block.match(/<title><!\[CDATA\[(.+?)\]\]><\/title>/) ||
+                             block.match(/<title>([^<]+)<\/title>/);
+          const linkMatch = block.match(/<link>([^<]+)<\/link>/);
+          const sourceMatch = block.match(/<source[^>]*>([^<]+)<\/source>/);
+          if (titleMatch && linkMatch) {
+            // Try to extract real URL from Google's redirect link
+            const rawLink = linkMatch[1].trim();
+            let realUrl = rawLink;
+            try {
+              const urlObj = new URL(rawLink.replace(/&amp;/g, "&"));
+              const urlParam = urlObj.searchParams.get("url") || urlObj.searchParams.get("q");
+              if (urlParam && urlParam.startsWith("http")) realUrl = urlParam;
+            } catch { /* keep rawLink */ }
+            if (realUrl.includes("msn.com")) continue;
+            items.push({
+              title: titleMatch[1].trim(),
+              source: sourceMatch ? sourceMatch[1].trim() : "Unknown",
+              url: realUrl,
+            });
+          }
+          if (items.length >= 20) break;
+        }
+        console.log(`[Soyunci] Google News: ${items.length} articles for "${query.slice(0, 60)}"`);
+        return items;
+      } catch (err) {
+        console.warn("[Soyunci] Google News RSS failed:", err);
+        return [];
       }
-      if (items.length >= 20) break;
+    })(),
+  ]);
+
+  // ── Merge and deduplicate by URL ──────────────────────────────────────────────────────────────────────────────────────
+  const seen = new Set<string>();
+  const merged: Array<{ title: string; source: string; url: string }> = [];
+  for (const item of [...bingItems, ...googleItems]) {
+    const key = item.url.replace(/[?#].*$/, "").toLowerCase(); // normalise: strip query params and fragments
+    if (!seen.has(key)) {
+      seen.add(key);
+      merged.push(item);
     }
-    return items;
-  } catch {
-    return [];
   }
+  console.log(`[Soyunci] Combined news pool: ${merged.length} unique articles (Bing: ${bingItems.length}, Google: ${googleItems.length})`);
+  return merged;
 }
 
 /** @deprecated Use fetchNewsRss instead */
@@ -1915,7 +1938,22 @@ export async function runFullSoyunciPipeline(
   const { selected: selectedHeadline, alternatives: alternativeHeadlines, canvaBrief } = headlinesResult;
   const { recs: imageRecommendations, candidates: imageCandidates } = imagesResult;
 
+  // Build a fun human-readable source confirmation
+  const primaryWords = primarySourceText ? primarySourceText.split(/\s+/).length : 0;
+  const secondaryCount = Math.max(0, sourcesResearched - (primarySourceText ? 1 : 0));
+  let sourceConfirmation: string;
+  if (primaryWords > 300) {
+    sourceConfirmation = `✅ Read ${primaryWords.toLocaleString()} words from primary source${secondaryCount > 0 ? ` + ${secondaryCount} secondary source${secondaryCount > 1 ? "s" : ""}` : ""}. Full story in hand.`;
+  } else if (primaryWords > 0) {
+    sourceConfirmation = `⚠️ Primary source was short (${primaryWords} words)${secondaryCount > 0 ? ` — padded with ${secondaryCount} secondary source${secondaryCount > 1 ? "s" : ""}` : " — no secondary sources found"}. Article based on available material.`;
+  } else if (secondaryCount > 0) {
+    sourceConfirmation = `⚠️ Primary source blocked — wrote from ${secondaryCount} secondary source${secondaryCount > 1 ? "s" : ""} covering the same story.`;
+  } else {
+    sourceConfirmation = `❌ No source text retrieved — article based on RSS snippet only. May be incomplete.`;
+  }
+
   console.log(`[Soyunci] Pipeline complete — ${sourcesResearched} sources, ${facts.length} facts, angle: "${angle}", editor score: ${editorReview.soyunciScore}/10`);
+  console.log(`[Soyunci] Source confirmation: ${sourceConfirmation}`);
 
   return {
     viralAngle: angle,
@@ -1929,6 +1967,7 @@ export async function runFullSoyunciPipeline(
     canvaBrief,
     researchContext,
     sourcesResearched,
+    sourceConfirmation,
     seoTitle: seoTitle ?? title.slice(0, 60),
     seoDescription: seoDescription ?? "",
     editorReview,
