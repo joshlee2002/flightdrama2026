@@ -50,6 +50,17 @@ export interface SoyunciOutput {
   seoTitle: string;
   /** SEO meta description (140-160 chars) */
   seoDescription: string;
+  /** FlightDrama Editor quality review */
+  editorReview: EditorReview;
+}
+
+export interface EditorReview {
+  storyAngle: string;
+  biggestWeakness: string;
+  missingContext: string;
+  fillerSentences: string[];
+  soyunciScore: number;
+  verdict: "Approve" | "Needs Revision";
 }
 
 export interface CanvaBrief {
@@ -1270,7 +1281,8 @@ async function writeFromFactMatrix(
   },
   feedbackExamples: string,
   voiceExamples: string,
-  perfContext: string
+  perfContext: string,
+  editorFeedback?: EditorReview
 ): Promise<{ article: string; hashtags: string[]; seoTitle: string; seoDescription: string }> {
   const examplesBlock = [voiceExamples, feedbackExamples].filter(Boolean).join("\n\n");
 
@@ -1291,11 +1303,13 @@ async function writeFromFactMatrix(
         role: "system",
         content: `You are the lead writer for FlightDrama, an aviation news account with a reputation for telling stories that make readers think: "I didn't know that."
 
-You are an editor, not a summariser. You do not simply rewrite the source material. Before writing a single word, you identify the most interesting angle in the story. That angle becomes the foundation of the entire article.
+Write like a journalist, not a summariser.
 
-The most interesting angle is rarely the headline. Look for: a contradiction, a consequence the source glosses over, a surprising detail, an operational challenge, a hidden implication, a human cost, a record, a failure, or a tension between what was said and what actually happened. Find it. Lead with it.
+Before writing, answer one question: "What is the actual story?" Build the entire article around that answer.
 
-Every article must tell the reader something they did not already know, add useful context, and explain why the story matters. By the end of the article, the reader should understand not just what happened, but why it is interesting.
+Lead with the most interesting fact, consequence, contradiction, conflict, surprise, or unusual detail. Do not treat every fact from the source as equally important. Most facts are background. One or two facts are the story. Find them.
+
+Do not simply tell readers what happened. Explain why it is interesting.
 
 You are an aviation journalist. You know aircraft types, airline economics, regulator behaviour, pilot unions, passenger rights, and fleet strategy. Use that knowledge to add context the source does not provide.
 
@@ -1303,10 +1317,10 @@ EDITORIAL RULES — non-negotiable:
 - Write like a human journalist, not an AI summariser. Natural, confident, direct.
 - Do not restate the headline in the opening sentence.
 - Do not open with the airline name, aircraft type, or a date.
-- Do not use corporate PR language, marketing speak, or generic filler.
-- Cut anything that does not add a new fact, new context, or new meaning.
+- Avoid generic conclusions, corporate language, marketing copy, and filler.
+- If a sentence could be removed without changing the reader's understanding of the story, remove it.
 - If there is a contradiction, lead with it. If there is a consequence, explain it. If there is a surprise, surface it.
-- Every paragraph must add a new piece of information or context. No paragraph should repeat what the previous one said.
+- Every paragraph must either: advance the story, add important context, explain why the story matters, or teach the reader something new. If a paragraph does none of these, cut it.
 
 FORMAT RULES — non-negotiable:
 - Write in PARAGRAPHS. Minimum 2 paragraphs, ideally 3. Each paragraph is 2-4 sentences.
@@ -1340,7 +1354,35 @@ ${perfContext ? `${perfContext}\n` : ""}`,
       },
       {
         role: "user",
-        content: `STORY: ${title}\nVIRAL ANGLE: ${factMatrix.angle}\n\n${factsBrief}\n\nWrite the article now. 140-200 words total. Output format — plain text, no JSON, no markdown:\n\n[Paragraph 1]\n\n[Paragraph 2]\n\n[Paragraph 3]\n\nHASHTAGS: #tag1 #tag2 #tag3\nSEO_TITLE: [55-60 char title]\nSEO_DESCRIPTION: [140-160 char description]`,
+        content: [
+          `STORY: ${title}`,
+          `VIRAL ANGLE: ${factMatrix.angle}`,
+          ``,
+          factsBrief,
+          ``,
+          editorFeedback ? [
+            `EDITOR FEEDBACK FROM PREVIOUS DRAFT (fix these specific issues):`,
+            `- Story Angle Identified: ${editorFeedback.storyAngle}`,
+            `- Biggest Weakness: ${editorFeedback.biggestWeakness}`,
+            `- Missing Context: ${editorFeedback.missingContext}`,
+            editorFeedback.fillerSentences.length > 0
+              ? `- Filler to Remove: ${editorFeedback.fillerSentences.join(" | ")}`
+              : "",
+            ``,
+            `Address every one of these weaknesses in your rewrite. Do not repeat the same mistakes.`,
+          ].filter(Boolean).join("\n") : "",
+          `Write the article now. 140-200 words total. Output format — plain text, no JSON, no markdown:`,
+          ``,
+          `[Paragraph 1]`,
+          ``,
+          `[Paragraph 2]`,
+          ``,
+          `[Paragraph 3]`,
+          ``,
+          `HASHTAGS: #tag1 #tag2 #tag3`,
+          `SEO_TITLE: [55-60 char title]`,
+          `SEO_DESCRIPTION: [140-160 char description]`,
+        ].filter(s => s !== undefined).join("\n"),
       },
     ],
   });
@@ -1380,6 +1422,87 @@ ${perfContext ? `${perfContext}\n` : ""}`,
 }
 
 /**
+ * Step C: FlightDrama Editor quality gate.
+ *
+ * Reviews the completed article against 10 editorial criteria.
+ * Returns a structured review with score and verdict.
+ * If score < 7, the pipeline triggers a targeted rewrite.
+ *
+ * Token cost: ~800 input tokens, ~300 output tokens per review.
+ * Only runs once per article (twice if a rewrite is triggered).
+ */
+async function runEditorReview(
+  title: string,
+  article: string,
+  angle: string
+): Promise<EditorReview> {
+  const response = await invokeLLM({
+    model: PIPELINE_MODEL,
+    messages: [
+      {
+        role: "system",
+        content: `You are the FlightDrama Editor. Your job is to review completed articles before they are approved for publication.
+
+You do not rewrite the article. You identify weaknesses with precision.
+
+Review the article against these 10 questions:
+1. What is the story in one sentence?
+2. Is the article built around that story, or does it drift?
+3. What is the most interesting angle available in this story?
+4. Is that angle introduced in the first paragraph, or is it buried?
+5. Does every paragraph add new information not already stated?
+6. Does any paragraph repeat information from a previous paragraph?
+7. Is there any corporate PR language, marketing copy, generic filler, or AI-sounding text?
+8. Does the article explain why readers should care?
+9. Does the article teach the reader something beyond what the source states?
+10. Does the article feel like an editor wrote it, or an AI summarised it?
+
+Scoring:
+- 9-10: Excellent. Publishes immediately.
+- 7-8: Good. Minor issues but approvable.
+- 5-6: Needs revision. Clear weaknesses that undermine the article.
+- 1-4: Significant problems. Rewrite required.
+
+Verdict: "Approve" if score >= 7. "Needs Revision" if score < 7.
+
+Output JSON only. No other text.`,
+      },
+      {
+        role: "user",
+        content: `STORY TITLE: ${title}\nINTENDED ANGLE: ${angle}\n\nARTICLE:\n${article}\n\nOutput JSON:\n{\n  "storyAngle": "one sentence",\n  "biggestWeakness": "one sentence",\n  "missingContext": "one sentence or none",\n  "fillerSentences": ["exact sentence if any"],\n  "soyunciScore": 7,\n  "verdict": "Approve"\n}`,
+      },
+    ],
+  });
+
+  const raw = extractText(response);
+  try {
+    const s = raw.indexOf("{");
+    const e = raw.lastIndexOf("}");
+    if (s !== -1 && e > s) {
+      const parsed = JSON.parse(raw.slice(s, e + 1)) as Partial<EditorReview>;
+      return {
+        storyAngle: parsed.storyAngle ?? "",
+        biggestWeakness: parsed.biggestWeakness ?? "",
+        missingContext: parsed.missingContext ?? "None",
+        fillerSentences: Array.isArray(parsed.fillerSentences) ? parsed.fillerSentences : [],
+        soyunciScore: typeof parsed.soyunciScore === "number" ? Math.min(10, Math.max(1, parsed.soyunciScore)) : 7,
+        verdict: parsed.verdict === "Needs Revision" ? "Needs Revision" : "Approve",
+      };
+    }
+  } catch { /* fall through */ }
+
+  // Fallback: if JSON parse fails, approve with score 7 to avoid blocking the pipeline
+  return {
+    storyAngle: angle,
+    biggestWeakness: "Editor review parse failed",
+    missingContext: "None",
+    fillerSentences: [],
+    soyunciScore: 7,
+    verdict: "Approve",
+  };
+}
+
+/**
  * Main pipeline orchestrator: runs Step A (extract) then Step B (write).
  *
  * Token efficiency vs old single-shot approach:
@@ -1405,10 +1528,30 @@ async function researchAndWrite(
 
   // Step B: Write the article from the clean fact matrix only
   console.log(`[Soyunci] Step B — writing article from fact matrix...`);
-  const { article, hashtags, seoTitle, seoDescription } = await writeFromFactMatrix(
+  let { article, hashtags, seoTitle, seoDescription } = await writeFromFactMatrix(
     title, factMatrix, feedbackExamples, voiceExamples, perfContext
   );
   console.log(`[Soyunci] Step B complete — article: ${article.split(/\s+/).length} words`);
+
+  // Step C: Editor review — quality gate with one auto-rewrite if score < 7
+  console.log(`[Soyunci] Step C — editor review...`);
+  let editorReview = await runEditorReview(title, article, factMatrix.angle);
+  console.log(`[Soyunci] Editor score: ${editorReview.soyunciScore}/10 — ${editorReview.verdict}`);
+
+  if (editorReview.verdict === "Needs Revision" && editorReview.soyunciScore < 7) {
+    console.log(`[Soyunci] Step C — score ${editorReview.soyunciScore}/10, triggering targeted rewrite...`);
+    const rewriteResult = await writeFromFactMatrix(
+      title, factMatrix, feedbackExamples, voiceExamples, perfContext,
+      editorReview  // pass editor feedback into the rewrite
+    );
+    article = rewriteResult.article;
+    hashtags = rewriteResult.hashtags;
+    seoTitle = rewriteResult.seoTitle;
+    seoDescription = rewriteResult.seoDescription;
+    // Re-review the rewritten article
+    editorReview = await runEditorReview(title, article, factMatrix.angle);
+    console.log(`[Soyunci] Rewrite editor score: ${editorReview.soyunciScore}/10 — ${editorReview.verdict}`);
+  }
 
   return {
     facts: factMatrix.facts,
@@ -1417,6 +1560,7 @@ async function researchAndWrite(
     hashtags,
     seoTitle,
     seoDescription,
+    editorReview,
   };
 }
 
@@ -1536,12 +1680,12 @@ export async function runFullSoyunciPipeline(
     console.log(`[Soyunci] Primary source: ${primarySourceText.split(/\s+/).length} words | Secondary sources: ${sourcesResearched}`);
   }
 
-  // ── CALL 1: Research + Facts + Angle + Article (one shot) ────────────
-  const { facts, angle, article, hashtags, seoTitle, seoDescription } = await researchAndWrite(
+  // ── CALL 1: Research + Facts + Angle + Article + Editor Review (Steps A, B, C) ────────────
+  const { facts, angle, article, hashtags, seoTitle, seoDescription, editorReview } = await researchAndWrite(
     title, primarySourceText, researchContext, feedbackExamples, voiceExamples, perfContext, sourcesResearched
   );
 
-  // ── CALL 2: Headlines + Canva brief (one shot) ────────────────────────────────────────────
+  // ── CALL 2: Headlines + Canva brief (one shot) ────────────────────────────────────────────────────────────────────────────────────────
   const [headlinesResult, imagesResult] = await Promise.all([
     generateHeadlinesAndCanva(title, article, angle, facts, perfInsights?.headlinePatterns ?? []),
     researchImages(title, article, angle),
@@ -1550,7 +1694,7 @@ export async function runFullSoyunciPipeline(
   const { selected: selectedHeadline, alternatives: alternativeHeadlines, canvaBrief } = headlinesResult;
   const { recs: imageRecommendations, candidates: imageCandidates } = imagesResult;
 
-  console.log(`[Soyunci] Pipeline complete — ${sourcesResearched} sources, ${facts.length} facts, angle: "${angle}"`);
+  console.log(`[Soyunci] Pipeline complete — ${sourcesResearched} sources, ${facts.length} facts, angle: "${angle}", editor score: ${editorReview.soyunciScore}/10`);
 
   return {
     viralAngle: angle,
@@ -1566,6 +1710,7 @@ export async function runFullSoyunciPipeline(
     sourcesResearched,
     seoTitle: seoTitle ?? title.slice(0, 60),
     seoDescription: seoDescription ?? "",
+    editorReview,
   };
 }
 
@@ -1597,6 +1742,9 @@ export async function runResearchAndWrite(
   alternativeHeadlines: string[];
   researchContext: string;
   sourcesResearched: number;
+  seoTitle: string;
+  seoDescription: string;
+  editorReview: EditorReview;
 }> {
     console.log(`[Soyunci] Re-research + write for: "${title}"`);
   const [researchResult, perfInsights, feedbackExamples, voiceExamples, styleContext] = await Promise.all([
@@ -1613,8 +1761,8 @@ export async function runResearchAndWrite(
     console.warn(`[Soyunci] No primary source text for re-research of "${title}" — RSS content used as fallback`);
   }
 
-  // 2-call optimised pipeline
-  const { facts, angle, article, hashtags, seoTitle, seoDescription } = await researchAndWrite(
+  // 3-step pipeline (extract, write, editor review)
+  const { facts, angle, article, hashtags, seoTitle, seoDescription, editorReview } = await researchAndWrite(
     title, primarySourceText, researchContext, feedbackExamples, voiceExamples, perfContext, sourcesResearched
   );
   const { selected: selectedHeadline, alternatives: alternativeHeadlines } = await generateHeadlinesAndCanva(
@@ -1634,6 +1782,7 @@ export async function runResearchAndWrite(
     sourcesResearched,
     seoTitle: seoTitle ?? title.slice(0, 60),
     seoDescription: seoDescription ?? "",
+    editorReview,
   };
 }
 

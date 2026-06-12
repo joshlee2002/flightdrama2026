@@ -32,7 +32,7 @@ export type InsertUser = typeof users.$inferInsert;
 export const rssSources = mysqlTable("rss_sources", {
   id: int("id").autoincrement().primaryKey(),
   name: varchar("name", { length: 256 }).notNull(),
-  url: varchar("url", { length: 2048 }).notNull().unique(),
+  url: varchar("url", { length: 768 }).notNull().unique(),
   category: varchar("category", { length: 64 }).default("aviation").notNull(),
   isActive: boolean("isActive").default(true).notNull(),
   lastFetchedAt: timestamp("lastFetchedAt"),
@@ -53,7 +53,7 @@ export type InsertRssSource = typeof rssSources.$inferInsert;
 export const stories = mysqlTable("stories", {
   id: int("id").autoincrement().primaryKey(),
   title: text("title").notNull(),
-  sourceUrl: varchar("sourceUrl", { length: 2048 }).notNull().unique(),
+  sourceUrl: varchar("sourceUrl", { length: 768 }).notNull().unique(),
   sourceName: varchar("sourceName", { length: 256 }),
   content: text("content"),
   publishedAt: timestamp("publishedAt"),
@@ -136,6 +136,17 @@ export const storyPackages = mysqlTable("story_packages", {
   alternativeHeadlines: text("alternativeHeadlines"),
   /** Number of sources successfully fetched and used during the Soyunci research step. */
   sourcesResearched: int("sourcesResearched").default(0),
+  /** FlightDrama Editor quality review (JSON) */
+  editorReview: json("editorReview").$type<{
+    storyAngle: string;
+    biggestWeakness: string;
+    missingContext: string;
+    fillerSentences: string[];
+    soyunciScore: number;
+    verdict: "Approve" | "Needs Revision";
+  }>(),
+  /** Editor score (1-10) for quick filtering */
+  editorScore: int("editorScore"),
 });
 
 export type StoryPackage = typeof storyPackages.$inferSelect;
@@ -173,7 +184,7 @@ export type InsertHistoricalPost = typeof historicalPosts.$inferInsert;
 // Every URL seen during ingestion — including ones rejected by the score gate.
 export const seenUrls = mysqlTable("seen_urls", {
   id: int("id").autoincrement().primaryKey(),
-  url: varchar("url", { length: 2048 }).notNull(),
+  url: varchar("url", { length: 768 }).notNull(),
   rejectedReason: varchar("rejectedReason", { length: 128 }),
   seenAt: timestamp("seenAt").defaultNow().notNull(),
 });

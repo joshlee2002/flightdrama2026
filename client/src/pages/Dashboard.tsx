@@ -248,6 +248,34 @@ function StoryCard({
                 </TooltipContent>
               </Tooltip>
             )}
+            {/* Editor quality score badge */}
+            {(pkg as any)?.editorScore != null && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span className={`inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border cursor-default font-medium ${
+                    (pkg as any).editorScore >= 8 ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' :
+                    (pkg as any).editorScore >= 6 ? 'bg-amber-500/10 text-amber-400 border-amber-500/20' :
+                    'bg-red-500/10 text-red-400 border-red-500/20'
+                  }`}>
+                    ✦ {(pkg as any).editorScore}/10
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent side="bottom" className="text-xs max-w-[260px] space-y-1">
+                  {(() => {
+                    const r = (pkg as any).editorReview as any;
+                    if (!r) return <p>Editor score: {(pkg as any).editorScore}/10</p>;
+                    return (
+                      <div className="space-y-1">
+                        <p><span className="font-semibold">Score:</span> {r.soyunciScore}/10 — {r.verdict}</p>
+                        {r.storyAngle && <p><span className="font-semibold">Angle:</span> {r.storyAngle}</p>}
+                        {r.biggestWeakness && r.biggestWeakness !== 'None' && <p><span className="font-semibold">Weakness:</span> {r.biggestWeakness}</p>}
+                        {r.missingContext && r.missingContext !== 'None' && <p><span className="font-semibold">Missing:</span> {r.missingContext}</p>}
+                      </div>
+                    );
+                  })()}
+                </TooltipContent>
+              </Tooltip>
+            )}
             <a
               href={story.sourceUrl}
               target="_blank"
