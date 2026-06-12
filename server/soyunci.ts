@@ -46,6 +46,10 @@ export interface SoyunciOutput {
   researchContext: string;
   /** Number of sources successfully fetched and used during the research step */
   sourcesResearched: number;
+  /** SEO title (55-60 chars, includes primary keyword) */
+  seoTitle: string;
+  /** SEO meta description (140-160 chars) */
+  seoDescription: string;
 }
 
 export interface CanvaBrief {
@@ -1267,7 +1271,7 @@ async function writeFromFactMatrix(
   feedbackExamples: string,
   voiceExamples: string,
   perfContext: string
-): Promise<{ article: string; hashtags: string[] }> {
+): Promise<{ article: string; hashtags: string[]; seoTitle: string; seoDescription: string }> {
   const examplesBlock = [voiceExamples, feedbackExamples].filter(Boolean).join("\n\n");
 
   // Build a compact, structured brief from the fact matrix
@@ -1285,45 +1289,81 @@ async function writeFromFactMatrix(
     messages: [
       {
         role: "system",
-        content: `You are an aviation publisher writing for FlightDrama, an aviation Instagram account.
+        content: `You are the lead writer for FlightDrama, the world's most engaging aviation Instagram account.
 
-You have been given a complete, pre-verified fact matrix. Every fact in it came directly from the original source. Your job is to write the best possible article using ALL of the most compelling facts.
+Your job is not to summarise aviation news. Your job is to find the drama, the outrage, the injustice, the record, the failure, the human story — and write it in a way that makes people stop scrolling, read every word, and share it.
 
-ARTICLE RULES:
-- Lead with the single most compelling specific fact — not a scene-setter, not "A [airline] flight..."
-- Every sentence introduces a NEW fact, quote, consequence, or piece of context — never repeat
-- Use direct quotes where available — they make the article feel real and credible
-- Include the timeline and consequences — readers want to know what happened and what it means
-- Professional but social-first. Clear and conversational. No corporate language. No AI-style filler
-- No moralising. No "This highlights..." or "This raises questions about..." endings
-- End with current status, what happens next, or the most striking consequence
-- 120-220 words. Flowing prose, no bullet points
-- Do NOT open with the airline or aircraft name
-${examplesBlock ? `\nVOICE EXAMPLES — match this style exactly:\n${examplesBlock.slice(0, 2500)}` : ""}
-${perfContext ? `\n${perfContext}` : ""}`,
+This is FlightDrama. If there is drama in the story, you make it. If there is outrage, you surface it. If there is a villain, you name them. If there is a victim, you humanise them. If there is a record or a milestone, you make it feel significant.
+
+You are an aviation journalist first, a storyteller second, and a publisher third. You know aircraft types, airline politics, regulator failures, pilot unions, and passenger rights better than anyone.
+
+FORMAT RULES — non-negotiable:
+- Write in PARAGRAPHS. Minimum 2 paragraphs, ideally 3. Each paragraph is 2-4 sentences.
+- Separate paragraphs with a blank line (double newline \\n\\n between paragraphs).
+- NEVER use bullet points, numbered lists, subheadings, or dashes as separators.
+- NEVER use em dashes (—). If you need a pause, use a comma or a full stop.
+- NEVER use the words: shocking, furious, dramatic, devastating, unprecedented, chaotic, sparking debate, sending shockwaves, it is worth noting, in a significant development, highlighting the importance of, underscoring concerns, this raises questions, this serves as a reminder.
+- NEVER end with a lesson, moral, or "This highlights..." sentence.
+- No corporate language. No AI filler. No passive voice where active is possible.
+
+VOICE RULES:
+- Lead with the single most compelling specific fact. Not "A flight from X to Y..." — lead with the NUMBER, the QUOTE, the CONSEQUENCE, or the RECORD.
+- Every sentence must introduce something new: a new fact, a new quote, a new consequence, a new piece of context.
+- Use direct quotes when available. A real quote from a passenger, pilot, or official makes the article feel alive.
+- Vary sentence length. Short punchy sentences land hard. Longer sentences carry weight and context.
+- Write like you are explaining an important story to a smart friend who cares about aviation — not like you are filing a wire report.
+
+STRUCTURE (3 paragraphs):
+Paragraph 1: The hook. Lead with the most compelling specific fact. Establish what happened, when, where, and to whom. Make the reader need to know more.
+Paragraph 2: The detail. Consequences, quotes, reactions, timeline. This is where you build the full picture.
+Paragraph 3: The context and current status. What does this mean? What happens next? What is the investigation status? End on a fact, not a conclusion.
+
+SEO RULES:
+- After the article, produce a SEO_TITLE (55-60 characters, includes primary keyword, no clickbait)
+- Produce a SEO_DESCRIPTION (140-160 characters, factual summary, includes airline/aircraft/location)
+
+${examplesBlock ? `VOICE EXAMPLES — match this style exactly:\n${examplesBlock.slice(0, 2500)}\n` : ""}
+${perfContext ? `${perfContext}\n` : ""}`,
       },
       {
         role: "user",
-        content: `STORY: ${title}\nVIRAL ANGLE: ${factMatrix.angle}\n\n${factsBrief}\n\nWrite the article. Return JSON with fields: article (string, 120-220 words), hashtags (array of exactly 3)`,
+        content: `STORY: ${title}\nVIRAL ANGLE: ${factMatrix.angle}\n\n${factsBrief}\n\nWrite the article now. Output format — plain text, no JSON, no markdown:\n\n[Paragraph 1]\n\n[Paragraph 2]\n\n[Paragraph 3]\n\nHASHTAGS: #tag1 #tag2 #tag3\nSEO_TITLE: [55-60 char title]\nSEO_DESCRIPTION: [140-160 char description]`,
       },
     ],
   });
 
   const raw = extractText(response);
-  try {
-    const s = raw.indexOf("{");
-    const e = raw.lastIndexOf("}");
-    if (s !== -1 && e > s) {
-      const parsed = JSON.parse(raw.slice(s, e + 1)) as { article: string; hashtags: string[] };
-      return {
-        article: parsed.article ?? "",
-        hashtags: Array.isArray(parsed.hashtags)
-          ? parsed.hashtags.map(h => h.startsWith("#") ? h : `#${h}`).slice(0, 3)
-          : [],
-      };
-    }
-  } catch { /* fall through */ }
-  return { article: raw.slice(0, 800), hashtags: [] };
+
+  // Extract hashtags
+  const hashtagMatch = raw.match(/HASHTAGS?:\s*(.+)/i);
+  const hashtags = hashtagMatch
+    ? hashtagMatch[1].split(/[\s,]+/).map(h => h.startsWith("#") ? h : `#${h}`).filter(h => h.length > 1).slice(0, 3)
+    : [];
+
+  // Extract SEO fields
+  const seoTitleMatch = raw.match(/SEO_TITLE:\s*(.+)/i);
+  const seoDescMatch = raw.match(/SEO_DESCRIPTION:\s*(.+)/i);
+  const seoTitle = seoTitleMatch ? seoTitleMatch[1].trim() : title.slice(0, 60);
+  const seoDescription = seoDescMatch ? seoDescMatch[1].trim() : "";
+
+  // Extract article: everything before HASHTAGS line, strip any JSON leakage
+  let article = raw
+    .replace(/HASHTAGS?:[\s\S]*/i, "")  // remove hashtags and everything after
+    .replace(/SEO_TITLE:[\s\S]*/i, "")   // remove SEO fields if they appear before hashtags
+    .replace(/```[\s\S]*?```/g, "")       // strip any code blocks (JSON leakage)
+    .replace(/^\s*\{[\s\S]*\}\s*$/m, "") // strip bare JSON objects
+    .replace(/—/g, ",")                   // replace em dashes with commas
+    .replace(/–/g, ",")                   // replace en dashes too
+    .trim();
+
+  // Ensure paragraphs are separated by double newlines
+  // Collapse 3+ newlines to 2, ensure single newlines between sentences become spaces
+  article = article
+    .replace(/\r\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  return { article, hashtags, seoTitle, seoDescription };
 }
 
 /**
@@ -1344,7 +1384,7 @@ async function researchAndWrite(
   voiceExamples: string,
   perfContext: string,
   sourcesResearched: number
-): Promise<{ facts: string[]; angle: string; article: string; hashtags: string[] }> {
+): Promise<{ facts: string[]; angle: string; article: string; hashtags: string[]; seoTitle: string; seoDescription: string }> {
   // Step A: Extract everything from the raw sources into a clean fact matrix
   console.log(`[Soyunci] Step A — extracting fact matrix from ${sourcesResearched} source(s)...`);
   const factMatrix = await extractFactMatrix(title, primarySourceText, researchContext, sourcesResearched);
@@ -1352,7 +1392,7 @@ async function researchAndWrite(
 
   // Step B: Write the article from the clean fact matrix only
   console.log(`[Soyunci] Step B — writing article from fact matrix...`);
-  const { article, hashtags } = await writeFromFactMatrix(
+  const { article, hashtags, seoTitle, seoDescription } = await writeFromFactMatrix(
     title, factMatrix, feedbackExamples, voiceExamples, perfContext
   );
   console.log(`[Soyunci] Step B complete — article: ${article.split(/\s+/).length} words`);
@@ -1362,6 +1402,8 @@ async function researchAndWrite(
     angle: factMatrix.angle,
     article,
     hashtags,
+    seoTitle,
+    seoDescription,
   };
 }
 
@@ -1482,7 +1524,7 @@ export async function runFullSoyunciPipeline(
   }
 
   // ── CALL 1: Research + Facts + Angle + Article (one shot) ────────────
-  const { facts, angle, article, hashtags } = await researchAndWrite(
+  const { facts, angle, article, hashtags, seoTitle, seoDescription } = await researchAndWrite(
     title, primarySourceText, researchContext, feedbackExamples, voiceExamples, perfContext, sourcesResearched
   );
 
@@ -1509,6 +1551,8 @@ export async function runFullSoyunciPipeline(
     canvaBrief,
     researchContext,
     sourcesResearched,
+    seoTitle: seoTitle ?? title.slice(0, 60),
+    seoDescription: seoDescription ?? "",
   };
 }
 
@@ -1557,7 +1601,7 @@ export async function runResearchAndWrite(
   }
 
   // 2-call optimised pipeline
-  const { facts, angle, article, hashtags } = await researchAndWrite(
+  const { facts, angle, article, hashtags, seoTitle, seoDescription } = await researchAndWrite(
     title, primarySourceText, researchContext, feedbackExamples, voiceExamples, perfContext, sourcesResearched
   );
   const { selected: selectedHeadline, alternatives: alternativeHeadlines } = await generateHeadlinesAndCanva(
@@ -1575,6 +1619,8 @@ export async function runResearchAndWrite(
     alternativeHeadlines,
     researchContext,
     sourcesResearched,
+    seoTitle: seoTitle ?? title.slice(0, 60),
+    seoDescription: seoDescription ?? "",
   };
 }
 
