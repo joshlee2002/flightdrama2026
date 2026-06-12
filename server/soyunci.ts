@@ -583,6 +583,72 @@ async function loadVoiceExamples(): Promise<string> {
 
 // ── Step 3: Article Writing ───────────────────────────────────────────────────
 
+// ── Hardcoded Voice Examples (editor-curated, always injected) ─────────────────
+// Real FlightDrama/Soyunci articles provided by the editor.
+// Injected into every article write call so the writer always has a style reference.
+const HARDCODED_VOICE_EXAMPLES = `=== REAL FLIGHTDRAMA ARTICLES — MATCH THIS VOICE EXACTLY ===
+
+Example 1 [Safety incident / diversion]:
+An Air Canada flight bound for Vancouver was forced to return to Chicago O'Hare on June 5 after pilots received an engine warning shortly after takeoff.
+
+According to the airline, Flight 1049, operated by an Airbus A220, experienced an engine indication in the cockpit. Following standard procedures, the crew shut down the affected engine and elected to return to O'Hare.
+
+The aircraft landed safely around an hour after departure, with no injuries reported among passengers or crew. Air Canada emphasized that the Airbus A220 is designed to operate safely on a single engine when required. Passengers were able to deplane normally, and the airline said it was working to get them to Vancouver as quickly as possible.
+
+The cause of the engine indication has not yet been disclosed.
+
+Example 2 [Security / criminal allegation]:
+A United Airlines flight departing Houston was forced back to the gate after a passenger allegedly boarded the aircraft using a fake boarding pass.
+
+Authorities say the man managed to get onto United Flight 469 to Los Angeles on May 18 after allegedly slipping past gate agents while they were distracted. According to investigators, the aircraft had already begun taxiing when crew members realized something was wrong.
+
+Flight attendants reportedly discovered the passenger did not have an assigned seat and was not listed on the passenger manifest. The Boeing 737 returned to the gate, triggering a response from airport police, the TSA and the FBI.
+
+Prosecutors say the incident delayed a full flight by approximately three hours. The 25-year-old Houston man now faces a felony charge as investigators allege the boarding pass found on his phone was fraudulent.
+
+Example 3 [Corporate failure / hidden contradiction]:
+The Boeing 757 is often described as one of the greatest airliners ever built, but according to a former Boeing employee, the aircraft's biggest problem was simple: it was too expensive.
+
+Glenn Tomchik, who worked on the 757 program, says Boeing realized airlines could fly around 80% of the same routes using newer Boeing 737 models while paying roughly 20% less for the aircraft.
+
+That economic reality slowly killed the 757, despite its legendary performance, long range, and ability to operate from challenging airports. Production ended in 2004 after 1,050 aircraft were built, but the jet's reputation never disappeared. Many airlines still fly the type today, more than four decades after its first flight.
+
+For many pilots and aviation enthusiasts, the 757 remains one of Boeing's most capable aircraft. The irony is that one of its greatest strengths ultimately became its weakness: it was simply built too well, and too expensively, for the market that followed.
+
+Example 4 [Production / competitive race]:
+Boeing is studying plans to increase 737 MAX production to an unprecedented 70 aircraft per month as it looks to capitalize on strong airline demand and close the gap with Airbus.
+
+The manufacturer is already working toward raising output from 42 to 47 aircraft per month, but CEO Kelly Ortberg says Boeing is now examining what it would take to push production even higher.
+
+If achieved, 70 aircraft per month would be the highest production rate in 737 program history and would help Boeing tackle its massive order backlog. The challenge will be the supply chain. Boeing must ensure engine manufacturers, parts suppliers, and assembly lines can keep pace without creating new bottlenecks.
+
+The move comes as Airbus targets production of 75 A320neo-family aircraft per month later this decade, setting up an increasingly intense battle between the world's two largest aircraft manufacturers.
+
+Example 5 [Human interest / military aviation]:
+Lieutenant Lily-Mae Fisher, Britain's only serving female Royal Navy Commando, has been identified as one of three personnel killed in Wednesday's Royal Navy Merlin Mk4 helicopter crash in Devon.
+
+The 31-year-old was on the final assessment flight of her pilot training and was due to receive her flying wings later this month.
+
+Fisher graduated from Imperial College London with a master's degree in Geology before working for BP as a geologist. Unsatisfied with office life, she left the industry and joined the Royal Navy in 2019. Alongside her military career, she represented Great Britain at the European Age Group Triathlon Championships and later completed the gruelling All Arms Commando Course, becoming Britain's only serving female Royal Navy Commando.
+
+After discovering a passion for aviation during her time with the University Air Squadron, Fisher pursued military flying and joined 846 Naval Air Squadron in 2025 to train on the Merlin Mk4 helicopter. Days before the crash, she shared videos of herself flying and reflected on how far she had come from feeling "stuck, unhappy and unfulfilled" in her early twenties.
+
+She died alongside Lieutenant Commander Chris Gayson, 42, and Petty Officer Owen Green, 24. The cause of the crash remains under investigation.
+
+Example 6 [Product announcement / first-ever milestone]:
+United Airlines has officially taken delivery of its first Airbus A321XLR, a jet expected to become the long-awaited replacement for the airline's aging Boeing 757 fleet.
+
+The aircraft arrived from Airbus' Hamburg facility on June 3 and is the first of 50 A321XLRs ordered by United.
+
+For the first time ever, United has installed its Polaris business class product on a single-aisle aircraft. The cabin features 20 lie-flat Polaris suites in a private 1-1 layout, complete with privacy doors and beds stretching up to 78 inches long.
+
+The jet also introduces Premium Plus premium economy to a United narrowbody for the first time, alongside 4K OLED entertainment screens, wireless charging throughout the cabin and a self-serve snack bar in economy.
+
+United expects the A321XLR to enter commercial service later this summer, opening the door to long, thin international routes that were previously flown by the Boeing 757.
+
+(Match their tone, sentence rhythm, and editorial judgement. Every sentence adds a new fact. No sentence restates a previous one. No filler. No corporate language. No invented significance.)
+`;
+
 async function writeSoyunciArticle(
   title: string,
   primarySourceText: string,
@@ -676,7 +742,7 @@ Write like a skilled aviation editor explaining an important story to a friend, 
 
 VIRAL ANGLE TO BUILD AROUND: ${viralAngle}
 
-${feedbackExamples ? `EXAMPLES OF GREAT FLIGHTDRAMA ARTICLES (learn from these):\n${feedbackExamples}\n` : ""}
+${HARDCODED_VOICE_EXAMPLES}${feedbackExamples ? `\nADDITIONAL EDITOR-RATED EXAMPLES:\n${feedbackExamples}\n` : ""}
 ${performanceContext}
 
 After the article, generate exactly 3 SEO hashtags on a new line starting with HASHTAGS:`,
