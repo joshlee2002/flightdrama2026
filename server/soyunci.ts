@@ -1337,6 +1337,55 @@ STEP 3 — EXTRACT SUPPORTING ELEMENTS:
 }
 
 /**
+ * STORY TYPE GATE — classifies the story before writing so the correct template is used.
+ *
+ * Type A: Conflict / investigation / safety / legal / scandal / rivalry / human interest
+ *   → Full writer, all rules, 140-200 words
+ * Type B: Business / financial with a real number and a consequence
+ *   → Full writer, emphasise the bet/contradiction angle, 140-200 words
+ * Type C: Product / announcement with a market signal
+ *   → Full writer, emphasise the bet angle, 140-200 words
+ * Type D: Thin corporate announcement / press release / no real angle
+ *   → Short factual note template, 80-100 words, only confirmed facts
+ */
+async function classifyStoryType(
+  primaryStory: string,
+  facts: string[],
+  angle: string
+): Promise<"A" | "B" | "C" | "D"> {
+  const factCount = facts.length;
+  const factSample = facts.slice(0, 6).join(" | ");
+
+  const response = await invokeLLM({
+    model: PIPELINE_MODEL,
+    messages: [
+      {
+        role: "system",
+        content: `You are a senior editor. Classify this story into one of four types. Return ONLY the letter.
+
+Type A: Conflict, investigation, safety incident, legal dispute, scandal, rivalry, human interest, death, injury, regulatory action, whistleblower, consumer harm. These stories have natural tension and winners/losers.
+Type B: Business or financial story with a real number (revenue, profit, cost, fare, salary, fine) and a clear consequence. The number is the story.
+Type C: Product launch, route launch, fleet order, cabin upgrade, partnership announcement — where the market signal or business bet is the interesting part.
+Type D: Thin corporate announcement with no conflict, no real number, no consequence, no market signal. Office openings, minor hires, generic expansions, press releases with no news value beyond the announcement itself.
+
+If in doubt between A/B/C and D, choose A/B/C. Only classify as D if the story is genuinely thin with no angle a reader would care about.`,
+      },
+      {
+        role: "user",
+        content: `STORY: ${primaryStory}\nANGLE: ${angle}\nFACT COUNT: ${factCount}\nFACTS: ${factSample}\n\nReturn ONLY: A, B, C, or D`,
+      },
+    ],
+  });
+
+  const raw = extractText(response).trim().toUpperCase();
+  if (raw.startsWith("A")) return "A";
+  if (raw.startsWith("B")) return "B";
+  if (raw.startsWith("C")) return "C";
+  if (raw.startsWith("D")) return "D";
+  return "A"; // default to full writer if classification fails
+}
+
+/**
  * STEP B — Article Writing from Fact Matrix (token-efficient, no raw source text).
  *
  * Receives ONLY the clean fact matrix from Step A — NOT the raw source text.
@@ -1362,7 +1411,8 @@ async function writeFromFactMatrix(
   feedbackExamples: string,
   voiceExamples: string,
   perfContext: string,
-  editorFeedback?: EditorReview
+  editorFeedback?: EditorReview,
+  storyType?: "A" | "B" | "C" | "D"
 ): Promise<{ article: string; hashtags: string[]; seoTitle: string; seoDescription: string }> {
   const examplesBlock = [voiceExamples, feedbackExamples].filter(Boolean).join("\n\n");
 
@@ -1498,7 +1548,19 @@ SEO RULES:
 - Produce a SEO_DESCRIPTION (140-160 characters, factual summary, includes airline/aircraft/location)
 
 ${examplesBlock ? `VOICE EXAMPLES — match this style exactly:\n${examplesBlock.slice(0, 2500)}\n` : ""}
-${perfContext ? `${perfContext}\n` : ""}`,
+${perfContext ? `${perfContext}\n` : ""}
+${storyType === "D" ? `STORY TYPE: D — THIN CORPORATE ANNOUNCEMENT
+This story is a corporate announcement with limited news value. Do NOT attempt to manufacture significance, strategic reasoning, or invented context. Write a SHORT FACTUAL NOTE only:
+- Maximum 100 words
+- 2 paragraphs only
+- State only what is confirmed: who, what, where, when
+- No invented motivation, no strategic framing, no gap-filling
+- No "aims to," "strategic move," "in a bid to," or any phrase that explains why the company did this (you do not know)
+- End on the most concrete available fact
+A clean 80-word note on real facts is better than a padded 180-word article built on theory.` : storyType === "C" ? `STORY TYPE: C — PRODUCT / ROUTE / ANNOUNCEMENT
+The announcement itself is not the story. The BUSINESS BET behind it is the story. Ask: what is the company gambling on? What has to be true for this to work? Lead with that. The product or route is the evidence. The bet is the angle.` : storyType === "B" ? `STORY TYPE: B — BUSINESS / FINANCIAL
+The number is the story. Lead with the most surprising or significant number and explain what it means in real terms. Find the contradiction or trade-off hidden inside the result. Who wins? Who loses? What changed?` : `STORY TYPE: A — CONFLICT / INVESTIGATION / HUMAN INTEREST
+The conflict, mystery, or human consequence is the story. Lead with the tension. Use the facts to build toward the most striking detail. Trust the story — do not manufacture drama.`}`,
       },
       {
         role: "user",
@@ -1681,10 +1743,14 @@ async function researchAndWrite(
   const factMatrix = await extractFactMatrix(title, primarySourceText, researchContext, sourcesResearched);
   console.log(`[Soyunci] Step A complete — ${factMatrix.facts.length} facts, angle: ${factMatrix.angle}, ${factMatrix.directQuotes.length} quotes`);
 
+  // Step A.5: Classify story type to route to the correct writer template
+  const storyType = await classifyStoryType(factMatrix.primaryStory, factMatrix.facts, factMatrix.angle);
+  console.log(`[Soyunci] Story type: ${storyType} (${storyType === "A" ? "conflict/investigation" : storyType === "B" ? "business/financial" : storyType === "C" ? "product/announcement" : "thin corporate — short note"})`);
+
   // Step B: Write the article from the clean fact matrix only
   console.log(`[Soyunci] Step B — writing article from fact matrix...`);
   let { article, hashtags, seoTitle, seoDescription } = await writeFromFactMatrix(
-    title, factMatrix, feedbackExamples, voiceExamples, perfContext
+    title, factMatrix, feedbackExamples, voiceExamples, perfContext, undefined, storyType
   );
   console.log(`[Soyunci] Step B complete — article: ${article.split(/\s+/).length} words`);
 
@@ -1697,7 +1763,7 @@ async function researchAndWrite(
     console.log(`[Soyunci] Step C — score ${editorReview.soyunciScore}/10, triggering targeted rewrite...`);
     const rewriteResult = await writeFromFactMatrix(
       title, factMatrix, feedbackExamples, voiceExamples, perfContext,
-      editorReview  // pass editor feedback into the rewrite
+      editorReview, storyType  // pass editor feedback and story type into the rewrite
     );
     article = rewriteResult.article;
     hashtags = rewriteResult.hashtags;
