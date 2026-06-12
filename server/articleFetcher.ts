@@ -107,10 +107,11 @@ const MIN_WORD_COUNT = 50;
 
 /**
  * Maximum characters to return per article.
- * Increased from 6000 to 12000 to give the LLM writer much more material.
- * At ~5 chars/word this is ~2400 words per source — enough for a full article.
+ * Set to 25,000 (~5,000 words) to ensure full articles are never cut off mid-story.
+ * Groq llama-3.3-70b has a 128k context window — we can afford to read full articles.
+ * At ~5 chars/word this covers even long investigative pieces and NTSB reports.
  */
-const MAX_CHARS = 12000;
+const MAX_CHARS = 25000;
 
 /** Fetch timeout in milliseconds */
 const FETCH_TIMEOUT_MS = 12000;

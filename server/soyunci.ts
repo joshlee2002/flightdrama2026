@@ -189,7 +189,7 @@ async function fetchNewsRss(query: string): Promise<Array<{ title: string; sourc
           source: sourceMatch ? sourceMatch[1].trim() : new URL(realUrl).hostname.replace(/^www\./, ""),
           url: realUrl,
         });
-        if (items.length >= 6) break;
+        if (items.length >= 20) break;
       }
       if (items.length > 0) {
         console.log(`[Soyunci] Bing News: ${items.length} articles found for "${query.slice(0, 60)}"`);
@@ -225,7 +225,7 @@ async function fetchNewsRss(query: string): Promise<Array<{ title: string; sourc
           url: linkMatch[1].trim(), // Google News redirect URL — will fail fetch, but title/source are still useful
         });
       }
-      if (items.length >= 5) break;
+      if (items.length >= 20) break;
     }
     return items;
   } catch {
@@ -325,29 +325,33 @@ async function deepResearch(title: string, sourceUrl: string, rssContent = ""): 
           console.log(`[Soyunci] Relevance gate: rejected ${irrelevantCount}/${newsItems.length} secondary sources as unrelated`);
         }
 
-        // Fetch full text from up to 5 relevant secondary articles
+        // Fetch full text from ALL relevant secondary articles in parallel
+        // No artificial cap — we want every source covering this story
         const secondaryUrls = relevantItems
-          .slice(0, 6)
           .map((item) => item.url)
-          .filter((u) => u && u !== sourceUrl)
-          .slice(0, 5);
+          .filter((u) => u && u !== sourceUrl && !u.includes("msn.com"));
 
         if (secondaryUrls.length > 0) {
-          console.log(`[Soyunci] Fetching ${secondaryUrls.length} relevant secondary articles from news search...`);
-          const secondaryArticles = await fetchArticlesBatch(secondaryUrls, 3);
+          console.log(`[Soyunci] Fetching ALL ${secondaryUrls.length} relevant secondary articles in parallel...`);
+          // Fetch all in parallel with concurrency limit of 10
+          const BATCH_SIZE = 10;
           let secondaryCount = 0;
-          for (const article of secondaryArticles) {
-            if (article.success && article.bodyText.length > 200) {
-              sourceParts.push(`=== SECONDARY SOURCE [${article.title || article.url}] ===`);
-              sourceParts.push(article.bodyText);
-              sourcesResearched++;
-              secondaryCount++;
-              console.log(`[Soyunci] Secondary source: ${article.wordCount} words from ${article.url}`);
-            } else {
-              console.warn(`[Soyunci] Secondary fetch failed (all layers): ${article.error ?? 'unknown'} — ${article.url}`);
+          for (let i = 0; i < secondaryUrls.length; i += BATCH_SIZE) {
+            const batch = secondaryUrls.slice(i, i + BATCH_SIZE);
+            const batchResults = await fetchArticlesBatch(batch, BATCH_SIZE);
+            for (const article of batchResults) {
+              if (article.success && article.bodyText.length > 200) {
+                sourceParts.push(`=== SECONDARY SOURCE [${article.title || article.url}] ===`);
+                sourceParts.push(article.bodyText);
+                sourcesResearched++;
+                secondaryCount++;
+                console.log(`[Soyunci] Secondary source: ${article.wordCount} words from ${article.url}`);
+              } else {
+                console.warn(`[Soyunci] Secondary fetch failed: ${article.error ?? 'unknown'} — ${article.url}`);
+              }
             }
           }
-          console.log(`[Soyunci] ${secondaryCount}/${secondaryUrls.length} secondary articles fetched`);
+          console.log(`[Soyunci] ${secondaryCount}/${secondaryUrls.length} secondary articles successfully fetched`);
         } else {
           console.log(`[Soyunci] No relevant secondary sources found for "${title.slice(0, 60)}"`);
         }
@@ -370,8 +374,8 @@ async function deepResearch(title: string, sourceUrl: string, rssContent = ""): 
 
     // ── No LLM synthesis step — raw sources passed directly to researchAndWrite ──
     // Eliminates one full LLM call per story. The article writer handles raw text fine.
-    // Cap at 16,000 chars — Groq llama-3.3-70b has 128k context, use more of it.
-    const context = combinedSources.slice(0, 16000) || `Story: ${title}\nSource: ${sourceUrl}`;
+    // Cap at 40,000 chars — Groq llama-3.3-70b has 128k context; use more of it for multi-source stories.
+    const context = combinedSources.slice(0, 40000) || `Story: ${title}\nSource: ${sourceUrl}`;
     return { context, sourcesResearched, primarySourceText };
   } catch (err) {
     console.warn("[Soyunci] deepResearch failed:", err);
@@ -1198,6 +1202,7 @@ async function extractFactMatrix(
 ): Promise<{
   facts: string[];
   angle: string;
+  primaryStory: string;
   timeline: string;
   keyEntities: string;
   directQuotes: string[];
@@ -1205,7 +1210,7 @@ async function extractFactMatrix(
   backgroundContext: string;
 }> {
   const sourceBlock = primarySourceText.length > 200
-    ? `FULL PRIMARY SOURCE (read every word):\n${primarySourceText.slice(0, 18000)}`
+    ? `FULL PRIMARY SOURCE (read every word):\n${primarySourceText.slice(0, 24000)}`
     : `(Primary source unavailable — use research brief only)`;
 
   const response = await invokeLLM({
@@ -1213,22 +1218,30 @@ async function extractFactMatrix(
     messages: [
       {
         role: "system",
-        content: `You are a senior aviation news analyst. Your ONLY job is to extract every piece of useful information from the source material. You are NOT writing an article yet.
+        content: `You are a senior aviation news analyst. Your job is to identify the ONE primary story and extract only the facts that support it.
 
-Read the full source text carefully. Extract:
-1. FACTS: Every specific number, statistic, date, location, aircraft type, registration, altitude, speed, cost, fine, compensation amount, casualty count, or other concrete detail
-2. TIMELINE: A chronological sequence of events (what happened first, then next, then after)
-3. KEY ENTITIES: Airlines, airports, aircraft types/registrations, regulators, officials, passengers mentioned by name
-4. DIRECT QUOTES: Any verbatim quotes from officials, passengers, pilots, or spokespeople (include who said it)
-5. CONSEQUENCES: What happened as a result — injuries, deaths, groundings, investigations, fines, lawsuits, policy changes
-6. BACKGROUND: Any historical context, previous incidents, fleet information, or regulatory history mentioned
-7. VIRAL ANGLE: The single strongest angle from: death_accountability | passenger_outrage | safety_failure | money_scandal | pilot_crew_pay | historic_milestone | rare_aircraft | boeing_airbus_controversy | human_interest | corporate_failure | regulatory_conflict | nostalgia | hidden_fact
+STEP 1 — IDENTIFY THE PRIMARY STORY FIRST.
+Before extracting any facts, ask: "If this source contains multiple threads, which single one is the most interesting story?"
+A source may mention financial results, safety, acquisitions, and fleet changes. Choose ONE. The others are background noise.
+The primary story is the one a reader would find most surprising, most consequential, or most worth sharing.
+Write it as a single sentence in the "primaryStory" field.
 
-Be exhaustive. If the source mentions it, capture it. Preserve exact numbers and names.`,
+STEP 2 — EXTRACT FACTS THAT SUPPORT ONLY THAT STORY.
+Do not list facts from secondary threads unless they directly explain or support the primary story.
+Every fact must be specific: a number, a date, a name, a location, an aircraft registration, a cost, a consequence.
+No vague statements. No "some critics say" without naming who and when.
+
+STEP 3 — EXTRACT SUPPORTING ELEMENTS:
+- TIMELINE: Chronological sequence of events for the primary story only
+- KEY ENTITIES: Airlines, airports, aircraft types, regulators, officials directly involved
+- DIRECT QUOTES: Verbatim quotes only — include speaker name and role. If a quote is vague or unattributed, exclude it.
+- CONSEQUENCES: What actually happened as a result — injuries, deaths, groundings, investigations, fines, lawsuits
+- BACKGROUND: Only context that directly explains why the primary story matters
+- VIRAL ANGLE: The single strongest angle from: death_accountability | passenger_outrage | safety_failure | money_scandal | pilot_crew_pay | historic_milestone | rare_aircraft | boeing_airbus_controversy | human_interest | corporate_failure | regulatory_conflict | nostalgia | hidden_fact`,
       },
       {
         role: "user",
-        content: `STORY: ${title}\n\n${sourceBlock}\n\nADDITIONAL SOURCES (${sourcesResearched} total):\n${researchContext.slice(0, 8000)}\n\nReturn ONLY valid JSON:\n{\n  "facts": ["exact fact with number/name/date", ...],\n  "angle": "angle_name",\n  "timeline": "chronological sequence as a single paragraph",\n  "keyEntities": "comma-separated list of airlines, airports, aircraft, people",\n  "directQuotes": ["verbatim quote — Source Name", ...],\n  "consequences": "what happened as a result",\n  "backgroundContext": "relevant history or context"\n}`,
+        content: `STORY: ${title}\n\n${sourceBlock}\n\nADDITIONAL SOURCES (${sourcesResearched} total — read all of them):\n${researchContext.slice(0, 16000)}\n\nIMPORTANT: Before listing facts, identify the ONE primary story. If the source contains multiple threads (e.g. financial performance + safety + acquisition), choose the single most interesting one. The "angle" field must reflect that primary story. Facts from secondary threads should only appear if they directly support the primary story.\n\nReturn ONLY valid JSON:\n{\n  "facts": ["exact fact with number/name/date — primary story only", ...],\n  "angle": "angle_name",\n  "primaryStory": "one sentence: what is the actual story?",\n  "timeline": "chronological sequence as a single paragraph",\n  "keyEntities": "comma-separated list of airlines, airports, aircraft, people",\n  "directQuotes": ["verbatim quote — Source Name", ...],\n  "consequences": "what happened as a result",\n  "backgroundContext": "relevant history or context that supports the primary story only"\n}`,
       },
     ],
   });
@@ -1239,12 +1252,13 @@ Be exhaustive. If the source mentions it, capture it. Preserve exact numbers and
     const e = raw.lastIndexOf("}");
     if (s !== -1 && e > s) {
       const parsed = JSON.parse(raw.slice(s, e + 1)) as {
-        facts: string[]; angle: string; timeline: string; keyEntities: string;
+        facts: string[]; angle: string; primaryStory: string; timeline: string; keyEntities: string;
         directQuotes: string[]; consequences: string; backgroundContext: string;
       };
       return {
         facts: Array.isArray(parsed.facts) ? parsed.facts : [],
         angle: parsed.angle ?? "Aviation incident",
+        primaryStory: parsed.primaryStory ?? "",
         timeline: parsed.timeline ?? "",
         keyEntities: parsed.keyEntities ?? "",
         directQuotes: Array.isArray(parsed.directQuotes) ? parsed.directQuotes : [],
@@ -1253,7 +1267,7 @@ Be exhaustive. If the source mentions it, capture it. Preserve exact numbers and
       };
     }
   } catch { /* fall through */ }
-  return { facts: [], angle: "Aviation incident", timeline: "", keyEntities: "", directQuotes: [], consequences: "", backgroundContext: "" };
+  return { facts: [], angle: "Aviation incident", primaryStory: "", timeline: "", keyEntities: "", directQuotes: [], consequences: "", backgroundContext: "" };
 }
 
 /**
@@ -1287,13 +1301,15 @@ async function writeFromFactMatrix(
   const examplesBlock = [voiceExamples, feedbackExamples].filter(Boolean).join("\n\n");
 
   // Build a compact, structured brief from the fact matrix
+  // primaryStory goes FIRST — it is the editorial decision the writer must build around
   const factsBrief = [
-    factMatrix.facts.length > 0 ? `FACTS:\n${factMatrix.facts.map(f => `- ${f}`).join("\n")}` : "",
+    factMatrix.primaryStory ? `THE STORY (build the entire article around this one sentence):\n${factMatrix.primaryStory}` : "",
+    factMatrix.facts.length > 0 ? `FACTS (primary story only — do not introduce unrelated threads):\n${factMatrix.facts.map(f => `- ${f}`).join("\n")}` : "",
     factMatrix.timeline ? `TIMELINE:\n${factMatrix.timeline}` : "",
     factMatrix.keyEntities ? `KEY ENTITIES: ${factMatrix.keyEntities}` : "",
-    factMatrix.directQuotes.length > 0 ? `DIRECT QUOTES:\n${factMatrix.directQuotes.map(q => `- "${q}"`).join("\n")}` : "",
+    factMatrix.directQuotes.length > 0 ? `DIRECT QUOTES (use these — they make the article credible):\n${factMatrix.directQuotes.map(q => `- "${q}"`).join("\n")}` : "",
     factMatrix.consequences ? `CONSEQUENCES:\n${factMatrix.consequences}` : "",
-    factMatrix.backgroundContext ? `BACKGROUND:\n${factMatrix.backgroundContext}` : "",
+    factMatrix.backgroundContext ? `BACKGROUND (only use if it supports the primary story):\n${factMatrix.backgroundContext}` : "",
   ].filter(Boolean).join("\n\n");
 
   const response = await invokeLLM({
@@ -1312,6 +1328,9 @@ Lead with the most interesting fact, consequence, contradiction, conflict, surpr
 Do not simply tell readers what happened. Explain why it is interesting.
 
 You are an aviation journalist. You know aircraft types, airline economics, regulator behaviour, pilot unions, passenger rights, and fleet strategy. Use that knowledge to add context the source does not provide.
+
+SINGLE STORY DISCIPLINE — the most important rule:
+The fact matrix contains ONE primary story. Build the entire article around it. Do not introduce a second thread, a second topic, or a second angle. If the facts mention financial results AND safety AND an acquisition, pick ONE and ignore the others entirely. A 180-word article cannot cover three stories. It can cover one story well. Choose the most interesting one and own it completely.
 
 EDITORIAL RULES — non-negotiable:
 - Write like a human journalist, not an AI summariser. Natural, confident, direct.
