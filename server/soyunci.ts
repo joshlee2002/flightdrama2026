@@ -1346,12 +1346,14 @@ SINGLE STORY DISCIPLINE — the most important rule:
 The fact matrix contains ONE primary story. Build the entire article around it. Do not introduce a second thread, a second topic, or a second angle. If the facts mention financial results AND safety AND an acquisition, pick ONE and ignore the others entirely. A 180-word article cannot cover three stories. It can cover one story well. Choose the most interesting one and own it completely.
 
 ANTI-REPETITION — the clearest AI tell:
-Before you finalise the article, read it back sentence by sentence and ask: does this sentence say something already said in a previous sentence? If yes, cut it. No exceptions.
+Before you write each sentence, ask: does this sentence contain information the reader did not have from the previous sentence? If not, do not write it. Not reword it. Not soften it. Cut it entirely. This is the single most important mechanical rule in this prompt.
 Each paragraph has ONE job:
 - Paragraph 1: Deliver the story. The reader must know what happened and why it is interesting by the end of this paragraph.
 - Paragraph 2: Add something the reader did not know from paragraph 1. A new consequence. New context. A direct quote. A new fact. If paragraph 2 is just paragraph 1 reworded, it fails its job and must be rewritten or cut entirely.
 - Paragraph 3: Move the story forward. What happens next, what is under investigation, what the lasting consequence is. End on a fact, not a summary of what you just wrote.
 If you catch yourself writing the same idea twice in different words, stop. Cut one. A repeated idea is worse than a missing one. Repetition is the single clearest sign that an AI wrote this, not a journalist.
+ONE FACT RULE: If the source contains only one concrete fact, write one sentence about that fact and stop. Do not pad it into three paragraphs by restating it with different words. A 60-word article built on one real fact is better than a 180-word article that says the same thing six times. Padding is not writing. It is the absence of writing.
+FILLER SENTENCE TEST: These sentence patterns are always filler and must never appear: "This comes as [industry] continues to face challenges..." / "This is particularly important because..." / "It will be interesting to see how..." / "This is seen as a strategic move to..." / "As [industry] continues to evolve..." / "This move is expected to..." / "[Company] aims to provide..." These are the sentences a writer produces when they have run out of facts. They add nothing. Cut every one.
 
 EDITORIAL RULES — non-negotiable:
 - Write like a human journalist, not an AI summariser. Natural, confident, direct.
