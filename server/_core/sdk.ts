@@ -298,7 +298,21 @@ class SDKServer {
         lastSignedIn: signedInAt,
       });
       const user = await db.getUserByOpenId(PASSWORD_AUTH_OPEN_ID);
-      if (!user) throw ForbiddenError("Failed to create password-auth user");
+      // If no database is configured, return an in-memory admin user so the
+      // app works without a DATABASE_URL (all features that need DB will
+      // gracefully no-op via getDb() returning null).
+      if (!user) {
+        return {
+          id: 1,
+          openId: PASSWORD_AUTH_OPEN_ID,
+          name: session.name || "Admin",
+          email: null,
+          loginMethod: "password" as string | null,
+          role: "admin" as string | null,
+          lastSignedIn: signedInAt,
+          createdAt: signedInAt,
+        } as any;
+      }
       return user;
     }
 

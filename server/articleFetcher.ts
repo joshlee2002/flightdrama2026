@@ -231,6 +231,8 @@ async function fetchWithSafariUA(url: string): Promise<FetchedArticle> {
 async function fetchViaJina(url: string): Promise<FetchedArticle> {
   const blank: FetchedArticle = { url, title: "", bodyText: "", wordCount: 0, success: false };
   const jinaUrl = `${JINA_READER_BASE}${url}`;
+  // Use authenticated API key if available — avoids shared-IP blocks on sites like Simple Flying and Reuters
+  const jinaApiKey = process.env.JINA_API_KEY ?? "";
   try {
     const response = await fetch(jinaUrl, {
       headers: {
@@ -238,6 +240,7 @@ async function fetchViaJina(url: string): Promise<FetchedArticle> {
         "User-Agent": "Mozilla/5.0 (compatible; FlightDrama/2.0 aviation-research-bot)",
         "X-Return-Format": "markdown",
         "X-Timeout": "20",
+        ...(jinaApiKey ? { "Authorization": `Bearer ${jinaApiKey}` } : {}),
       },
       signal: AbortSignal.timeout(25000),
       redirect: "follow",
