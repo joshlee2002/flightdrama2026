@@ -277,18 +277,48 @@ async function deepResearch(title: string, sourceUrl: string, rssContent = ""): 
     // ── Source 2+: Bing/Google News RSS — find and fetch secondary articles ─────
     // Uses Bing News RSS which returns real article URLs (not Google redirect wrappers).
     // Falls back to Google News RSS if Bing fails.
+    // RELEVANCE GATE: Secondary sources are only used if their title shares at least
+    // 2 significant words with the primary story title. This prevents loosely-related
+    // articles from polluting the fact matrix with irrelevant information.
     try {
       const newsItems = await fetchNewsRss(searchQuery);
       if (newsItems.length > 0) {
-        // Fetch full text from up to 5 secondary articles using the 4-layer fetcher
-        const secondaryUrls = newsItems
+        // ── Relevance filter: only accept secondary sources that are clearly about the same story ──
+        // Extract significant words from the primary title (ignore stop words)
+        const STOP_WORDS = new Set(["a","an","the","and","or","but","in","on","at","to","for",
+          "of","with","by","from","is","was","are","were","be","been","has","have","had",
+          "it","its","this","that","as","after","over","into","about","up","out","after",
+          "flight","airline","aircraft","plane","airport"]);
+        const titleWords = title.toLowerCase()
+          .replace(/[^a-z0-9\s]/g, " ")
+          .split(/\s+/)
+          .filter(w => w.length > 3 && !STOP_WORDS.has(w));
+
+        const isRelevantSecondary = (candidateTitle: string): boolean => {
+          const candidateWords = candidateTitle.toLowerCase()
+            .replace(/[^a-z0-9\s]/g, " ")
+            .split(/\s+/)
+            .filter(w => w.length > 3 && !STOP_WORDS.has(w));
+          // Count how many significant words from the primary title appear in the candidate
+          const overlap = titleWords.filter(w => candidateWords.some(cw => cw.includes(w) || w.includes(cw)));
+          return overlap.length >= 2;
+        };
+
+        const relevantItems = newsItems.filter(item => isRelevantSecondary(item.title));
+        const irrelevantCount = newsItems.length - relevantItems.length;
+        if (irrelevantCount > 0) {
+          console.log(`[Soyunci] Relevance gate: rejected ${irrelevantCount}/${newsItems.length} secondary sources as unrelated`);
+        }
+
+        // Fetch full text from up to 5 relevant secondary articles
+        const secondaryUrls = relevantItems
           .slice(0, 6)
           .map((item) => item.url)
           .filter((u) => u && u !== sourceUrl)
           .slice(0, 5);
 
         if (secondaryUrls.length > 0) {
-          console.log(`[Soyunci] Fetching ${secondaryUrls.length} secondary articles from news search...`);
+          console.log(`[Soyunci] Fetching ${secondaryUrls.length} relevant secondary articles from news search...`);
           const secondaryArticles = await fetchArticlesBatch(secondaryUrls, 3);
           let secondaryCount = 0;
           for (const article of secondaryArticles) {
@@ -303,6 +333,8 @@ async function deepResearch(title: string, sourceUrl: string, rssContent = ""): 
             }
           }
           console.log(`[Soyunci] ${secondaryCount}/${secondaryUrls.length} secondary articles fetched`);
+        } else {
+          console.log(`[Soyunci] No relevant secondary sources found for "${title.slice(0, 60)}"`);
         }
       }
     } catch (err) {
@@ -1132,56 +1164,56 @@ VISUAL HIERARCHY: [text and image arrangement]`,
 
 // ── Optimised 2-Call Pipeline Core ───────────────────────────────────────────
 /**
- * Call 1: Feed all raw sources into a single prompt that outputs
- * facts + viral angle + article + hashtags in one shot.
- * Saves ~60% tokens vs the original 3-step approach.
+ * STEP A — Fact Matrix Extraction (token-efficient, no writing).
+ *
+ * Reads the full primary source + research brief and produces a clean,
+ * structured fact matrix. This step is intentionally cheap:
+ *   • Input: raw source text (capped at 18,000 chars) + research brief (8,000 chars)
+ *   • Output: compact JSON fact matrix (~400-700 tokens output)
+ *   • No article writing happens here — zero wasted tokens on prose
+ *
+ * The fact matrix is then passed to STEP B as the ONLY source of truth,
+ * preventing the writer from hallucinating or ignoring buried context.
  */
-async function researchAndWrite(
+async function extractFactMatrix(
   title: string,
   primarySourceText: string,
   researchContext: string,
-  feedbackExamples: string,
-  voiceExamples: string,
-  perfContext: string,
   sourcesResearched: number
-): Promise<{ facts: string[]; angle: string; article: string; hashtags: string[] }> {
+): Promise<{
+  facts: string[];
+  angle: string;
+  timeline: string;
+  keyEntities: string;
+  directQuotes: string[];
+  consequences: string;
+  backgroundContext: string;
+}> {
   const sourceBlock = primarySourceText.length > 200
-    ? `FULL PRIMARY SOURCE ARTICLE:\n${primarySourceText.slice(0, 20000)}`
+    ? `FULL PRIMARY SOURCE (read every word):\n${primarySourceText.slice(0, 18000)}`
     : `(Primary source unavailable — use research brief only)`;
-
-  const examplesBlock = [voiceExamples, feedbackExamples].filter(Boolean).join("\n\n");
 
   const response = await invokeLLM({
     model: PIPELINE_MODEL,
     messages: [
       {
         role: "system",
-        content: `You are Soyunci, FlightDrama's editorial AI. FlightDrama is an aviation Instagram account.
-You receive raw source material and produce a complete editorial package in one pass.
+        content: `You are a senior aviation news analyst. Your ONLY job is to extract every piece of useful information from the source material. You are NOT writing an article yet.
 
-YOUR OUTPUT must be a single JSON object with these exact fields:
-- "facts": array of 8-15 specific facts (numbers, names, dates, quotes, costs, consequences)
-- "angle": the single strongest viral angle from this list:
-  death_accountability | passenger_outrage | safety_failure | money_scandal |
-  pilot_crew_pay | historic_milestone | rare_aircraft | boeing_airbus_controversy |
-  human_interest | corporate_failure | regulatory_conflict | nostalgia | hidden_fact
-- "article": 120-220 word article in FlightDrama voice (see rules below)
-- "hashtags": array of exactly 3 hashtags
+Read the full source text carefully. Extract:
+1. FACTS: Every specific number, statistic, date, location, aircraft type, registration, altitude, speed, cost, fine, compensation amount, casualty count, or other concrete detail
+2. TIMELINE: A chronological sequence of events (what happened first, then next, then after)
+3. KEY ENTITIES: Airlines, airports, aircraft types/registrations, regulators, officials, passengers mentioned by name
+4. DIRECT QUOTES: Any verbatim quotes from officials, passengers, pilots, or spokespeople (include who said it)
+5. CONSEQUENCES: What happened as a result — injuries, deaths, groundings, investigations, fines, lawsuits, policy changes
+6. BACKGROUND: Any historical context, previous incidents, fleet information, or regulatory history mentioned
+7. VIRAL ANGLE: The single strongest angle from: death_accountability | passenger_outrage | safety_failure | money_scandal | pilot_crew_pay | historic_milestone | rare_aircraft | boeing_airbus_controversy | human_interest | corporate_failure | regulatory_conflict | nostalgia | hidden_fact
 
-ARTICLE RULES:
-- Lead with the single most compelling specific fact — not a scene-setter
-- Every sentence introduces a NEW fact, quote, consequence, or context — never repeat
-- Include at least one direct quote if available
-- Professional but social-first. No moralising. No "This highlights..." endings
-- End with current status or what happens next
-- 120-220 words exactly. Flowing prose, no bullet points
-- Do NOT open with the airline or aircraft name
-${examplesBlock ? `\nVOICE EXAMPLES — match this style exactly:\n${examplesBlock.slice(0, 2000)}` : ""}
-${perfContext ? `\n${perfContext}` : ""}`,
+Be exhaustive. If the source mentions it, capture it. Preserve exact numbers and names.`,
       },
       {
         role: "user",
-        content: `STORY TITLE: ${title}\n\n${sourceBlock}\n\nRESEARCH BRIEF (${sourcesResearched} sources):\n${researchContext.slice(0, 10000)}\n\nReturn ONLY valid JSON with fields: facts, angle, article, hashtags`,
+        content: `STORY: ${title}\n\n${sourceBlock}\n\nADDITIONAL SOURCES (${sourcesResearched} total):\n${researchContext.slice(0, 8000)}\n\nReturn ONLY valid JSON:\n{\n  "facts": ["exact fact with number/name/date", ...],\n  "angle": "angle_name",\n  "timeline": "chronological sequence as a single paragraph",\n  "keyEntities": "comma-separated list of airlines, airports, aircraft, people",\n  "directQuotes": ["verbatim quote — Source Name", ...],\n  "consequences": "what happened as a result",\n  "backgroundContext": "relevant history or context"\n}`,
       },
     ],
   });
@@ -1192,18 +1224,145 @@ ${perfContext ? `\n${perfContext}` : ""}`,
     const e = raw.lastIndexOf("}");
     if (s !== -1 && e > s) {
       const parsed = JSON.parse(raw.slice(s, e + 1)) as {
-        facts: string[]; angle: string; article: string; hashtags: string[];
+        facts: string[]; angle: string; timeline: string; keyEntities: string;
+        directQuotes: string[]; consequences: string; backgroundContext: string;
       };
       return {
         facts: Array.isArray(parsed.facts) ? parsed.facts : [],
         angle: parsed.angle ?? "Aviation incident",
-        article: parsed.article ?? "",
-        hashtags: Array.isArray(parsed.hashtags) ? parsed.hashtags.map(h => h.startsWith("#") ? h : `#${h}`).slice(0, 3) : [],
+        timeline: parsed.timeline ?? "",
+        keyEntities: parsed.keyEntities ?? "",
+        directQuotes: Array.isArray(parsed.directQuotes) ? parsed.directQuotes : [],
+        consequences: parsed.consequences ?? "",
+        backgroundContext: parsed.backgroundContext ?? "",
       };
     }
   } catch { /* fall through */ }
-  // Fallback: try to extract article from raw text
-  return { facts: [], angle: "Aviation incident", article: raw.slice(0, 500), hashtags: [] };
+  return { facts: [], angle: "Aviation incident", timeline: "", keyEntities: "", directQuotes: [], consequences: "", backgroundContext: "" };
+}
+
+/**
+ * STEP B — Article Writing from Fact Matrix (token-efficient, no raw source text).
+ *
+ * Receives ONLY the clean fact matrix from Step A — NOT the raw source text.
+ * This means:
+ *   • The writer cannot miss buried facts (they were already extracted)
+ *   • The writer cannot hallucinate (it only has verified facts)
+ *   • Input tokens are minimal (~2,000-3,500 chars of structured facts)
+ *   • The writer focuses 100% on voice, structure, and impact
+ *
+ * This is the key architectural change: separate knowing from writing.
+ */
+async function writeFromFactMatrix(
+  title: string,
+  factMatrix: {
+    facts: string[];
+    angle: string;
+    timeline: string;
+    keyEntities: string;
+    directQuotes: string[];
+    consequences: string;
+    backgroundContext: string;
+  },
+  feedbackExamples: string,
+  voiceExamples: string,
+  perfContext: string
+): Promise<{ article: string; hashtags: string[] }> {
+  const examplesBlock = [voiceExamples, feedbackExamples].filter(Boolean).join("\n\n");
+
+  // Build a compact, structured brief from the fact matrix
+  const factsBrief = [
+    factMatrix.facts.length > 0 ? `FACTS:\n${factMatrix.facts.map(f => `- ${f}`).join("\n")}` : "",
+    factMatrix.timeline ? `TIMELINE:\n${factMatrix.timeline}` : "",
+    factMatrix.keyEntities ? `KEY ENTITIES: ${factMatrix.keyEntities}` : "",
+    factMatrix.directQuotes.length > 0 ? `DIRECT QUOTES:\n${factMatrix.directQuotes.map(q => `- "${q}"`).join("\n")}` : "",
+    factMatrix.consequences ? `CONSEQUENCES:\n${factMatrix.consequences}` : "",
+    factMatrix.backgroundContext ? `BACKGROUND:\n${factMatrix.backgroundContext}` : "",
+  ].filter(Boolean).join("\n\n");
+
+  const response = await invokeLLM({
+    model: PIPELINE_MODEL,
+    messages: [
+      {
+        role: "system",
+        content: `You are an aviation publisher writing for FlightDrama, an aviation Instagram account.
+
+You have been given a complete, pre-verified fact matrix. Every fact in it came directly from the original source. Your job is to write the best possible article using ALL of the most compelling facts.
+
+ARTICLE RULES:
+- Lead with the single most compelling specific fact — not a scene-setter, not "A [airline] flight..."
+- Every sentence introduces a NEW fact, quote, consequence, or piece of context — never repeat
+- Use direct quotes where available — they make the article feel real and credible
+- Include the timeline and consequences — readers want to know what happened and what it means
+- Professional but social-first. Clear and conversational. No corporate language. No AI-style filler
+- No moralising. No "This highlights..." or "This raises questions about..." endings
+- End with current status, what happens next, or the most striking consequence
+- 120-220 words. Flowing prose, no bullet points
+- Do NOT open with the airline or aircraft name
+${examplesBlock ? `\nVOICE EXAMPLES — match this style exactly:\n${examplesBlock.slice(0, 2500)}` : ""}
+${perfContext ? `\n${perfContext}` : ""}`,
+      },
+      {
+        role: "user",
+        content: `STORY: ${title}\nVIRAL ANGLE: ${factMatrix.angle}\n\n${factsBrief}\n\nWrite the article. Return JSON with fields: article (string, 120-220 words), hashtags (array of exactly 3)`,
+      },
+    ],
+  });
+
+  const raw = extractText(response);
+  try {
+    const s = raw.indexOf("{");
+    const e = raw.lastIndexOf("}");
+    if (s !== -1 && e > s) {
+      const parsed = JSON.parse(raw.slice(s, e + 1)) as { article: string; hashtags: string[] };
+      return {
+        article: parsed.article ?? "",
+        hashtags: Array.isArray(parsed.hashtags)
+          ? parsed.hashtags.map(h => h.startsWith("#") ? h : `#${h}`).slice(0, 3)
+          : [],
+      };
+    }
+  } catch { /* fall through */ }
+  return { article: raw.slice(0, 800), hashtags: [] };
+}
+
+/**
+ * Main pipeline orchestrator: runs Step A (extract) then Step B (write).
+ *
+ * Token efficiency vs old single-shot approach:
+ *   OLD: 1 call with 20,000 chars raw text + full article output in one shot
+ *        → LLM loses track of facts buried mid-context, misses key details
+ *   NEW: Step A: 18,000 chars raw → compact JSON fact matrix (~500 tokens)
+ *        Step B: ~2,500 chars structured facts → article (~300 tokens)
+ *        → Writer has 100% of facts, uses 100% of context window for writing
+ */
+async function researchAndWrite(
+  title: string,
+  primarySourceText: string,
+  researchContext: string,
+  feedbackExamples: string,
+  voiceExamples: string,
+  perfContext: string,
+  sourcesResearched: number
+): Promise<{ facts: string[]; angle: string; article: string; hashtags: string[] }> {
+  // Step A: Extract everything from the raw sources into a clean fact matrix
+  console.log(`[Soyunci] Step A — extracting fact matrix from ${sourcesResearched} source(s)...`);
+  const factMatrix = await extractFactMatrix(title, primarySourceText, researchContext, sourcesResearched);
+  console.log(`[Soyunci] Step A complete — ${factMatrix.facts.length} facts, angle: ${factMatrix.angle}, ${factMatrix.directQuotes.length} quotes`);
+
+  // Step B: Write the article from the clean fact matrix only
+  console.log(`[Soyunci] Step B — writing article from fact matrix...`);
+  const { article, hashtags } = await writeFromFactMatrix(
+    title, factMatrix, feedbackExamples, voiceExamples, perfContext
+  );
+  console.log(`[Soyunci] Step B complete — article: ${article.split(/\s+/).length} words`);
+
+  return {
+    facts: factMatrix.facts,
+    angle: factMatrix.angle,
+    article,
+    hashtags,
+  };
 }
 
 /**

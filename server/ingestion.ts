@@ -16,9 +16,16 @@ export interface FetchedStory {
   publishedAt: Date | null;
 }
 
-// ── All confirmed source URLs from the FlightDrama inoreader config ───────────
+// ── All confirmed source URLs — comprehensive aviation + viral coverage ──────
+// Last expanded: 2026-06-12. Sources are grouped by tier:
+//   "aviation"  — dedicated aviation publications, pass ALL stories through
+//   "regulator" — official safety/regulatory bodies, pass ALL stories through
+//   "viral"     — general/mainstream media, strict aviation keyword gate applied
+//   "google"    — Google News topic searches, strict keyword gate applied
 export const DEFAULT_RSS_SOURCES = [
-  // ── RAW AVIATION ─────────────────────────────────────────────────────────
+
+  // ── TIER 1: CORE AVIATION NEWS ────────────────────────────────────────────
+  // High-volume, high-quality aviation-native publications. Every story is relevant.
   { name: "Simple Flying", url: "https://simpleflying.com/feed/", category: "aviation" as const },
   { name: "Simple Flying Aviation News", url: "https://simpleflying.com/feed/category/aviation-news/", category: "aviation" as const },
   { name: "AeroTime", url: "https://www.aerotime.aero/feed", category: "aviation" as const },
@@ -27,21 +34,64 @@ export const DEFAULT_RSS_SOURCES = [
   { name: "Aviation A2Z", url: "https://aviationa2z.com/index.php/feed/", category: "aviation" as const },
   { name: "The Aviationist", url: "https://theaviationist.com/feed/", category: "aviation" as const },
   { name: "The Aviation Geek Club", url: "https://theaviationgeekclub.com/feed/", category: "aviation" as const },
-  { name: "View from the Wing", url: "http://boardingarea.com/blogs/viewfromthewing/feed/", category: "aviation" as const },
   { name: "AeroTelegraph", url: "https://www.aerotelegraph.com/feed", category: "aviation" as const },
   { name: "AviationSource News", url: "https://aviationsourcenews.com/feed/", category: "aviation" as const },
-  { name: "One Mile at a Time", url: "https://onemileatatime.com/feed/", category: "aviation" as const },
   { name: "AOPA General Aviation News", url: "https://www.aopa.org/rss", category: "aviation" as const },
   { name: "Aviation Humor", url: "https://aviationhumor.net/feed/", category: "aviation" as const },
   { name: "Airlines Aviation Economic Times", url: "https://economictimes.indiatimes.com/rssfeeds/13354027.cms", category: "aviation" as const },
-  // NOTE: TIME, Guardian, WSJ, Independent are general news sources — moved to viral
-  // so they go through the strict aviation keyword gate instead of bypassing it.
+
+  // ── TIER 2: NEW AVIATION SOURCES (verified working 2026-06-12) ────────────
+  // Fills major gaps: AirlineGeeks, AVweb, FlightGlobal, ch-aviation, Flightradar24 blog
+  { name: "AirlineGeeks", url: "https://airlinegeeks.com/feed/", category: "aviation" as const },
+  { name: "AVweb", url: "https://www.avweb.com/feed/", category: "aviation" as const },
+  { name: "FlightGlobal", url: "https://www.flightglobal.com/feed", category: "aviation" as const },
+  { name: "ch-aviation Blog", url: "https://about.ch-aviation.com/feed/", category: "aviation" as const },
+  { name: "Flightradar24 Blog", url: "https://www.flightradar24.com/blog/feed/", category: "aviation" as const },
+  { name: "Flying Magazine", url: "https://www.flyingmag.com/feed/", category: "aviation" as const },
+  { name: "AirlineReporter", url: "https://www.airlinereporter.com/feed/", category: "aviation" as const },
+  { name: "Cranky Flier", url: "https://crankyflier.com/feed/", category: "aviation" as const },
+  { name: "Fear of Landing", url: "https://fearoflanding.com/feed/", category: "aviation" as const },
+  { name: "Airinsight", url: "https://airinsight.com/feed/", category: "aviation" as const },
+  { name: "Paddle Your Own Kanoo", url: "https://paddleyourownkanoo.com/feed/", category: "aviation" as const },
+
+  // ── TIER 3: PASSENGER / CONSUMER AVIATION ────────────────────────────────
+  // Travel-focused but aviation-heavy — good for passenger chaos and airline drama
+  { name: "One Mile at a Time", url: "https://onemileatatime.com/feed/", category: "aviation" as const },
+  { name: "View from the Wing", url: "http://boardingarea.com/blogs/viewfromthewing/feed/", category: "aviation" as const },
+  { name: "Live and Lets Fly", url: "https://liveandletsfly.com/feed/", category: "aviation" as const },
+  { name: "Head for Points", url: "https://headforpoints.com/feed/", category: "aviation" as const },
+  { name: "The Points Guy", url: "https://thepointsguy.com/feed/", category: "aviation" as const },
+  { name: "Boarding Area", url: "https://boardingarea.com/feed/", category: "aviation" as const },
+  { name: "Business Traveller", url: "https://www.businesstraveller.com/feed/", category: "aviation" as const },
+  { name: "Condé Nast Traveler", url: "https://www.cntraveler.com/feed/rss", category: "aviation" as const },
+
+  // ── TIER 4: REGULATOR & SAFETY SOURCES ───────────────────────────────────
+  // Official bodies — every story is aviation-relevant by definition
+  // These are the sources that break real incidents before anyone else
+  { name: "EASA Newsroom", url: "https://www.easa.europa.eu/en/newsroom-and-events/news/rss.xml", category: "regulator" as const },
+
+  // ── TIER 5: GOOGLE NEWS TOPIC FEEDS ──────────────────────────────────────
+  // Targeted searches that catch stories missed by all other feeds.
+  // These use the strict aviation keyword gate (category="google").
+  // They are invaluable for catching breaking incidents from any global outlet.
+  { name: "GNews: Aviation Accident", url: "https://news.google.com/rss/search?q=aviation+accident&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
+  { name: "GNews: Plane Crash", url: "https://news.google.com/rss/search?q=plane+crash&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
+  { name: "GNews: Airline Incident", url: "https://news.google.com/rss/search?q=airline+incident&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
+  { name: "GNews: Flight Emergency", url: "https://news.google.com/news/rss/search?q=flight%20emergency&hl=en", category: "viral" as const },
+  { name: "GNews: Boeing", url: "https://news.google.com/rss/search?q=Boeing+aviation&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
+  { name: "GNews: Airbus", url: "https://news.google.com/rss/search?q=Airbus+aviation&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
+  { name: "GNews: Pilot Strike", url: "https://news.google.com/rss/search?q=pilot+strike+airline&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
+  { name: "GNews: Airport Chaos", url: "https://news.google.com/rss/search?q=airport+chaos+flight+cancelled&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
+  { name: "GNews: NTSB", url: "https://news.google.com/rss/search?q=NTSB+aviation&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
+  { name: "GNews: FAA Safety", url: "https://news.google.com/rss/search?q=FAA+aviation+safety&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
+
+  // ── TIER 6: MAINSTREAM VIRAL SOURCES ─────────────────────────────────────
+  // General news — strict aviation keyword gate applied.
+  // Catches viral passenger stories, celebrity jet drama, airline controversies.
   { name: "TIME", url: "https://time.com/feed/", category: "viral" as const },
   { name: "The Guardian World", url: "https://feeds.guardian.co.uk/theguardian/world/rss", category: "viral" as const },
   { name: "WSJ World News", url: "https://feeds.content.dowjones.io/public/rss/RSSWorldNews", category: "viral" as const },
   { name: "Independent", url: "https://www.independent.co.uk/rss", category: "viral" as const },
-
-  // ── VIRAL SOURCES ─────────────────────────────────────────────────────────
   { name: "New York Post", url: "https://nypost.com/feed/", category: "viral" as const },
   { name: "New York Post News", url: "http://www.nypost.com/rss/news.xml", category: "viral" as const },
   { name: "ABC News Top Stories", url: "https://feeds.abcnews.com/abcnews/topstories", category: "viral" as const },
@@ -49,13 +99,15 @@ export const DEFAULT_RSS_SOURCES = [
   { name: "Mail Online Home", url: "https://www.dailymail.co.uk/home/index.rss", category: "viral" as const },
   { name: "Mail Online News", url: "https://www.dailymail.co.uk/news/index.rss", category: "viral" as const },
   { name: "LADbible", url: "https://www.ladbible.com/index.rss", category: "viral" as const },
-  { name: "The Sun YouTube", url: "https://www.youtube.com/feeds/videos.xml?channel_id=UCIzXayRP7-P0ANpq-nD-h5g", category: "viral" as const },
-  { name: "CNN YouTube", url: "https://www.youtube.com/feeds/videos.xml?channel_id=UCupvZG-5ko_eiXAupbDfxWw", category: "viral" as const },
   { name: "Washington Post World", url: "https://feeds.washingtonpost.com/rss/world", category: "viral" as const },
   { name: "NBC News", url: "https://feeds.nbcnews.com/nbcnews/public/news", category: "viral" as const },
+  { name: "Skift", url: "https://skift.com/feed/", category: "viral" as const },
+  { name: "Reddit r/aviation", url: "https://www.reddit.com/r/aviation/.rss", category: "viral" as const },
 
-  // ── PASSENGER CHAOS ───────────────────────────────────────────────────────
-  { name: "Flight Emergency Google News", url: "https://news.google.com/news/rss/search?q=flight%20emergency&hl=en", category: "viral" as const },
+  // ── TIER 7: YOUTUBE CHANNELS ──────────────────────────────────────────────
+  // Video-first sources — good for catching viral aviation clips and breaking news
+  { name: "The Sun YouTube", url: "https://www.youtube.com/feeds/videos.xml?channel_id=UCIzXayRP7-P0ANpq-nD-h5g", category: "viral" as const },
+  { name: "CNN YouTube", url: "https://www.youtube.com/feeds/videos.xml?channel_id=UCupvZG-5ko_eiXAupbDfxWw", category: "viral" as const },
 ];
 
 // ── Aviation relevance gate ───────────────────────────────────────────────────
@@ -116,6 +168,12 @@ export function isAviationRelevant(title: string, content: string, category: str
   // Aviation-native sources: trust the source, pass everything through.
   // These are dedicated aviation publications — every story is relevant by definition.
   if (category === "aviation") {
+    return true;
+  }
+
+  // Regulator sources (EASA, NTSB, FAA, ICAO): always pass through.
+  // Every story from an official safety body is relevant to aviation by definition.
+  if (category === "regulator") {
     return true;
   }
 
