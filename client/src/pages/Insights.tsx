@@ -1,7 +1,7 @@
 import { trpc } from "@/lib/trpc";
 import FlightLayout from "@/components/FlightLayout";
 import { cn } from "@/lib/utils";
-import { Loader2, BrainCircuit, ArrowUp, ArrowDown, Minus, BookOpen, Sliders, Clock, Sparkles, Zap, ZapOff, ToggleLeft, ToggleRight } from "lucide-react";
+import { Loader2, BrainCircuit, ArrowUp, ArrowDown, Minus, BookOpen, Sliders, Clock, Sparkles, Zap, ZapOff, ToggleLeft, ToggleRight, TrendingUp, CheckCircle, AlertTriangle, BarChart2 } from "lucide-react";
 import { Markdown } from "@/components/Markdown";
 import { useState } from "react";
 import { toast } from "sonner";
@@ -45,7 +45,9 @@ function formatDate(iso: string | null) {
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function Insights() {
-  const [activeTab, setActiveTab] = useState<"overrides" | "rules" | "cost">("overrides");
+  const [activeTab, setActiveTab] = useState<"overrides" | "rules" | "calibration" | "cost">("overrides");
+
+  const { data: calibration, isLoading: loadingCalibration } = trpc.stories.calibrationInsights.useQuery();
 
   const { data: overrides, isLoading: loadingOverrides } = trpc.stories.overrideHistory.useQuery();
   const { data: insights, isLoading: loadingInsights } = trpc.stories.scoringInsights.useQuery();
@@ -145,6 +147,7 @@ export default function Insights() {
           {[
             { id: "overrides" as const, label: "Override History", icon: Sliders },
             { id: "rules" as const, label: "Learned Rules", icon: BookOpen },
+            { id: "calibration" as const, label: "Score Calibration", icon: TrendingUp },
             { id: "cost" as const, label: "Cost Control", icon: Zap },
           ].map(({ id, label, icon: Icon }) => (
             <button
@@ -298,6 +301,180 @@ export default function Insights() {
             )}
           </>
         )}
+        {/* Score Calibration Tab */}
+        {activeTab === "calibration" && (
+          <div className="space-y-5">
+            {/* Explanation banner */}
+            <div className="rounded-xl border border-violet-500/20 bg-violet-500/5 p-4">
+              <div className="flex items-start gap-3">
+                <TrendingUp className="w-4 h-4 text-violet-400 mt-0.5 shrink-0" />
+                <div>
+                  <p className="text-sm font-semibold text-violet-300 mb-1">Performance Feedback Loop</p>
+                  <p className="text-xs text-muted-foreground leading-relaxed">
+                    This compares your score overrides against what actually performed on Instagram. Over time it shows you where your instincts are most accurate and where the AI's original score was closer to the truth.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {loadingCalibration ? (
+              <div className="flex items-center justify-center py-24">
+                <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
+              </div>
+            ) : !calibration || calibration.status === "no_data" ? (
+              <div className="flex flex-col items-center justify-center py-24 text-center">
+                <div className="w-14 h-14 rounded-2xl bg-muted flex items-center justify-center mb-4">
+                  <BarChart2 className="w-6 h-6 text-muted-foreground" />
+                </div>
+                <h3 className="text-base font-semibold text-foreground mb-1">No Instagram data yet</h3>
+                <p className="text-sm text-muted-foreground max-w-xs">
+                  Log your Instagram post stats in the Historical section. Once you have posts with views and likes recorded, calibration will appear here automatically.
+                </p>
+              </div>
+            ) : calibration.status === "insufficient_data" ? (
+              <div className="flex flex-col items-center justify-center py-24 text-center">
+                <div className="w-14 h-14 rounded-2xl bg-muted flex items-center justify-center mb-4">
+                  <BarChart2 className="w-6 h-6 text-muted-foreground" />
+                </div>
+                <h3 className="text-base font-semibold text-foreground mb-1">Building calibration data</h3>
+                <p className="text-sm text-muted-foreground max-w-xs">
+                  {calibration.message}
+                </p>
+                <p className="text-xs text-muted-foreground mt-2">{calibration.totalLoggedPosts} posts logged so far</p>
+              </div>
+            ) : (
+              <>
+                {/* Summary stats */}
+                <div className="grid grid-cols-3 gap-3">
+                  <div className="rounded-xl border border-border bg-card/40 p-4">
+                    <p className="text-xs text-muted-foreground mb-1">Your Override Accuracy</p>
+                    <p className="text-2xl font-bold text-emerald-400" style={{ fontFamily: "Space Grotesk, sans-serif" }}>
+                      {calibration.editorAccuracy}%
+                    </p>
+                    <p className="text-xs text-muted-foreground mt-1">avg drift: {calibration.avgEditorDrift} pts from true score</p>
+                  </div>
+                  <div className="rounded-xl border border-border bg-card/40 p-4">
+                    <p className="text-xs text-muted-foreground mb-1">AI Base Score Accuracy</p>
+                    <p className="text-2xl font-bold text-blue-400" style={{ fontFamily: "Space Grotesk, sans-serif" }}>
+                      {calibration.aiAccuracy}%
+                    </p>
+                    <p className="text-xs text-muted-foreground mt-1">avg drift: {calibration.avgAiDrift} pts from true score</p>
+                  </div>
+                  <div className="rounded-xl border border-border bg-card/40 p-4">
+                    <p className="text-xs text-muted-foreground mb-1">Your Override Win Rate</p>
+                    <p className={cn(
+                      "text-2xl font-bold",
+                      (calibration.editorWinRate ?? 0) >= 60 ? "text-emerald-400" : (calibration.editorWinRate ?? 0) >= 40 ? "text-amber-400" : "text-red-400"
+                    )} style={{ fontFamily: "Space Grotesk, sans-serif" }}>
+                      {calibration.editorWinRate}%
+                    </p>
+                    <p className="text-xs text-muted-foreground mt-1">of {calibration.matchedCount} matched posts</p>
+                  </div>
+                </div>
+
+                {/* Insight banner */}
+                <div className={cn(
+                  "rounded-xl border p-4 flex items-start gap-3",
+                  (calibration.editorWinRate ?? 0) >= 60
+                    ? "border-emerald-500/20 bg-emerald-500/5"
+                    : (calibration.editorWinRate ?? 0) >= 40
+                    ? "border-amber-500/20 bg-amber-500/5"
+                    : "border-blue-500/20 bg-blue-500/5"
+                )}>
+                  {(calibration.editorWinRate ?? 0) >= 60
+                    ? <CheckCircle className="w-4 h-4 text-emerald-400 mt-0.5 shrink-0" />
+                    : <AlertTriangle className="w-4 h-4 text-amber-400 mt-0.5 shrink-0" />}
+                  <div>
+                    <p className="text-sm font-semibold text-foreground mb-0.5">
+                      {(calibration.editorWinRate ?? 0) >= 60
+                        ? "Your overrides are beating the AI"
+                        : (calibration.editorWinRate ?? 0) >= 40
+                        ? "Your overrides and the AI are roughly equal"
+                        : "The AI base score is currently more accurate than your overrides"}
+                    </p>
+                    <p className="text-xs text-muted-foreground leading-relaxed">
+                      {(calibration.editorWinRate ?? 0) >= 60
+                        ? "Your editorial instincts are consistently closer to the true Instagram performance than the AI's initial score. Keep overriding with confidence."
+                        : (calibration.editorWinRate ?? 0) >= 40
+                        ? "Your overrides and the AI are performing similarly. The blended score is using both signals equally."
+                        : "The AI's rule-based score has been closer to actual Instagram performance in more cases. Consider trusting the AI score more on stories where you're unsure."}
+                    </p>
+                  </div>
+                </div>
+
+                {/* Category breakdown */}
+                {calibration.categoryInsights && calibration.categoryInsights.length > 0 && (
+                  <div className="rounded-xl border border-border bg-card/40 p-5">
+                    <h3 className="text-sm font-semibold text-foreground mb-3 flex items-center gap-2">
+                      <BarChart2 className="w-4 h-4 text-muted-foreground" />
+                      Override Accuracy by Category
+                    </h3>
+                    <p className="text-xs text-muted-foreground mb-4">Lower drift = your overrides in this category are more accurate. Higher drift = the AI's original score was closer.</p>
+                    <div className="space-y-2">
+                      {calibration.categoryInsights.map((cat: { category: string; avgDrift: number; count: number }) => (
+                        <div key={cat.category} className="flex items-center gap-3">
+                          <div className="w-36 shrink-0">
+                            <p className="text-xs font-medium text-foreground truncate">{cat.category}</p>
+                            <p className="text-[10px] text-muted-foreground">{cat.count} posts</p>
+                          </div>
+                          <div className="flex-1">
+                            <div className="h-2 rounded-full bg-muted overflow-hidden">
+                              <div
+                                className={cn(
+                                  "h-full rounded-full transition-all",
+                                  cat.avgDrift <= 10 ? "bg-emerald-500" : cat.avgDrift <= 20 ? "bg-amber-500" : "bg-red-500"
+                                )}
+                                style={{ width: `${Math.min(100, cat.avgDrift * 2)}%` }}
+                              />
+                            </div>
+                          </div>
+                          <div className="w-20 text-right shrink-0">
+                            <span className={cn(
+                              "text-xs font-semibold",
+                              cat.avgDrift <= 10 ? "text-emerald-400" : cat.avgDrift <= 20 ? "text-amber-400" : "text-red-400"
+                            )}>
+                              {cat.avgDrift <= 10 ? "Accurate" : cat.avgDrift <= 20 ? "Moderate" : "High drift"}
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Recent matched posts */}
+                {calibration.recentMatches && calibration.recentMatches.length > 0 && (
+                  <div className="rounded-xl border border-border bg-card/40 p-5">
+                    <h3 className="text-sm font-semibold text-foreground mb-3">Recent Matched Posts</h3>
+                    <p className="text-xs text-muted-foreground mb-4">Stories where we could match your override to a logged Instagram post and compare against true performance.</p>
+                    <div className="space-y-2">
+                      {calibration.recentMatches.map((m: { title: string; category: string; aiScore: number; overrideScore: number; trueScore: number; editorWon: boolean }, i: number) => (
+                        <div key={i} className="flex items-center gap-3 py-2 border-b border-border/50 last:border-0">
+                          <div className="flex-1 min-w-0">
+                            <p className="text-xs font-medium text-foreground truncate">{m.title}</p>
+                            <p className="text-[10px] text-muted-foreground">{m.category}</p>
+                          </div>
+                          <div className="flex items-center gap-2 shrink-0 text-xs">
+                            <span className="text-muted-foreground">AI: <span className="text-foreground font-medium">{m.aiScore}</span></span>
+                            <span className="text-muted-foreground">Override: <span className="text-foreground font-medium">{m.overrideScore}</span></span>
+                            <span className="text-muted-foreground">True: <span className="text-amber-400 font-medium">{m.trueScore}</span></span>
+                            <span className={cn(
+                              "text-[10px] px-1.5 py-0.5 rounded-full border font-medium",
+                              m.editorWon ? "border-emerald-500/30 text-emerald-400 bg-emerald-500/10" : "border-blue-500/30 text-blue-400 bg-blue-500/10"
+                            )}>
+                              {m.editorWon ? "You won" : "AI won"}
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
+
         {/* Cost Control Tab */}
         {activeTab === "cost" && (
           <div className="space-y-4">

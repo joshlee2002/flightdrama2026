@@ -1015,3 +1015,51 @@ export function getStatusConfig(label: StatusLabel) {
       return { label: "Reject", color: "red", range: "Below 55" };
   }
 }
+
+
+/**
+ * Calculates a blended score using the AI viral score, the editor's override,
+ * and category performance history.
+ * 
+ * Weights:
+ * - If no performance history: 100% override (or AI score if no override)
+ * - If rich performance history: 60% override/AI, 40% historical performance
+ */
+export async function getBlendedScore(
+  viralScore: number, 
+  overrideScore: number | null, 
+  category: string | null
+): Promise<number> {
+  const baseScore = overrideScore !== null ? overrideScore : viralScore;
+  
+  if (!category) return baseScore;
+
+  try {
+    const { getScoringConfig } = await import("./db");
+    const catRaw = await getScoringConfig("stat_perf_top_categories");
+    if (!catRaw) return baseScore;
+
+    const cats: Array<{ category: string; avgEngagement: number; count?: number }> = JSON.parse(catRaw);
+    const avgEng = parseInt(await getScoringConfig("stat_perf_avg_engagement") ?? "0", 10);
+    
+    if (avgEng === 0 || cats.length === 0) return baseScore;
+
+    // Find the category
+    const catData = cats.find(c => c.category.toLowerCase() === category.toLowerCase());
+    if (!catData) return baseScore; // Category not found in history
+    if ((catData.count ?? 0) < 3) return baseScore; // Need at least 3 posts for confidence
+
+    // Calculate historical performance score (0-100)
+    // If avg engagement is exactly average, score is 75.
+    // If 2x average, score is 100. If 0.5x average, score is 50.
+    const ratio = catData.avgEngagement / avgEng;
+    let histScore = 75 + ((ratio - 1) * 25);
+    histScore = Math.max(0, Math.min(100, histScore));
+
+    // Blend: 60% base score, 40% historical performance
+    const blended = (baseScore * 0.6) + (histScore * 0.4);
+    return Math.round(blended);
+  } catch (err) {
+    return baseScore;
+  }
+}

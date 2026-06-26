@@ -46,7 +46,7 @@ import { fetchArticleContent, fetchRssFeed, isSimilarTitle, isAviationRelevant, 
 import { scoreStory } from "./viralScoring";
 import { scoreStoryWithLLM, learnFromOverrides, learnFromOverridesStatistical } from "./llmScoring";
 import { runFullSoyunciPipeline, rewriteArticleOnly, runResearchAndWrite, extractResearchPackage } from "./soyunci";
-import { analysePerformance, getPerformanceInsights, analysePerformanceStatistical, getStatPerformanceInsights, analyseArticleStyle, getArticleStyleInsights } from "./performanceAnalysis";
+import { analysePerformance, getPerformanceInsights, analysePerformanceStatistical, getStatPerformanceInsights, analyseArticleStyle, getArticleStyleInsights, calculatePerformanceScore } from "./performanceAnalysis";
 import { syncInstagramPosts, verifyInstagramToken } from "./instagramSync";
 import { generateWeeklyDigest, getRecentDigests } from "./weeklyDigest";
 import { searchImages, buildImageQueries, generateTextImageRec, searchWikimedia, searchPexels, smartImageSearch } from "./imageSearch";
@@ -1059,6 +1059,106 @@ export const appRouter = router({
           : null,
       };
     }),
+
+    // Performance Calibration Insights — moved inside stories router
+    calibrationInsights: protectedProcedure.query(async () => {
+      const db = await getDb();
+      if (!db) return null;
+
+      const allPosts = await getHistoricalPosts(500);
+      const posts = allPosts.filter(p => (p.views ?? 0) > 0 || (p.likes ?? 0) > 0);
+
+      if (posts.length === 0) return {
+        status: "no_data" as const,
+        message: "No Instagram posts with stats logged yet."
+      };
+
+      const overriddenStories = await db.select({
+        id: stories.id,
+        title: stories.title,
+        category: stories.category,
+        viralScore: stories.viralScore,
+        overrideScore: stories.overrideScore,
+        statusLabel: stories.statusLabel,
+        overrideLabel: stories.overrideLabel,
+      }).from(stories)
+        .where(sql`${stories.overrideScore} IS NOT NULL`);
+
+      let matchedCount = 0;
+      let totalOverrideDrift = 0;
+      let totalAiDrift = 0;
+      const categoryAccuracy: Record<string, { totalDrift: number; count: number }> = {};
+      let editorWasRightCount = 0;
+      let aiWasRightCount = 0;
+      const matches: Array<{ title: string; category: string; aiScore: number; overrideScore: number; trueScore: number; editorWon: boolean }> = [];
+
+      for (const post of posts) {
+        const trueScore = calculatePerformanceScore(post);
+        if (trueScore === 0) continue;
+
+        let match = null;
+        if (post.storyId) {
+          match = overriddenStories.find(s => s.id === post.storyId);
+        } else {
+          const postWords = (post.headline ?? "").toLowerCase().split(/\s+/).slice(0, 5).join(" ");
+          match = overriddenStories.find(s => s.title.toLowerCase().includes(postWords));
+        }
+
+        if (match && match.overrideScore !== null) {
+          matchedCount++;
+          const overrideDrift = Math.abs(match.overrideScore - trueScore);
+          const aiDrift = Math.abs(match.viralScore - trueScore);
+          totalOverrideDrift += overrideDrift;
+          totalAiDrift += aiDrift;
+          if (overrideDrift < aiDrift) editorWasRightCount++;
+          else if (aiDrift < overrideDrift) aiWasRightCount++;
+          const cat = match.category ?? "General";
+          if (!categoryAccuracy[cat]) categoryAccuracy[cat] = { totalDrift: 0, count: 0 };
+          categoryAccuracy[cat].totalDrift += overrideDrift;
+          categoryAccuracy[cat].count++;
+          matches.push({
+            title: match.title,
+            category: cat,
+            aiScore: match.viralScore,
+            overrideScore: match.overrideScore,
+            trueScore,
+            editorWon: overrideDrift < aiDrift
+          });
+        }
+      }
+
+      if (matchedCount < 3) {
+        return {
+          status: "insufficient_data" as const,
+          message: `Only ${matchedCount} logged posts match your overridden stories. Need at least 3 to calculate calibration.`,
+          totalLoggedPosts: posts.length
+        };
+      }
+
+      const categoryInsights = Object.entries(categoryAccuracy)
+        .filter(([, v]) => v.count >= 2)
+        .map(([category, v]) => ({
+          category,
+          avgDrift: Math.round(v.totalDrift / v.count),
+          count: v.count
+        }))
+        .sort((a, b) => a.avgDrift - b.avgDrift);
+
+      const avgEditorDrift = Math.round(totalOverrideDrift / matchedCount);
+      const avgAiDrift = Math.round(totalAiDrift / matchedCount);
+
+      return {
+        status: "ready" as const,
+        matchedCount,
+        avgEditorDrift,
+        avgAiDrift,
+        editorAccuracy: Math.max(0, 100 - avgEditorDrift),
+        aiAccuracy: Math.max(0, 100 - avgAiDrift),
+        editorWinRate: Math.round((editorWasRightCount / matchedCount) * 100),
+        categoryInsights,
+        recentMatches: matches.slice(0, 10)
+      };
+    }),
   }),
 
   // ── Historical Posts ───────────────────────────────────────────────────
@@ -1168,6 +1268,8 @@ export const appRouter = router({
         const insights = await analysePerformance(true);
         return { success: true, saved, insights, statInsights };
       }),
+
+
 
     // Get the current headline style guide
     headlineStyleGuide: protectedProcedure.query(async () => {
