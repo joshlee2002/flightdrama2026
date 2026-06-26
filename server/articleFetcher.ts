@@ -409,7 +409,65 @@ async function fetchVia12ft(url: string): Promise<FetchedArticle> {
 }
 
 /**
- * Layer 6: AllOrigins proxy — last resort.
+ * Layer 6: Archive.today / archive.ph (hard paywall bypass)
+ * Routes via proxy to avoid IP blocks from archive.ph.
+ */
+async function fetchViaArchivePh(url: string): Promise<FetchedArticle> {
+  const blank: FetchedArticle = { url, title: "", bodyText: "", wordCount: 0, success: false };
+  try {
+    // We use an open proxy to fetch from archive.ph since they often block server IPs
+    const archiveUrl = `https://archive.ph/latest/${url}`;
+    const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(archiveUrl)}`;
+    const response = await fetch(proxyUrl, {
+      signal: AbortSignal.timeout(25000),
+    });
+    if (!response.ok) return { ...blank, error: `Archive.ph HTTP ${response.status}` };
+    const json = await response.json() as { contents?: string };
+    if (!json.contents || json.contents.length < 200) return { ...blank, error: "Archive.ph returned empty content" };
+    
+    // Check if archive.ph gave us a "Not Found" page
+    if (json.contents.includes("No results") || json.contents.includes("not found in the archive")) {
+      return { ...blank, error: "Not found in archive.ph" };
+    }
+    
+    const result = extractFromHtml(url, json.contents);
+    return result.success ? { ...result, fetchLayer: "archive-ph" } : result;
+  } catch (err) {
+    return { ...blank, error: `Archive.ph failed: ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
+/**
+ * Layer 7: Wayback Machine (Internet Archive)
+ */
+async function fetchViaWayback(url: string): Promise<FetchedArticle> {
+  const blank: FetchedArticle = { url, title: "", bodyText: "", wordCount: 0, success: false };
+  try {
+    const waybackUrl = `https://web.archive.org/web/2/${url}`;
+    const response = await fetch(waybackUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      },
+      signal: AbortSignal.timeout(20000),
+      redirect: "follow",
+    });
+    if (!response.ok) return { ...blank, error: `Wayback HTTP ${response.status}` };
+    const html = await response.text();
+    
+    // Check if it's the Wayback "Page cannot be crawled or displayed" error
+    if (html.includes("Wayback Machine doesn't have that page") || html.includes("cannot be crawled")) {
+      return { ...blank, error: "Not found in Wayback Machine" };
+    }
+    
+    const result = extractFromHtml(url, html);
+    return result.success ? { ...result, fetchLayer: "wayback-machine" } : result;
+  } catch (err) {
+    return { ...blank, error: `Wayback failed: ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
+/**
+ * Layer 8: AllOrigins proxy — last resort.
  * Routes the request through allorigins.win servers.
  */
 async function fetchViaProxy(url: string): Promise<FetchedArticle> {
@@ -432,13 +490,15 @@ async function fetchViaProxy(url: string): Promise<FetchedArticle> {
 /**
  * Fetch a URL and extract the main article body text.
  *
- * Uses a 6-layer fallback chain to maximise success rate:
+ * Uses an 8-layer fallback chain to maximise success rate:
  *   1. Direct Chrome headers (fast, works on most open sites)
  *   2. Safari UA + Google Referer (bypasses some bot detection)
  *   3. Googlebot UA (bypasses many soft paywalls via Google's whitelisting)
  *   4. Jina AI Reader (renders JS, bypasses Cloudflare — works on most blocked sites)
  *   5. 12ft.io proxy (free paywall removal for NYT, Bloomberg, etc.)
- *   6. AllOrigins proxy (last resort)
+ *   6. Archive.ph (hard paywall bypass)
+ *   7. Wayback Machine (Internet Archive)
+ *   8. AllOrigins proxy (last resort)
  *
  * Returns a FetchedArticle with success=false only if ALL layers fail.
  */
@@ -485,16 +545,32 @@ export async function fetchArticleText(url: string): Promise<FetchedArticle> {
   }
   console.log(`[Fetcher] L5 failed: ${ft12.error ?? 'insufficient content'}`);
 
-  // Layer 6: AllOrigins proxy
+  // Layer 6: Archive.ph (hard paywall bypass)
+  const archivePh = await fetchViaArchivePh(resolvedUrl);
+  if (archivePh.success && archivePh.wordCount >= MIN_WORD_COUNT) {
+    console.log(`[Fetcher] L6 Archive.ph succeeded (${resolvedUrl.slice(0, 70)}) — ${archivePh.wordCount}w`);
+    return archivePh;
+  }
+  console.log(`[Fetcher] L6 failed: ${archivePh.error ?? 'insufficient content'}`);
+
+  // Layer 7: Wayback Machine
+  const wayback = await fetchViaWayback(resolvedUrl);
+  if (wayback.success && wayback.wordCount >= MIN_WORD_COUNT) {
+    console.log(`[Fetcher] L7 Wayback succeeded (${resolvedUrl.slice(0, 70)}) — ${wayback.wordCount}w`);
+    return wayback;
+  }
+  console.log(`[Fetcher] L7 failed: ${wayback.error ?? 'insufficient content'}`);
+
+  // Layer 8: AllOrigins proxy
   const proxy = await fetchViaProxy(resolvedUrl);
   if (proxy.success && proxy.wordCount >= MIN_WORD_COUNT) {
-    console.log(`[Fetcher] L6 proxy succeeded (${resolvedUrl.slice(0, 70)})`);
+    console.log(`[Fetcher] L8 proxy succeeded (${resolvedUrl.slice(0, 70)})`);
     return proxy;
   }
 
   // All layers failed — return the best result we got (most words)
-  const best = [direct, safari, googlebot, jina, ft12, proxy].sort((a, b) => b.wordCount - a.wordCount)[0];
-  console.warn(`[Fetcher] ALL 6 LAYERS FAILED (${resolvedUrl.slice(0, 70)}) — best: ${best.wordCount}w`);
+  const best = [direct, safari, googlebot, jina, ft12, archivePh, wayback, proxy].sort((a, b) => b.wordCount - a.wordCount)[0];
+  console.warn(`[Fetcher] ALL 8 LAYERS FAILED (${resolvedUrl.slice(0, 70)}) — best: ${best.wordCount}w`);
   return {
     ...best,
     success: false,
