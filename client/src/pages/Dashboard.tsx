@@ -188,14 +188,16 @@ function StoryCard({
       )}
     >
       {/* Card header */}
-      <div className="p-4 flex items-start gap-4">
+      <div className="p-3 lg:p-4 flex flex-wrap items-start gap-3">
+        {/* Row 1 left: rank + score + title */}
+        <div className="flex items-start gap-3 flex-1 min-w-0">
         {/* Rank */}
         <div className="shrink-0 w-8 h-8 rounded-lg bg-muted flex items-center justify-center">
           <span className="text-xs font-bold text-muted-foreground">#{rank}</span>
         </div>
 
         {/* Score ring — shows override score if set */}
-        <div className="relative">
+        <div className="relative shrink-0">
           <ScoreRing score={displayScore} />
           {hasOverride && (
             <div className="absolute -top-1 -right-1 w-3.5 h-3.5 rounded-full bg-amber-500 flex items-center justify-center" title="Manually overridden score">
@@ -314,6 +316,10 @@ function StoryCard({
             </p>
           )}
         </div>
+        </div>{/* end row-1-left */}
+
+        {/* Right-side controls: override + action buttons — wrap below title on narrow screens */}
+        <div className="flex items-center gap-2 flex-wrap w-full lg:w-auto">
 
         {/* Manual score override */}
         <div className="shrink-0 flex flex-col items-end gap-1.5">
@@ -462,6 +468,7 @@ function StoryCard({
             </>
           ) : null}
         </div>
+        </div>{/* end right-side controls */}
       </div>
 
       {/* Compact processing status */}
