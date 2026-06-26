@@ -315,88 +315,81 @@ function StoryCard({
               {story.viralExplanation || story.viralReason}
             </p>
           )}
-        </div>
+        </div>{/* end title+meta */}
         </div>{/* end row-1-left */}
+      </div>{/* end card header */}
 
-        {/* Right-side controls: override + action buttons — wrap below title on narrow screens */}
-        <div className="flex items-center gap-2 flex-wrap w-full">
+      {/* ── Action bar — always full width, sits below the card header ── */}
+      <div className="border-t border-border/40 px-3 py-2.5 flex flex-col gap-2">
 
-        {/* Manual score override */}
-        <div className="shrink-0 flex flex-col items-end gap-1.5">
-          <div className="flex items-center gap-1">
-            <Input
-              type="number"
-              min={0}
-              max={100}
-              value={overrideInput}
-              onChange={(e) => setOverrideInput(e.target.value)}
-              className="w-16 h-7 text-xs text-center px-1 bg-muted/40 border-border"
-            />
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-7 px-2 text-xs gap-1 border-amber-500/30 text-amber-400 hover:bg-amber-500/10"
-              disabled={isSavingOverride}
-              onClick={() => {
+        {/* Override score row */}
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] text-muted-foreground shrink-0">Override score:</span>
+          <Input
+            type="number"
+            min={0}
+            max={100}
+            value={overrideInput}
+            onChange={(e) => setOverrideInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
                 const v = parseInt(overrideInput, 10);
                 if (!isNaN(v) && v >= 0 && v <= 100) {
                   const label = v >= 88 ? "must_post" : v >= 70 ? "strong_candidate" : v >= 55 ? "maybe" : "reject";
                   onOverrideScore(v, label);
-                } else if (overrideInput === "") {
-                  onOverrideScore(null, null);
                 }
-              }}
-            >
-              {isSavingOverride ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sliders className="w-3 h-3" />}
-            </Button>
-          </div>
+              }
+            }}
+            className="w-16 h-8 text-sm text-center px-1 bg-muted/40 border-border"
+          />
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-8 px-3 text-xs gap-1.5 border-amber-500/30 text-amber-400 hover:bg-amber-500/10"
+            disabled={isSavingOverride}
+            onClick={() => {
+              const v = parseInt(overrideInput, 10);
+              if (!isNaN(v) && v >= 0 && v <= 100) {
+                const label = v >= 88 ? "must_post" : v >= 70 ? "strong_candidate" : v >= 55 ? "maybe" : "reject";
+                onOverrideScore(v, label);
+              } else if (overrideInput === "") {
+                onOverrideScore(null, null);
+              }
+            }}
+          >
+            {isSavingOverride ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sliders className="w-3 h-3" />}
+            Set
+          </Button>
           {hasOverride && (
             <button
-              className="text-[10px] text-muted-foreground hover:text-red-400 transition-colors"
+              className="text-[10px] text-muted-foreground hover:text-red-400 transition-colors ml-1"
               onClick={() => { setOverrideInput(String(story.viralScore)); onOverrideScore(null, null); }}
             >
-              clear override
+              clear
             </button>
           )}
         </div>
 
-        {/* Process / approve / reject */}
-        <div className="shrink-0 flex items-center gap-2">
+        {/* Action buttons row */}
+        <div className="flex items-center gap-2 flex-wrap">
           {isQueued && (
-            <Button
-              size="sm"
-              variant="outline"
-              className="gap-1.5 text-xs"
-              onClick={onProcess}
-              disabled={isProcessing}
-            >
-              {isProcessing ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              ) : (
-                <Sparkles className="w-3.5 h-3.5 text-primary" />
-              )}
+            <Button size="sm" variant="outline" className="gap-1.5 text-xs h-8" onClick={onProcess} disabled={isProcessing}>
+              {isProcessing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5 text-primary" />}
               {isProcessing ? "Processing..." : "Run Soyunci"}
             </Button>
           )}
           {isFailed && (
-            <Button
-              size="sm"
-              variant="outline"
-              className="gap-1.5 text-xs border-red-500/30 text-red-400"
-              onClick={onProcess}
-              disabled={isProcessing}
-            >
-              <Sparkles className="w-3.5 h-3.5" />
-              Retry
+            <Button size="sm" variant="outline" className="gap-1.5 text-xs h-8 border-red-500/30 text-red-400" onClick={onProcess} disabled={isProcessing}>
+              <Sparkles className="w-3.5 h-3.5" />Retry
             </Button>
           )}
-          {story.approvalStatus === "pending" || story.approvalStatus === "edited" ? (
+          {(story.approvalStatus === "pending" || story.approvalStatus === "edited") && (
             <>
               {showVariantPicker && pkg?.allHeadlines?.length > 0 ? (
-                <div className="flex flex-col gap-1.5 items-end">
+                <div className="flex flex-col gap-2 w-full">
                   <p className="text-[10px] text-muted-foreground">Which headline will you post?</p>
                   <Select value={chosenVariant} onValueChange={setChosenVariant}>
-                    <SelectTrigger className="h-7 text-xs w-52 bg-muted/30">
+                    <SelectTrigger className="h-8 text-xs w-full bg-muted/30">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -408,67 +401,31 @@ function StoryCard({
                       ))}
                     </SelectContent>
                   </Select>
-                  <div className="flex gap-1.5">
-                    <Button
-                      size="sm"
-                      className="gap-1.5 text-xs h-7 bg-emerald-600 hover:bg-emerald-500 text-white"
-                      onClick={() => { setShowVariantPicker(false); onApprove(chosenVariant); }}
-                    >
+                  <div className="flex gap-2">
+                    <Button size="sm" className="gap-1.5 text-xs h-8 bg-emerald-600 hover:bg-emerald-500 text-white flex-1" onClick={() => { setShowVariantPicker(false); onApprove(chosenVariant); }}>
                       <Check className="w-3 h-3" /> Confirm
                     </Button>
-                    <Button size="sm" variant="ghost" className="text-xs h-7" onClick={() => setShowVariantPicker(false)}>Cancel</Button>
+                    <Button size="sm" variant="ghost" className="text-xs h-8" onClick={() => setShowVariantPicker(false)}>Cancel</Button>
                   </div>
                 </div>
               ) : (
-              <Button
-                size="sm"
-                variant="outline"
-                className="gap-1.5 text-xs border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/10"
-                onClick={() => {
-                  if (pkg?.allHeadlines?.length > 0) {
-                    setShowVariantPicker(true);
-                  } else {
-                    onApprove();
-                  }
-                }}
-              >
-                <Check className="w-3.5 h-3.5" />
-                Approve
-              </Button>
+                <Button size="sm" variant="outline" className="gap-1.5 text-xs h-8 border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/10"
+                  onClick={() => { if (pkg?.allHeadlines?.length > 0) { setShowVariantPicker(true); } else { onApprove(); } }}>
+                  <Check className="w-3.5 h-3.5" />Approve
+                </Button>
               )}
-              <Button
-                size="sm"
-                variant="outline"
-                className="gap-1.5 text-xs border-red-500/30 text-red-400 hover:bg-red-500/10"
-                onClick={onReject}
-              >
-                <X className="w-3.5 h-3.5" />
-                Reject
+              <Button size="sm" variant="outline" className="gap-1.5 text-xs h-8 border-red-500/30 text-red-400 hover:bg-red-500/10" onClick={onReject}>
+                <X className="w-3.5 h-3.5" />Reject
               </Button>
-              <Button
-                size="sm"
-                variant="ghost"
-                className="gap-1.5 text-xs text-muted-foreground hover:text-amber-400 hover:bg-amber-500/10"
-                onClick={onDismissAsDuplicate}
-                title="Dismiss as duplicate — clears this story without affecting learning or blocking the URL"
-              >
-                <GitMerge className="w-3.5 h-3.5" />
-                Duplicate
+              <Button size="sm" variant="ghost" className="gap-1.5 text-xs h-8 text-muted-foreground hover:text-amber-400 hover:bg-amber-500/10" onClick={onDismissAsDuplicate} title="Dismiss as duplicate">
+                <GitMerge className="w-3.5 h-3.5" />Duplicate
               </Button>
-              <Button
-                size="sm"
-                variant="ghost"
-                className="gap-1.5 text-xs text-muted-foreground hover:text-destructive hover:bg-destructive/10"
-                onClick={onDismiss}
-                title="Dismiss permanently — hides this story and prevents it from returning"
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-                Dismiss
+              <Button size="sm" variant="ghost" className="gap-1.5 text-xs h-8 text-muted-foreground hover:text-destructive hover:bg-destructive/10" onClick={onDismiss} title="Dismiss permanently">
+                <Trash2 className="w-3.5 h-3.5" />Dismiss
               </Button>
             </>
-          ) : null}
+          )}
         </div>
-        </div>{/* end right-side controls */}
       </div>
 
       {/* Compact processing status */}
