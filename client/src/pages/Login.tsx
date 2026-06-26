@@ -14,13 +14,12 @@ export default function Login() {
 
   const loginMutation = trpc.auth.login.useMutation({
     onSuccess: async (data) => {
-      // Store token in localStorage as fallback when cookies are blocked
-      // (e.g. SameSite=None restrictions in iframes or certain browsers)
+      // Store token in localStorage so Authorization header is sent on every request
       if (data?.token) {
         try { localStorage.setItem(COOKIE_NAME, data.token); } catch {}
       }
-      await utils.auth.me.invalidate();
-      setLocation("/");
+      // Hard reload so tRPC client picks up the stored token from scratch
+      window.location.href = "/";
     },
     onError: (err) => {
       toast.error(err.message || "Invalid password");
