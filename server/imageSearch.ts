@@ -418,28 +418,37 @@ export async function buildImageQueries(
       messages: [
         {
           role: "system",
-          content: `You are an image researcher for an aviation news publication. Given a story title and snippet, output exactly 4 image search queries that will find great, relevant editorial photos on Wikimedia Commons and Pexels.
+          content: `You are a visual content director for a high-performing aviation Instagram account. Given a story title and snippet, generate exactly 4 image search queries that will find VISUALLY STRIKING, scroll-stopping photos on Wikimedia Commons and Pexels.
 
-Query 1 (hero): The PRIMARY visual subject. Think: what would you photograph to illustrate this story?
-- Salary/pay/career story about military pilots → show the aircraft or branch (e.g. "US Air Force F-16 fighter jet", "US Navy F/A-18 Hornet")
-- Airline incident/news → show the aircraft (e.g. "Boeing 737 MAX cockpit", "United Airlines 787 Dreamliner")
-- Airport/travel story → show the location (e.g. "Heathrow airport terminal interior")
-- Safety/accident story → show the aircraft type involved
+Think like an Instagram creator, not a news researcher. You want images that make people stop scrolling — dramatic angles, intense moments, human emotion, scale, atmosphere.
 
-Query 2 (context): A SUPPORTING human or scene element.
-- Military story → "US Air Force pilot flight gear" or "military pilot cockpit"
-- Airline story → "flight attendant cabin service" or "pilot pre-flight check"
-- Career/salary story → "pilot in uniform" or "flight training simulator"
+Query 1 (hero — the main image): The most dramatic, visually powerful subject for this story.
+Examples by story type:
+- Near-miss / close call → "aircraft emergency low approach runway" or "plane near collision dramatic"
+- Emergency landing / incident → "aircraft emergency landing fire trucks" or "plane belly landing sparks"
+- Military story → "fighter jet afterburner takeoff dramatic" or "F-35 low pass airshow"
+- Pilot career / human story → "airline pilot cockpit close up" or "pilot pre-flight walk around"
+- Airport / infrastructure → "airport runway night lights dramatic" or "control tower interior air traffic"
+- Aircraft reveal / new plane → "aircraft rollout ceremony hangar" or "new airliner first flight"
+- Passenger experience → "airplane window seat sunset view" or "economy class crowded cabin"
+- Turbulence / weather → "storm clouds aircraft flying through" or "lightning near aircraft"
 
-Query 3: Alternative for query 1 (same subject, different angle)
-Query 4: Alternative for query 2 (same theme, different setting)
+Query 2 (context — supporting atmosphere): A human, emotional, or scene-setting image that adds depth.
+Examples:
+- Incident stories → "emergency responders airport tarmac" or "passengers evacuating aircraft slide"
+- Military → "pilot helmet oxygen mask cockpit" or "ground crew aircraft maintenance"
+- Career / human interest → "flight simulator training cockpit" or "aviation students classroom"
+- Airport chaos / delays → "crowded airport departure board" or "frustrated passengers waiting gate"
+
+Query 3: Alternative for query 1 (same mood, different angle or moment)
+Query 4: Alternative for query 2 (same atmosphere, different scene)
 
 STRICT RULES:
 - Keep each query under 7 words
-- Use REAL aircraft types, airline names, military branch names
-- NEVER include comparison words: "vs", "compared", "versus", "difference"
-- NEVER include financial/abstract words: "salary", "pay", "bonus", "cost", "price", "budget", "revenue"
-- NEVER use vague words alone: "aviation", "airplane", "flight" (always add specifics)
+- Be SPECIFIC and VISUAL — describe what you'd actually see in the photo
+- Use specific aircraft types or airline names ONLY when they are the visual subject (e.g. "Concorde takeoff" is good; "Boeing financial results" is bad)
+- NEVER use abstract words: "salary", "pay", "cost", "revenue", "budget", "compared", "versus"
+- NEVER use standalone vague words: "aviation", "airplane", "flight" alone — always add a visual descriptor
 - Output ONLY valid JSON: {"q1":"...","q2":"...","q3":"...","q4":"..."}`,
         },
         {
