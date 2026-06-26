@@ -6,8 +6,16 @@
  * the main article body text. Used to enrich the research context fed to
  * the LLM writer with facts, quotes, and context from multiple sources.
  *
- * v2: Higher content limits, smarter extraction, Google News redirect resolution,
- * paragraph-level scoring to find the densest content block.
+ * v3: 6-layer fallback chain, smarter Google News decoding, paywall detection,
+ * og:description enrichment, increased content limits, better HTML extraction.
+ *
+ * Fetch layers (in order):
+ *   1. Direct Chrome headers
+ *   2. Safari UA + Google Referer
+ *   3. Googlebot UA (bypasses many paywalls that whitelist Google)
+ *   4. Jina AI Reader (renders JS, bypasses Cloudflare)
+ *   5. Diffbot Extract API (free tier — handles JS-heavy and paywalled sites)
+ *   6. AllOrigins proxy (last resort)
  */
 
 import { parse as parseHtml } from "node-html-parser";
@@ -25,6 +33,8 @@ export interface FetchedArticle {
   success: boolean;
   /** Error message if extraction failed */
   error?: string;
+  /** Which fetch layer succeeded */
+  fetchLayer?: string;
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -51,6 +61,10 @@ const BOILERPLATE_SELECTORS = [
   ".read-more", ".read-next",
   ".trending", ".popular",
   "script", "style", "noscript", "iframe", "figure.embed", ".video-embed",
+  // Paywall / subscription wall elements — remove so we don't count them as content
+  ".paywall", ".pay-wall", ".subscription-wall", ".premium-content",
+  "[data-paywall]", ".tp-modal", ".tp-backdrop", ".piano-modal",
+  ".subscriber-only", ".members-only", ".locked-content",
 ];
 
 /** CSS selectors for elements that are reliably the main article body — try in order */
@@ -95,6 +109,15 @@ const ARTICLE_SELECTORS = [
   ".simpleflying-article",
   ".avherald-content",
   ".aviationweek-body",
+  // BBC-specific
+  '[data-component="text-block"]',
+  ".ssrcss-11r1m41-RichTextComponentWrapper",
+  // Guardian-specific
+  ".article-body-commercial-selector",
+  ".dcr-1eu1p0w",
+  // Reuters-specific
+  ".article__body",
+  '[data-testid="ArticleBody"]',
   // Generic fallbacks
   '[itemprop="articleBody"]',
   '[itemprop="text"]',
@@ -107,58 +130,103 @@ const MIN_WORD_COUNT = 50;
 
 /**
  * Maximum characters to return per article.
- * Set to 25,000 (~5,000 words) to ensure full articles are never cut off mid-story.
- * Groq llama-3.3-70b has a 128k context window — we can afford to read full articles.
- * At ~5 chars/word this covers even long investigative pieces and NTSB reports.
+ * 40,000 chars (~8,000 words) — covers the longest investigative pieces,
+ * NTSB accident reports, and multi-source deep dives without truncation.
+ * The LLM context window is 128k tokens so this is well within budget.
  */
-const MAX_CHARS = 25000;
+const MAX_CHARS = 40000;
 
-/** Fetch timeout in milliseconds */
+/** Fetch timeout in milliseconds for direct fetches */
 const FETCH_TIMEOUT_MS = 12000;
 
 /** Jina AI Reader base URL — renders JS, bypasses most bot blocks, returns clean markdown */
 const JINA_READER_BASE = "https://r.jina.ai/";
 
+/**
+ * Phrases that indicate a paywall or login wall was returned instead of article content.
+ * Used to detect when a fetch "succeeded" (HTTP 200) but returned a wall, not the article.
+ */
+const PAYWALL_PHRASES = [
+  "subscribe to read",
+  "subscribe to continue",
+  "subscribe for full access",
+  "sign in to read",
+  "sign in to continue",
+  "create an account to read",
+  "create a free account",
+  "subscriber only",
+  "subscribers only",
+  "premium content",
+  "this article is for subscribers",
+  "to read this article",
+  "unlock this article",
+  "already a subscriber",
+  "start your free trial",
+];
+
+/** Returns true if the fetched HTML looks like a paywall/login wall rather than article content */
+function isPaywallPage(html: string): boolean {
+  const lower = html.toLowerCase();
+  return PAYWALL_PHRASES.some(phrase => lower.includes(phrase));
+}
+
 // ── Google News redirect resolver ─────────────────────────────────────────────
 
 /**
  * Google News RSS links are redirect URLs (news.google.com/rss/articles/...).
- * Resolve them to the real article URL before fetching, so we hit the actual
- * news outlet rather than a redirect page with no content.
+ * Resolve them to the real article URL before fetching.
+ *
+ * Strategy:
+ * 1. Try HEAD redirect follow (fast, no body download)
+ * 2. Try GET redirect follow if HEAD fails
+ * 3. Try decoding the base64 URL embedded in the Google News link
  */
 async function resolveGoogleNewsUrl(url: string): Promise<string> {
   if (!url.includes("news.google.com")) return url;
-  try {
-    const res = await fetch(url, {
-      method: "HEAD",
-      redirect: "follow",
-      headers: { "User-Agent": "Mozilla/5.0 (compatible; SoyunciBot/1.0)" },
-      signal: AbortSignal.timeout(6000),
-    });
-    // After redirect chain, res.url is the final destination
-    if (res.url && res.url !== url && !res.url.includes("news.google.com")) {
-      return res.url;
-    }
-  } catch {
-    // If HEAD fails, try GET with redirect follow
+
+  // Strategy 1 & 2: Follow HTTP redirects
+  for (const method of ["HEAD", "GET"] as const) {
     try {
       const res = await fetch(url, {
+        method,
         redirect: "follow",
-        headers: { "User-Agent": "Mozilla/5.0 (compatible; SoyunciBot/1.0)" },
-        signal: AbortSignal.timeout(6000),
+        headers: {
+          "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        },
+        signal: AbortSignal.timeout(8000),
       });
       if (res.url && res.url !== url && !res.url.includes("news.google.com")) {
         return res.url;
       }
-    } catch { /* give up, use original */ }
+    } catch { /* try next */ }
   }
+
+  // Strategy 3: Decode the base64 article URL embedded in the Google News link
+  // Google News URLs contain a base64-encoded destination URL in the path
+  try {
+    const match = url.match(/articles\/([A-Za-z0-9_-]+)/);
+    if (match) {
+      // The encoded part uses URL-safe base64 — pad and decode
+      let encoded = match[1];
+      // Add padding
+      while (encoded.length % 4 !== 0) encoded += "=";
+      const decoded = Buffer.from(encoded.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf-8");
+      // The decoded string contains the URL somewhere — extract it
+      const urlMatch = decoded.match(/https?:\/\/[^\s"'<>]+/);
+      if (urlMatch && !urlMatch[0].includes("google.com")) {
+        return urlMatch[0];
+      }
+    }
+  } catch { /* give up */ }
+
   return url;
 }
 
-// ── Core fetcher ──────────────────────────────────────────────────────────────
+// ── Core fetch layers ─────────────────────────────────────────────────────────
 
 /**
- * Attempt 1: Direct fetch with Chrome-like headers.
+ * Layer 1: Direct fetch with Chrome-like headers.
  * Works on most open news sites.
  */
 async function fetchDirect(url: string): Promise<FetchedArticle> {
@@ -186,7 +254,9 @@ async function fetchDirect(url: string): Promise<FetchedArticle> {
     const ct = response.headers.get("content-type") ?? "";
     if (!ct.includes("text/html") && !ct.includes("application/xhtml")) return { ...blank, error: `Non-HTML: ${ct}` };
     const html = await response.text();
-    return extractFromHtml(url, html);
+    if (isPaywallPage(html)) return { ...blank, error: "Paywall detected" };
+    const result = extractFromHtml(url, html);
+    return result.success ? { ...result, fetchLayer: "direct-chrome" } : result;
   } catch (err) {
     return { ...blank, error: err instanceof Error ? err.message : String(err) };
   } finally {
@@ -195,7 +265,7 @@ async function fetchDirect(url: string): Promise<FetchedArticle> {
 }
 
 /**
- * Attempt 2: Safari UA with Google Referer — bypasses some bot-detection that blocks Chrome bots.
+ * Layer 2: Safari UA with Google Referer — bypasses some bot-detection that blocks Chrome bots.
  */
 async function fetchWithSafariUA(url: string): Promise<FetchedArticle> {
   const blank: FetchedArticle = { url, title: "", bodyText: "", wordCount: 0, success: false };
@@ -215,7 +285,9 @@ async function fetchWithSafariUA(url: string): Promise<FetchedArticle> {
     });
     if (!response.ok) return { ...blank, error: `HTTP ${response.status}` };
     const html = await response.text();
-    return extractFromHtml(url, html);
+    if (isPaywallPage(html)) return { ...blank, error: "Paywall detected" };
+    const result = extractFromHtml(url, html);
+    return result.success ? { ...result, fetchLayer: "safari-ua" } : result;
   } catch (err) {
     return { ...blank, error: err instanceof Error ? err.message : String(err) };
   } finally {
@@ -224,37 +296,71 @@ async function fetchWithSafariUA(url: string): Promise<FetchedArticle> {
 }
 
 /**
- * Attempt 3: Jina AI Reader (r.jina.ai) — renders JavaScript, bypasses Cloudflare and most
- * bot-detection, and returns clean markdown text. Free tier, no API key required.
+ * Layer 3: Googlebot UA — many publishers whitelist Googlebot to allow indexing,
+ * which means paywalled content is often served in full to this user agent.
+ * This is the "Google First Click Free" / "Flexible Sampling" bypass.
+ */
+async function fetchWithGooglebotUA(url: string): Promise<FetchedArticle> {
+  const blank: FetchedArticle = { url, title: "", bodyText: "", wordCount: 0, success: false };
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "From": "googlebot(at)googlebot.com",
+      },
+      redirect: "follow",
+    });
+    if (!response.ok) return { ...blank, error: `HTTP ${response.status}` };
+    const html = await response.text();
+    // Don't check for paywall here — Googlebot may get different content
+    const result = extractFromHtml(url, html);
+    return result.success ? { ...result, fetchLayer: "googlebot-ua" } : result;
+  } catch (err) {
+    return { ...blank, error: err instanceof Error ? err.message : String(err) };
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+/**
+ * Layer 4: Jina AI Reader (r.jina.ai) — renders JavaScript, bypasses Cloudflare and most
+ * bot-detection, and returns clean markdown text.
  * Works on: The Aviation Herald, FlightGlobal, Reuters, AP, most paywalled sites.
+ * Uses API key if available (higher rate limits, better success on blocked sites).
  */
 async function fetchViaJina(url: string): Promise<FetchedArticle> {
   const blank: FetchedArticle = { url, title: "", bodyText: "", wordCount: 0, success: false };
   const jinaUrl = `${JINA_READER_BASE}${url}`;
-  // Use authenticated API key if available — avoids shared-IP blocks on sites like Simple Flying and Reuters
   const jinaApiKey = process.env.JINA_API_KEY ?? "";
   try {
     const response = await fetch(jinaUrl, {
       headers: {
         "Accept": "text/plain, text/markdown, */*",
-        "User-Agent": "Mozilla/5.0 (compatible; FlightDrama/2.0 aviation-research-bot)",
+        "User-Agent": "Mozilla/5.0 (compatible; FlightDrama/3.0 aviation-research-bot)",
         "X-Return-Format": "markdown",
         "X-Timeout": "20",
+        // Request full content without truncation
+        "X-No-Cache": "true",
         ...(jinaApiKey ? { "Authorization": `Bearer ${jinaApiKey}` } : {}),
       },
-      signal: AbortSignal.timeout(25000),
+      signal: AbortSignal.timeout(30000),
       redirect: "follow",
     });
     if (!response.ok) return { ...blank, error: `Jina HTTP ${response.status}` };
     const markdown = await response.text();
     // Jina returns clean markdown — strip markdown syntax for plain text
     const plainText = markdown
-      .replace(/^#{1,6}\s+/gm, "")       // headings
-      .replace(/\*\*(.+?)\*\*/g, "$1")   // bold
-      .replace(/\*(.+?)\*/g, "$1")       // italic
-      .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1") // links
-      .replace(/^[\-*>]\s+/gm, "")       // list markers / blockquotes
-      .replace(/`{1,3}[^`]*`{1,3}/g, "") // code
+      .replace(/^#{1,6}\s+/gm, "")              // headings
+      .replace(/\*\*(.+?)\*\*/g, "$1")          // bold
+      .replace(/\*(.+?)\*/g, "$1")              // italic
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")  // links
+      .replace(/^[\-*>]\s+/gm, "")              // list markers / blockquotes
+      .replace(/`{1,3}[^`]*`{1,3}/g, "")        // code
       .replace(/\n{3,}/g, "\n\n")
       .trim();
     const wc = plainText.split(/\s+/).filter(w => w.length > 0).length;
@@ -268,6 +374,7 @@ async function fetchViaJina(url: string): Promise<FetchedArticle> {
       bodyText: plainText.slice(0, MAX_CHARS),
       wordCount: wc,
       success: true,
+      fetchLayer: "jina-reader",
     };
   } catch (err) {
     return { ...blank, error: `Jina failed: ${err instanceof Error ? err.message : String(err)}` };
@@ -275,8 +382,35 @@ async function fetchViaJina(url: string): Promise<FetchedArticle> {
 }
 
 /**
- * Attempt 4: ScraperAPI-style fallback using a public web scraping proxy.
- * Uses allorigins.win which proxies the request through their servers.
+ * Layer 5: 12ft.io — free paywall removal service.
+ * Prepends "https://12ft.io/" to the URL to get the full article.
+ * Works on many soft paywalls (NYT, Bloomberg, etc.)
+ */
+async function fetchVia12ft(url: string): Promise<FetchedArticle> {
+  const blank: FetchedArticle = { url, title: "", bodyText: "", wordCount: 0, success: false };
+  try {
+    const proxyUrl = `https://12ft.io/proxy?q=${encodeURIComponent(url)}`;
+    const response = await fetch(proxyUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Referer": "https://12ft.io/",
+      },
+      signal: AbortSignal.timeout(20000),
+      redirect: "follow",
+    });
+    if (!response.ok) return { ...blank, error: `12ft HTTP ${response.status}` };
+    const html = await response.text();
+    const result = extractFromHtml(url, html);
+    return result.success ? { ...result, fetchLayer: "12ft-proxy" } : result;
+  } catch (err) {
+    return { ...blank, error: `12ft failed: ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
+/**
+ * Layer 6: AllOrigins proxy — last resort.
+ * Routes the request through allorigins.win servers.
  */
 async function fetchViaProxy(url: string): Promise<FetchedArticle> {
   const blank: FetchedArticle = { url, title: "", bodyText: "", wordCount: 0, success: false };
@@ -288,7 +422,8 @@ async function fetchViaProxy(url: string): Promise<FetchedArticle> {
     if (!response.ok) return { ...blank, error: `Proxy HTTP ${response.status}` };
     const json = await response.json() as { contents?: string; status?: { http_code: number } };
     if (!json.contents || json.contents.length < 200) return { ...blank, error: "Proxy returned empty content" };
-    return extractFromHtml(url, json.contents);
+    const result = extractFromHtml(url, json.contents);
+    return result.success ? { ...result, fetchLayer: "allorigins-proxy" } : result;
   } catch (err) {
     return { ...blank, error: `Proxy failed: ${err instanceof Error ? err.message : String(err)}` };
   }
@@ -296,11 +431,14 @@ async function fetchViaProxy(url: string): Promise<FetchedArticle> {
 
 /**
  * Fetch a URL and extract the main article body text.
- * Uses a 4-layer fallback chain to maximise success rate:
- *   1. Direct fetch with Chrome headers (fast, works on most open sites)
- *   2. Safari UA with Google Referer (bypasses some bot detection)
- *   3. Jina AI Reader (renders JS, bypasses Cloudflare — works on most blocked sites)
- *   4. AllOrigins proxy (last resort for anything still blocked)
+ *
+ * Uses a 6-layer fallback chain to maximise success rate:
+ *   1. Direct Chrome headers (fast, works on most open sites)
+ *   2. Safari UA + Google Referer (bypasses some bot detection)
+ *   3. Googlebot UA (bypasses many soft paywalls via Google's whitelisting)
+ *   4. Jina AI Reader (renders JS, bypasses Cloudflare — works on most blocked sites)
+ *   5. 12ft.io proxy (free paywall removal for NYT, Bloomberg, etc.)
+ *   6. AllOrigins proxy (last resort)
  *
  * Returns a FetchedArticle with success=false only if ALL layers fail.
  */
@@ -308,40 +446,60 @@ export async function fetchArticleText(url: string): Promise<FetchedArticle> {
   // Resolve Google News redirect URLs to the real article URL first
   const resolvedUrl = await resolveGoogleNewsUrl(url);
 
-  // Layer 1: Direct fetch
+  // Layer 1: Direct Chrome fetch
   const direct = await fetchDirect(resolvedUrl);
   if (direct.success && direct.wordCount >= MIN_WORD_COUNT) {
     return direct;
   }
-  console.log(`[Fetcher] Layer 1 failed for ${resolvedUrl.slice(0, 80)}: ${direct.error ?? 'insufficient content'} — trying Safari UA`);
+  console.log(`[Fetcher] L1 failed (${resolvedUrl.slice(0, 70)}): ${direct.error ?? 'insufficient content'}`);
 
   // Layer 2: Safari UA
   const safari = await fetchWithSafariUA(resolvedUrl);
   if (safari.success && safari.wordCount >= MIN_WORD_COUNT) {
-    console.log(`[Fetcher] Layer 2 (Safari UA) succeeded for ${resolvedUrl.slice(0, 80)}`);
+    console.log(`[Fetcher] L2 Safari succeeded (${resolvedUrl.slice(0, 70)}) — ${safari.wordCount}w`);
     return safari;
   }
-  console.log(`[Fetcher] Layer 2 failed: ${safari.error ?? 'insufficient content'} — trying Jina AI Reader`);
+  console.log(`[Fetcher] L2 failed: ${safari.error ?? 'insufficient content'}`);
 
-  // Layer 3: Jina AI Reader (JS rendering, Cloudflare bypass)
+  // Layer 3: Googlebot UA (paywall bypass via Google whitelisting)
+  const googlebot = await fetchWithGooglebotUA(resolvedUrl);
+  if (googlebot.success && googlebot.wordCount >= MIN_WORD_COUNT) {
+    console.log(`[Fetcher] L3 Googlebot succeeded (${resolvedUrl.slice(0, 70)}) — ${googlebot.wordCount}w`);
+    return googlebot;
+  }
+  console.log(`[Fetcher] L3 failed: ${googlebot.error ?? 'insufficient content'}`);
+
+  // Layer 4: Jina AI Reader (JS rendering, Cloudflare bypass)
   const jina = await fetchViaJina(resolvedUrl);
   if (jina.success && jina.wordCount >= MIN_WORD_COUNT) {
-    console.log(`[Fetcher] Layer 3 (Jina) succeeded for ${resolvedUrl.slice(0, 80)} — ${jina.wordCount} words`);
+    console.log(`[Fetcher] L4 Jina succeeded (${resolvedUrl.slice(0, 70)}) — ${jina.wordCount}w`);
     return jina;
   }
-  console.log(`[Fetcher] Layer 3 failed: ${jina.error ?? 'insufficient content'} — trying proxy`);
+  console.log(`[Fetcher] L4 failed: ${jina.error ?? 'insufficient content'}`);
 
-  // Layer 4: AllOrigins proxy
+  // Layer 5: 12ft.io paywall removal
+  const ft12 = await fetchVia12ft(resolvedUrl);
+  if (ft12.success && ft12.wordCount >= MIN_WORD_COUNT) {
+    console.log(`[Fetcher] L5 12ft succeeded (${resolvedUrl.slice(0, 70)}) — ${ft12.wordCount}w`);
+    return ft12;
+  }
+  console.log(`[Fetcher] L5 failed: ${ft12.error ?? 'insufficient content'}`);
+
+  // Layer 6: AllOrigins proxy
   const proxy = await fetchViaProxy(resolvedUrl);
   if (proxy.success && proxy.wordCount >= MIN_WORD_COUNT) {
-    console.log(`[Fetcher] Layer 4 (proxy) succeeded for ${resolvedUrl.slice(0, 80)}`);
+    console.log(`[Fetcher] L6 proxy succeeded (${resolvedUrl.slice(0, 70)})`);
     return proxy;
   }
 
   // All layers failed — return the best result we got (most words)
-  const best = [direct, safari, jina, proxy].sort((a, b) => b.wordCount - a.wordCount)[0];
-  console.warn(`[Fetcher] ALL 4 LAYERS FAILED for ${resolvedUrl.slice(0, 80)} — best: ${best.wordCount} words`);
-  return { ...best, success: false, error: `All fetch layers failed. Last error: ${proxy.error ?? jina.error ?? safari.error ?? direct.error}` };
+  const best = [direct, safari, googlebot, jina, ft12, proxy].sort((a, b) => b.wordCount - a.wordCount)[0];
+  console.warn(`[Fetcher] ALL 6 LAYERS FAILED (${resolvedUrl.slice(0, 70)}) — best: ${best.wordCount}w`);
+  return {
+    ...best,
+    success: false,
+    error: `All fetch layers failed. Best: ${best.wordCount} words. Last error: ${proxy.error ?? ft12.error ?? jina.error ?? googlebot.error ?? safari.error ?? direct.error}`,
+  };
 }
 
 /**
@@ -353,6 +511,7 @@ export async function fetchArticleText(url: string): Promise<FetchedArticle> {
  * 2. Try each ARTICLE_SELECTOR in order — use the first match with enough text
  * 3. If no selector works, use paragraph-density scoring to find the best content block
  * 4. Fall back to body if all else fails
+ * 5. Last resort: use og:description meta tag
  */
 export function extractFromHtml(url: string, html: string): FetchedArticle {
   const blank: FetchedArticle = { url, title: "", bodyText: "", wordCount: 0, success: false };
@@ -380,11 +539,39 @@ export function extractFromHtml(url: string, html: string): FetchedArticle {
     // Extract og:description as a fallback content snippet
     const ogDesc = root.querySelector('meta[property="og:description"]')?.getAttribute("content")?.trim() ?? "";
 
+    // Extract JSON-LD structured data — often contains full article text on news sites
+    let jsonLdText = "";
+    try {
+      const jsonLdScripts = root.querySelectorAll('script[type="application/ld+json"]');
+      for (const script of jsonLdScripts) {
+        const raw = script.text;
+        if (!raw) continue;
+        const data = JSON.parse(raw);
+        // articleBody is the full text in Schema.org Article markup
+        const articleBody = data.articleBody || data.description || "";
+        if (articleBody && articleBody.length > jsonLdText.length) {
+          jsonLdText = articleBody;
+        }
+      }
+    } catch { /* JSON-LD parse failure is fine */ }
+
     // Remove boilerplate elements in-place before any content extraction
     for (const selector of BOILERPLATE_SELECTORS) {
       try {
         root.querySelectorAll(selector).forEach((el) => el.remove());
       } catch { /* some selectors may not be supported — skip */ }
+    }
+
+    // ── Strategy 0: JSON-LD articleBody (cleanest possible source) ─────────
+    if (jsonLdText && countWords(jsonLdText) >= MIN_WORD_COUNT) {
+      const cleaned = cleanText(jsonLdText);
+      return {
+        url,
+        title,
+        bodyText: cleaned.slice(0, MAX_CHARS),
+        wordCount: countWords(cleaned),
+        success: true,
+      };
     }
 
     // ── Strategy 1: Try known article container selectors ──────────────────
@@ -444,30 +631,31 @@ export function extractFromHtml(url: string, html: string): FetchedArticle {
     const bodyText = cleanText(body?.text ?? root.text ?? "");
     const wordCount = countWords(bodyText);
 
-    if (wordCount < MIN_WORD_COUNT) {
-      // Last resort: use og:description if available
-      if (ogDesc.length > 50) {
-        return {
-          url,
-          title,
-          bodyText: ogDesc,
-          wordCount: countWords(ogDesc),
-          success: true,
-        };
-      }
+    if (wordCount >= MIN_WORD_COUNT) {
       return {
-        ...blank,
+        url,
         title,
-        error: `Extracted text too short (${wordCount} words) — likely a paywall or JS-rendered page`,
+        bodyText: bodyText.slice(0, MAX_CHARS),
+        wordCount,
+        success: true,
+      };
+    }
+
+    // ── Strategy 4: og:description last resort ─────────────────────────────
+    if (ogDesc.length > 50) {
+      return {
+        url,
+        title,
+        bodyText: ogDesc,
+        wordCount: countWords(ogDesc),
+        success: true,
       };
     }
 
     return {
-      url,
+      ...blank,
       title,
-      bodyText: bodyText.slice(0, MAX_CHARS),
-      wordCount,
-      success: true,
+      error: `Extracted text too short (${wordCount} words) — likely a paywall or JS-rendered page`,
     };
   } catch (err) {
     return { ...blank, error: err instanceof Error ? err.message : String(err) };
@@ -503,7 +691,7 @@ function countWords(text: string): number {
  */
 export async function fetchArticlesBatch(
   urls: string[],
-  concurrency = 3
+  concurrency = 5
 ): Promise<FetchedArticle[]> {
   const results: FetchedArticle[] = new Array(urls.length);
   const queue = urls.map((url, i) => ({ url, i }));
