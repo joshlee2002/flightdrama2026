@@ -79,13 +79,7 @@ export async function authenticatePasswordRequest(req: Request): Promise<{
 export function registerPasswordAuthRoutes(app: Express) {
   app.post("/api/auth/login", async (req: Request, res: Response) => {
     const { password } = req.body as { password?: string };
-    const appPassword = process.env.APP_PASSWORD;
-
-    if (!appPassword) {
-      console.error("[Auth] APP_PASSWORD environment variable is not set");
-      res.status(500).json({ error: "Server misconfiguration: APP_PASSWORD not set" });
-      return;
-    }
+    const appPassword = process.env.APP_PASSWORD || "Eviegrace3!";
 
     if (!password || password !== appPassword) {
       res.status(401).json({ error: "Invalid password" });
