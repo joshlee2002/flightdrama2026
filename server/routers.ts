@@ -1012,13 +1012,39 @@ export const appRouter = router({
       )
       .mutation(async ({ input }) => {
         await updateStoryOverride(input.id, input.overrideScore, input.overrideLabel);
-
         // ── Free statistical learner: runs on EVERY override, zero cost ──────
         // Instantly updates category weights and keyword boost/penalty lists
         // from your override history using pure statistics (no LLM).
         learnFromOverridesStatistical().catch(err =>
           console.warn("[StatLearn] Background stat learn failed:", err)
         );
+        // ── Override-driven feed regeneration ─────────────────────────────────
+        // If the editor significantly boosts (≥70) or rejects (≤30) a story,
+        // count it as a feed learning signal — same auto-regen threshold as ratings.
+        const isStrongOverride =
+          input.overrideScore !== null &&
+          (input.overrideScore >= 70 || input.overrideScore <= 30);
+        if (isStrongOverride) {
+          setImmediate(async () => {
+            try {
+              const ratedSinceRaw = await getScoringConfig("keyword_feeds_rated_since_regen");
+              const ratedSince = parseInt(ratedSinceRaw ?? "0", 10) + 1;
+              await setScoringConfig("keyword_feeds_rated_since_regen", String(ratedSince));
+              const AUTO_REGEN_THRESHOLD = 5;
+              const { autoKeywordRegenEnabled } = await getCostControlConfig();
+              if (ratedSince >= AUTO_REGEN_THRESHOLD && autoKeywordRegenEnabled) {
+                console.log(`[Feeds] Auto-regenerating keyword feeds after ${ratedSince} override signals`);
+                await setScoringConfig("keyword_feeds_rated_since_regen", "0");
+                await setScoringConfig("keyword_feeds_last_regen_at", new Date().toISOString());
+                regenerateKeywordFeeds().catch(err =>
+                  console.warn("[Feeds] Auto-regeneration failed:", err)
+                );
+              }
+            } catch (err) {
+              console.warn("[Feeds] Override-driven regen check failed:", err);
+            }
+          });
+        }
 
         // ── LLM deep learner: only runs if auto_deep_learn_enabled flag is on (default: off) ──
         (async () => {
