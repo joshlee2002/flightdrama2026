@@ -9,7 +9,7 @@
  *  - Heartbeat       /api/scheduled/weekly-digest  (every Monday 09:00)
  */
 
-import { getDb } from "./db";
+import { getDb, getAllScoringConfig } from "./db";
 import { stories, historicalPosts, weeklyDigests } from "../drizzle/schema";
 import { and, gte, lte, eq, desc } from "drizzle-orm";
 import { ENV } from "./_core/env";
@@ -119,10 +119,28 @@ export async function generateWeeklyDigest(referenceDate?: Date): Promise<{
           .join("\n")
       : "No performance data logged yet.";
 
-  const categoryBreakdown = Object.entries(categoryCounts)
+    const categoryBreakdown = Object.entries(categoryCounts)
     .sort((a, b) => b[1] - a[1])
     .map(([cat, count]) => `  ${cat}: ${count} stories`)
     .join("\n");
+
+  // ── 4b. Pull learning data from scoring_config ───────────────────────────
+  const config = await getAllScoringConfig();
+  const statDrift = config["stat_overall_drift"] ?? null;
+  const statCatWeights = config["stat_category_weights"] ?? null;
+  const statKeywordBoosts = config["stat_keyword_boosts"] ?? null;
+  const statKeywordPenalties = config["stat_keyword_penalties"] ?? null;
+  const statExamples = config["stat_examples_count"] ?? "0";
+  const learnedRules = config["learned_scoring_rules"] ?? null;
+  const learnedInsights = config["learned_editor_insights"] ?? null;
+
+  const learningBlock = [
+    statDrift ? `SCORING DRIFT: ${statDrift}` : null,
+    statCatWeights ? `CATEGORY PATTERNS (from ${statExamples} overrides): ${statCatWeights}` : null,
+    statKeywordBoosts && statKeywordBoosts !== "none yet" ? `WORDS EDITOR CONSISTENTLY BOOSTS: ${statKeywordBoosts}` : null,
+    statKeywordPenalties && statKeywordPenalties !== "none yet" ? `WORDS EDITOR CONSISTENTLY REJECTS: ${statKeywordPenalties}` : null,
+    learnedInsights ? `EDITOR TASTE PROFILE: ${learnedInsights.slice(0, 300)}` : null,
+  ].filter(Boolean).join("\n");
 
   const prompt = `You are the editorial intelligence layer for FlightDrama, an aviation content brand on Instagram with a highly engaged audience.
 
@@ -136,22 +154,24 @@ ${categoryBreakdown || "No categories."}
 
 RECENT PERFORMANCE DATA (last 20 posts):
 ${performanceList}
+${learningBlock ? `\nWHAT THE AI HAS LEARNED FROM YOUR OVERRIDES:\n${learningBlock}` : ""}
 
 Your job is to write a weekly digest for the editor. Be direct, specific, and useful. No fluff.
+Use the learning data above to make your recommendations smarter and more specific to this editor's taste.
 
 Write two sections:
 
 1. WEEKLY SUMMARY (3–5 sentences)
    - What story types dominated this week?
    - Any notable patterns in what got approved vs. rejected?
-   - What does the performance data tell us about what the audience responds to?
+   - What does the performance data and learning data tell us about what the audience responds to?
    - Be honest if there's not enough data yet.
 
 2. RECOMMENDATIONS FOR NEXT WEEK (4–6 bullet points, each starting with "•")
-   - Specific story types or angles to prioritise based on this week's patterns
-   - Any headline structures that appear to be working
+   - Specific story types or angles to prioritise based on this week's patterns AND the editor's learned taste
+   - Any headline structures or words that the editor consistently boosts
+   - Story types or words the editor consistently rejects — avoid recommending these
    - Gaps or underserved story types worth exploring
-   - One concrete tip for improving engagement based on performance data
    - Keep each bullet to 1–2 sentences, actionable and specific
 
 Respond in plain text. No markdown headers. No asterisks. Just the two sections, separated by a blank line.`;

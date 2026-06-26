@@ -264,11 +264,6 @@ async function fetchNewsRss(query: string): Promise<Array<{ title: string; sourc
   return merged;
 }
 
-/** @deprecated Use fetchNewsRss instead */
-async function fetchGoogleNewsRss(query: string): Promise<Array<{ title: string; source: string; url: string }>> {
-  return fetchNewsRss(query);
-}
-
 /** Result from deepResearch — includes the context string and how many sources were successfully fetched */
 export interface DeepResearchResult {
   context: string;

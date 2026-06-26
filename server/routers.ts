@@ -44,7 +44,7 @@ import { eq, sql } from "drizzle-orm";
 import { stories } from "../drizzle/schema";
 import { fetchArticleContent, fetchRssFeed, isSimilarTitle, isAviationRelevant, DEFAULT_RSS_SOURCES } from "./ingestion";
 import { scoreStory } from "./viralScoring";
-import { scoreStoryWithLLM, learnFromOverrides, learnFromOverridesStatistical } from "./llmScoring";
+import { scoreStoryWithLLM, batchScoreStoriesWithLLM, learnFromOverrides, learnFromOverridesStatistical, type BatchScoringInput } from "./llmScoring";
 import { runFullSoyunciPipeline, rewriteArticleOnly, runResearchAndWrite, extractResearchPackage } from "./soyunci";
 import { analysePerformance, getPerformanceInsights, analysePerformanceStatistical, getStatPerformanceInsights, analyseArticleStyle, getArticleStyleInsights, calculatePerformanceScore } from "./performanceAnalysis";
 import { syncInstagramPosts, verifyInstagramToken } from "./instagramSync";
@@ -918,6 +918,8 @@ export const appRouter = router({
           try {
             const items = await fetchRssFeed(source.url, source.name);
             await updateRssSourceLastFetched(source.id);
+            // Pre-filter items before scoring to avoid wasting LLM calls
+            const candidateItems: typeof items = [];
             for (const item of items) {
               if (await hasSeenUrl(item.sourceUrl)) { skippedCount++; continue; }
               if (isSimilarTitle(item.title, recentTitles)) {
@@ -930,10 +932,20 @@ export const appRouter = router({
                 skippedCount++;
                 continue;
               }
-              const { llmScoringEnabled } = await getCostControlConfig();
-              const scoring = llmScoringEnabled
-                ? await scoreStoryWithLLM(item.title, item.content)
-                : (() => { const s = scoreStory(item.title, item.content); return { ...s, scoringMethod: "rule_based" as const }; })();
+              candidateItems.push(item);
+            }
+            // Batch score all candidates from this source in one LLM call
+            const { llmScoringEnabled } = await getCostControlConfig();
+            const scoringResults = llmScoringEnabled && candidateItems.length > 0
+              ? await batchScoreStoriesWithLLM(candidateItems.map(item => ({
+                  title: item.title,
+                  content: item.content,
+                  ruleScore: scoreStory(item.title, item.content),
+                })))
+              : candidateItems.map(item => ({ ...scoreStory(item.title, item.content), scoringMethod: "rule_based" as const }));
+            for (let idx = 0; idx < candidateItems.length; idx++) {
+              const item = candidateItems[idx];
+              const scoring = scoringResults[idx] ?? { ...scoreStory(item.title, item.content), scoringMethod: "rule_based" as const };
               await markUrlAsSeen(item.sourceUrl, scoring.score < feedThreshold ? "score_below_threshold" : undefined);
               if (scoring.score < feedThreshold) { skippedCount++; continue; }
               const newStoryId = await createStory({
@@ -975,26 +987,55 @@ export const appRouter = router({
 
     /**
      * Re-score and re-rank all pending stories.
+     * Uses batch scoring (10 stories per LLM call) for ~10x cost/speed efficiency.
      */
-                rerank: protectedProcedure.mutation(async () => {
+    rerank: protectedProcedure.mutation(async () => {
       const allStories = await getStoriesWithPackages({ approvalStatus: "pending", limit: 200 });
       const toRerank = allStories.filter(
         ({ story }) => story.overrideScore === null || story.overrideScore === undefined
       );
       // Run in the background so the HTTP request returns immediately (avoids timeout on large queues)
       setImmediate(async () => {
-        for (const { story } of toRerank) {
+        const BATCH_SIZE = 10;
+        let completed = 0;
+        for (let i = 0; i < toRerank.length; i += BATCH_SIZE) {
+          const batch = toRerank.slice(i, i + BATCH_SIZE);
           try {
-            const scoring = await scoreStoryWithLLM(story.title, story.content || "");
-            await updateStoryScores(story.id, scoring.score, scoring.statusLabel, scoring.viralReason, scoring.category, scoring.scoringMethod);
-            await updateStoryTriggers(story.id, scoring.triggers);
+            const batchInputs: BatchScoringInput[] = batch.map(({ story }) => ({
+              title: story.title,
+              content: story.content || "",
+              ruleScore: { score: story.viralScore, statusLabel: story.statusLabel, category: story.category ?? "General Aviation", viralReason: story.viralReason ?? "", triggers: [], viralExplanation: "" },
+            }));
+            const results = await batchScoreStoriesWithLLM(batchInputs);
+            for (let j = 0; j < batch.length; j++) {
+              const { story } = batch[j];
+              const scoring = results[j];
+              if (!scoring) continue;
+              try {
+                await updateStoryScores(story.id, scoring.score, scoring.statusLabel, scoring.viralReason, scoring.category, scoring.scoringMethod);
+                await updateStoryTriggers(story.id, scoring.triggers);
+                completed++;
+              } catch (err) {
+                console.error(`[Rerank] Failed to update story ${story.id}:`, err);
+              }
+            }
           } catch (err) {
-            console.error(`[Rerank] Failed to score story ${story.id}:`, err);
+            console.error(`[Rerank] Batch ${i}-${i + BATCH_SIZE} failed, falling back to individual scoring:`, err);
+            for (const { story } of batch) {
+              try {
+                const scoring = await scoreStoryWithLLM(story.title, story.content || "");
+                await updateStoryScores(story.id, scoring.score, scoring.statusLabel, scoring.viralReason, scoring.category, scoring.scoringMethod);
+                await updateStoryTriggers(story.id, scoring.triggers);
+                completed++;
+              } catch (err2) {
+                console.error(`[Rerank] Failed to score story ${story.id}:`, err2);
+              }
+            }
           }
         }
-        console.log(`[Rerank] Completed rescoring ${toRerank.length} stories`);
+        console.log(`[Rerank] Completed rescoring ${completed}/${toRerank.length} stories`);
       });
-      return { reranked: toRerank.length, message: `Rescoring ${toRerank.length} stories in the background. Refresh in 1-2 minutes.` };
+      return { reranked: toRerank.length, message: `Rescoring ${toRerank.length} stories in the background using batch scoring. Refresh in 1-2 minutes.` };
     }),
 
     /**
@@ -1099,6 +1140,7 @@ export const appRouter = router({
     scoringInsights: protectedProcedure.query(async () => {
       const config = await getAllScoringConfig();
       return {
+        // LLM deep learner output
         learnedRules: config["learned_scoring_rules"] ?? null,
         learnedWeights: config["learned_category_weights"] ?? null,
         learnedInsights: config["learned_editor_insights"] ?? null,
@@ -1106,8 +1148,50 @@ export const appRouter = router({
         lastLearnedExamplesCount: config["last_learned_examples_count"]
           ? parseInt(config["last_learned_examples_count"])
           : null,
+        // Statistical learner output (free, runs on every override)
+        statCategoryWeights: config["stat_category_weights"] ?? null,
+        statKeywordBoosts: config["stat_keyword_boosts"] ?? null,
+        statKeywordPenalties: config["stat_keyword_penalties"] ?? null,
+        statOverallDrift: config["stat_overall_drift"] ?? null,
+        statLastLearnedAt: config["stat_last_learned_at"] ?? null,
+        statExamplesCount: config["stat_examples_count"]
+          ? parseInt(config["stat_examples_count"])
+          : null,
+        // Performance learner output (from historical_posts)
+        statPerfHighKeywords: config["stat_perf_high_keywords"] ?? null,
+        statPerfLowKeywords: config["stat_perf_low_keywords"] ?? null,
+        statPerfTopCategories: config["stat_perf_top_categories"] ?? null,
+        statPerfAvgEngagement: config["stat_perf_avg_engagement"]
+          ? parseInt(config["stat_perf_avg_engagement"])
+          : null,
+        statPerfPostsCount: config["stat_perf_posts_count"]
+          ? parseInt(config["stat_perf_posts_count"])
+          : null,
+        statPerfAnalysedAt: config["stat_perf_analysed_at"] ?? null,
       };
     }),
+
+    // Blocked stories — URLs that were filtered out at ingestion
+    blockedStories: protectedProcedure
+      .input(z.object({
+        limit: z.number().int().min(1).max(200).default(100),
+        reason: z.enum(["all", "score_below_threshold", "not_aviation", "similar_title", "manually_rejected"]).default("all"),
+      }))
+      .query(async () => {
+        const db = await getDb();
+        if (!db) return [];
+        const { seenUrls } = await import("../drizzle/schema");
+        const { desc: descOrder, isNotNull: isNotNullFn } = await import("drizzle-orm");
+        return db.select({
+          url: seenUrls.url,
+          rejectedReason: seenUrls.rejectedReason,
+          seenAt: seenUrls.seenAt,
+        })
+          .from(seenUrls)
+          .where(isNotNullFn(seenUrls.rejectedReason))
+          .orderBy(descOrder(seenUrls.seenAt))
+          .limit(200);
+      }),
 
     // Performance Calibration Insights — moved inside stories router
     calibrationInsights: protectedProcedure.query(async () => {

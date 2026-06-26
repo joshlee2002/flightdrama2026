@@ -32,9 +32,12 @@ import {
   setScoringConfig,
   getHistoricalPosts,
   getLastIngestTime,
+  createHistoricalPost,
 } from "./db";
 import { rewriteArticleOnly } from "./soyunci";
 import { scoreStory } from "./viralScoring";
+import { learnFromOverridesStatistical } from "./llmScoring";
+import { regenerateKeywordFeeds } from "./keywordGenerator";
 import { fetchRssFeed } from "./ingestion";
 import { sql } from "drizzle-orm";
 import { stories } from "../drizzle/schema";
@@ -202,6 +205,42 @@ const TOOLS = [
       },
     },
   },
+  {
+    type: "function" as const,
+    function: {
+      name: "log_post",
+      description: "Log an Instagram post to the performance database so the system can learn from it. Use this when the user mentions they posted a story.",
+      parameters: {
+        type: "object",
+        properties: {
+          headline: { type: "string", description: "The headline used on the post" },
+          views: { type: "number", description: "Number of views/reach" },
+          likes: { type: "number", description: "Number of likes" },
+          comments: { type: "number", description: "Number of comments" },
+          shares: { type: "number", description: "Number of shares" },
+          saves: { type: "number", description: "Number of saves/bookmarks" },
+          followersGained: { type: "number", description: "Net followers gained from this post" },
+          category: { type: "string", description: "Story category (e.g. Safety Failure, Passenger Outrage)" },
+          platform: { type: "string", description: "Platform posted on (default: Instagram)" },
+        },
+        required: ["headline"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "trigger_learning",
+      description: "Trigger the statistical learning system to update keyword boosts/penalties and category weights from override history. Also optionally regenerates AI keyword feeds.",
+      parameters: {
+        type: "object",
+        properties: {
+          regenerateFeeds: { type: "boolean", description: "Also regenerate AI keyword feeds after learning (default: false)" },
+        },
+        required: [],
+      },
+    },
+  },
 ];
 
 // ── Tool execution ────────────────────────────────────────────────────────────
@@ -358,6 +397,35 @@ Pipeline status: ${pkg?.processingStatus ?? "not started"}`;
           `  - "${(p.headline ?? "").slice(0, 60)}..." | views:${p.views ?? "?"} likes:${p.likes ?? "?"} comments:${p.comments ?? "?"}`
         ).join("\n");
         return `Performance data (${posts.length} posts logged):\nTop posts by views:\n${list}`;
+      }
+
+      case "log_post": {
+        if (!args.headline) return "Headline is required to log a post.";
+        await createHistoricalPost({
+          headline: args.headline,
+          views: args.views ?? undefined,
+          likes: args.likes ?? undefined,
+          comments: args.comments ?? undefined,
+          shares: args.shares ?? undefined,
+          saves: args.saves ?? undefined,
+          followersGained: args.followersGained ?? undefined,
+          category: args.category ?? undefined,
+          platform: args.platform ?? "Instagram",
+          sourceType: "assistant",
+        });
+        // Trigger stat learner immediately so the system learns from this post
+        learnFromOverridesStatistical().catch(() => {});
+        return `Post logged successfully: "${args.headline.slice(0, 60)}...". The system will now learn from this performance data.`;
+      }
+
+      case "trigger_learning": {
+        const statResult = await learnFromOverridesStatistical();
+        let feedResult = "";
+        if (args.regenerateFeeds) {
+          const feeds = await regenerateKeywordFeeds();
+          feedResult = ` Also regenerated AI feeds: ${feeds.created} created, ${feeds.updated} updated.`;
+        }
+        return `Learning complete. ${statResult.summary}${feedResult}`;
       }
 
       default:

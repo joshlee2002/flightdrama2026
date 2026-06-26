@@ -1,7 +1,7 @@
 import FlightLayout from "@/components/FlightLayout";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
-import { Rss, Loader2, RefreshCw, DatabaseZap, Sparkles, Clock, BarChart2, Zap, Filter } from "lucide-react";
+import { Rss, Loader2, RefreshCw, DatabaseZap, Sparkles, Clock, BarChart2, Zap, Filter, ShieldOff, ExternalLink } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -63,9 +63,21 @@ function formatExpiryDate(date: Date | string | null | undefined): string {
   return `in ${days}d`;
 }
 
+const reasonLabel: Record<string, { label: string; color: string }> = {
+  score_below_threshold: { label: "Score too low", color: "text-amber-400 bg-amber-500/10 border-amber-500/20" },
+  not_aviation: { label: "Not aviation", color: "text-red-400 bg-red-500/10 border-red-500/20" },
+  similar_title: { label: "Duplicate", color: "text-blue-400 bg-blue-500/10 border-blue-500/20" },
+  manually_rejected: { label: "Manually rejected", color: "text-red-400 bg-red-500/10 border-red-500/20" },
+};
+
 export default function Sources() {
   const { data: sources, isLoading, refetch } = trpc.rssSources.list.useQuery();
   const utils = trpc.useUtils();
+  const [showBlocked, setShowBlocked] = useState(false);
+  const { data: blocked, isLoading: blockedLoading } = trpc.stories.blockedStories.useQuery(
+    { limit: 100, reason: "all" },
+    { enabled: showBlocked }
+  );
   // Track which source's threshold input is being edited
   const [editingThreshold, setEditingThreshold] = useState<Record<number, string>>({});
 
@@ -404,6 +416,54 @@ export default function Sources() {
                 ))}
               </div>
             </div>
+          </div>
+        )}
+      </div>
+      {/* Blocked Stories Section */}
+      <div className="mt-8">
+        <button
+          onClick={() => setShowBlocked(v => !v)}
+          className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors mb-4"
+        >
+          <ShieldOff className="w-4 h-4" />
+          <span>{showBlocked ? "Hide" : "Show"} Blocked Stories</span>
+          <span className="text-xs text-muted-foreground">(URLs filtered out at ingestion)</span>
+        </button>
+
+        {showBlocked && (
+          <div className="rounded-xl border border-border bg-card/40 overflow-hidden">
+            <div className="px-4 py-3 border-b border-border flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
+                <ShieldOff className="w-4 h-4 text-muted-foreground" />
+                Blocked Stories
+              </h3>
+              <span className="text-xs text-muted-foreground">{blocked?.length ?? 0} shown (most recent first)</span>
+            </div>
+            {blockedLoading ? (
+              <div className="flex items-center justify-center py-12">
+                <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
+              </div>
+            ) : !blocked || blocked.length === 0 ? (
+              <div className="py-12 text-center text-sm text-muted-foreground">No blocked stories found.</div>
+            ) : (
+              <div className="divide-y divide-border/50 max-h-96 overflow-y-auto">
+                {blocked.map((item, i) => {
+                  const reason = reasonLabel[item.rejectedReason ?? ""] ?? { label: item.rejectedReason ?? "Unknown", color: "text-muted-foreground bg-muted border-border" };
+                  const domain = (() => { try { return new URL(item.url).hostname.replace(/^www\./, ""); } catch { return item.url.slice(0, 40); } })();
+                  return (
+                    <div key={i} className="flex items-center gap-3 px-4 py-2.5 hover:bg-muted/20 transition-colors">
+                      <span className={cn("text-xs px-2 py-0.5 rounded-full border shrink-0", reason.color)}>{reason.label}</span>
+                      <span className="text-xs text-muted-foreground shrink-0">{domain}</span>
+                      <span className="text-xs text-foreground/70 flex-1 truncate">{item.url}</span>
+                      <a href={item.url} target="_blank" rel="noopener noreferrer" className="shrink-0 text-muted-foreground hover:text-foreground">
+                        <ExternalLink className="w-3 h-3" />
+                      </a>
+                      <span className="text-xs text-muted-foreground shrink-0">{formatRelativeDate(item.seenAt)}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
       </div>

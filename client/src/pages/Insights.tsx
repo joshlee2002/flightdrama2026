@@ -45,7 +45,7 @@ function formatDate(iso: string | null) {
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function Insights() {
-  const [activeTab, setActiveTab] = useState<"overrides" | "rules" | "calibration" | "cost">("overrides");
+  const [activeTab, setActiveTab] = useState<"overrides" | "rules" | "stat" | "calibration" | "cost">("overrides");
 
   const { data: calibration, isLoading: loadingCalibration } = trpc.stories.calibrationInsights.useQuery();
 
@@ -147,6 +147,7 @@ export default function Insights() {
           {[
             { id: "overrides" as const, label: "Override History", icon: Sliders },
             { id: "rules" as const, label: "Learned Rules", icon: BookOpen },
+            { id: "stat" as const, label: "Stat Learner", icon: BarChart2 },
             { id: "calibration" as const, label: "Score Calibration", icon: TrendingUp },
             { id: "cost" as const, label: "Cost Control", icon: Zap },
           ].map(({ id, label, icon: Icon }) => (
@@ -301,6 +302,110 @@ export default function Insights() {
             )}
           </>
         )}
+        {/* Stat Learner Tab */}
+        {activeTab === "stat" && (
+          <div className="space-y-5">
+            {loadingInsights ? (
+              <div className="flex items-center justify-center py-24">
+                <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
+              </div>
+            ) : (
+              <>
+                {/* Overall drift */}
+                {insights?.statOverallDrift && (
+                  <div className={cn(
+                    "rounded-xl border p-4 flex items-start gap-3",
+                    insights.statOverallDrift.includes("too generous") ? "border-amber-500/20 bg-amber-500/5" :
+                    insights.statOverallDrift.includes("too conservative") ? "border-blue-500/20 bg-blue-500/5" :
+                    "border-emerald-500/20 bg-emerald-500/5"
+                  )}>
+                    <BarChart2 className="w-4 h-4 text-amber-400 mt-0.5 shrink-0" />
+                    <div>
+                      <p className="text-xs font-semibold text-foreground mb-0.5">Scoring Drift</p>
+                      <p className="text-sm text-foreground/80">{insights.statOverallDrift}</p>
+                      {insights.statExamplesCount !== null && (
+                        <p className="text-xs text-muted-foreground mt-1">Based on {insights.statExamplesCount} overrides</p>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Category patterns */}
+                {insights?.statCategoryWeights && insights.statCategoryWeights !== "Not enough data per category yet." && (
+                  <section className="rounded-xl border border-border bg-card/40 p-5">
+                    <h2 className="text-sm font-semibold text-foreground mb-3 flex items-center gap-2">
+                      <TrendingUp className="w-3.5 h-3.5 text-muted-foreground" /> Category Patterns (from overrides)
+                    </h2>
+                    <div className="space-y-1.5">
+                      {insights.statCategoryWeights.split("; ").map((entry, i) => (
+                        <p key={i} className="text-sm text-foreground/80 font-mono text-xs bg-muted/30 rounded px-3 py-1.5">{entry}</p>
+                      ))}
+                    </div>
+                  </section>
+                )}
+
+                {/* Keyword boosts and penalties */}
+                <div className="grid grid-cols-2 gap-4">
+                  {insights?.statKeywordBoosts && insights.statKeywordBoosts !== "none yet" && (
+                    <section className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-4">
+                      <h2 className="text-xs font-semibold text-emerald-400 mb-2 flex items-center gap-1.5">
+                        <ArrowUp className="w-3 h-3" /> Words You Consistently Boost
+                      </h2>
+                      <p className="text-xs text-foreground/70 leading-relaxed">{insights.statKeywordBoosts}</p>
+                    </section>
+                  )}
+                  {insights?.statKeywordPenalties && insights.statKeywordPenalties !== "none yet" && (
+                    <section className="rounded-xl border border-red-500/20 bg-red-500/5 p-4">
+                      <h2 className="text-xs font-semibold text-red-400 mb-2 flex items-center gap-1.5">
+                        <ArrowDown className="w-3 h-3" /> Words You Consistently Reject
+                      </h2>
+                      <p className="text-xs text-foreground/70 leading-relaxed">{insights.statKeywordPenalties}</p>
+                    </section>
+                  )}
+                </div>
+
+                {/* Performance keywords (from historical posts) */}
+                {(insights?.statPerfHighKeywords || insights?.statPerfLowKeywords) && (
+                  <div className="grid grid-cols-2 gap-4">
+                    {insights?.statPerfHighKeywords && insights.statPerfHighKeywords !== "" && (
+                      <section className="rounded-xl border border-blue-500/20 bg-blue-500/5 p-4">
+                        <h2 className="text-xs font-semibold text-blue-400 mb-2 flex items-center gap-1.5">
+                          <ArrowUp className="w-3 h-3" /> High-Engagement Headline Words
+                        </h2>
+                        <p className="text-xs text-foreground/70 leading-relaxed">{insights.statPerfHighKeywords}</p>
+                        {insights.statPerfPostsCount && (
+                          <p className="text-xs text-muted-foreground mt-1">From {insights.statPerfPostsCount} logged posts</p>
+                        )}
+                      </section>
+                    )}
+                    {insights?.statPerfLowKeywords && insights.statPerfLowKeywords !== "" && (
+                      <section className="rounded-xl border border-red-500/20 bg-red-500/5 p-4">
+                        <h2 className="text-xs font-semibold text-red-400 mb-2 flex items-center gap-1.5">
+                          <ArrowDown className="w-3 h-3" /> Low-Engagement Headline Words
+                        </h2>
+                        <p className="text-xs text-foreground/70 leading-relaxed">{insights.statPerfLowKeywords}</p>
+                      </section>
+                    )}
+                  </div>
+                )}
+
+                {/* Empty state */}
+                {!insights?.statOverallDrift && !insights?.statCategoryWeights && !insights?.statKeywordBoosts && (
+                  <div className="flex flex-col items-center justify-center py-24 text-center">
+                    <div className="w-14 h-14 rounded-2xl bg-muted flex items-center justify-center mb-4">
+                      <BarChart2 className="w-6 h-6 text-muted-foreground" />
+                    </div>
+                    <h3 className="text-base font-semibold text-foreground mb-1">No stat data yet</h3>
+                    <p className="text-sm text-muted-foreground max-w-xs">
+                      Override at least 3 stories on the Dashboard. The statistical learner runs automatically on every override.
+                    </p>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
+
         {/* Score Calibration Tab */}
         {activeTab === "calibration" && (
           <div className="space-y-5">
