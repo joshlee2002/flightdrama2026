@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, lte, ne, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, lte, ne, sql } from "drizzle-orm";
 import { DEFAULT_RSS_SOURCES } from "./ingestion";
 import { drizzle } from "drizzle-orm/mysql2";
 import {
@@ -462,6 +462,29 @@ export async function markUrlAsSeen(url: string, rejectedReason?: string): Promi
   } catch {
     // Silently ignore duplicate key errors — URL already seen
   }
+}
+
+/**
+ * Bulk check: returns a Set of URLs that have already been seen.
+ * Replaces N individual hasSeenUrl() calls with 2 DB queries total.
+ * Chunks into groups of 500 to stay within MySQL IN() limits.
+ */
+export async function getSeenUrlSet(urls: string[]): Promise<Set<string>> {
+  if (urls.length === 0) return new Set();
+  const db = await getDb();
+  if (!db) return new Set();
+  const CHUNK = 500;
+  const seen = new Set<string>();
+  for (let i = 0; i < urls.length; i += CHUNK) {
+    const chunk = urls.slice(i, i + CHUNK);
+    const [seenRows, storyRows] = await Promise.all([
+      db.select({ url: seenUrls.url }).from(seenUrls).where(inArray(seenUrls.url, chunk)),
+      db.select({ url: stories.sourceUrl }).from(stories).where(inArray(stories.sourceUrl, chunk)),
+    ]);
+    seenRows.forEach(r => seen.add(r.url));
+    storyRows.forEach(r => { if (r.url) seen.add(r.url); });
+  }
+  return seen;
 }
 
 export async function hasSeenUrl(url: string): Promise<boolean> {
