@@ -319,7 +319,7 @@ function StoryCard({
         </div>{/* end row-1-left */}
 
         {/* Right-side controls: override + action buttons — wrap below title on narrow screens */}
-        <div className="flex items-center gap-2 flex-wrap w-full lg:w-auto">
+        <div className="flex items-center gap-2 flex-wrap w-full">
 
         {/* Manual score override */}
         <div className="shrink-0 flex flex-col items-end gap-1.5">
@@ -847,20 +847,22 @@ export default function Dashboard() {
 
   return (
     <FlightLayout>
-      <div className="p-6">
+      <div className="p-4 lg:p-6">
         {/* Header */}
-        <div className="flex items-center justify-between mb-6">
-          <div>
-            <h1 className="text-2xl font-bold text-foreground" style={{ fontFamily: "Space Grotesk, sans-serif" }}>
-              Story Dashboard
-            </h1>
-            <p className="text-sm text-muted-foreground mt-0.5">
-              {stories.length} stories ranked by viral potential
-            </p>
+        <div className="flex flex-col gap-3 mb-4 lg:mb-6">
+          <div className="flex items-center justify-between">
+            <div>
+              <h1 className="text-xl lg:text-2xl font-bold text-foreground" style={{ fontFamily: "Space Grotesk, sans-serif" }}>
+                Story Dashboard
+              </h1>
+              <p className="text-xs lg:text-sm text-muted-foreground mt-0.5">
+                {stories.length} stories ranked by viral potential
+              </p>
+            </div>
           </div>
 
-          {/* Filter */}
-          <div className="flex items-center gap-2">
+          {/* Filter bar — wraps on mobile */}
+          <div className="flex flex-wrap items-center gap-2">
             {/* Sort toggle */}
             <div className="flex items-center rounded-md border border-border overflow-hidden">
               <button
@@ -893,7 +895,8 @@ export default function Dashboard() {
               onClick={() => setShowHistory(!showHistory)}
             >
               <HistoryIcon className="w-3.5 h-3.5" />
-              {showHistory ? "Showing All" : "New Only"}
+              <span className="hidden sm:inline">{showHistory ? "Showing All" : "New Only"}</span>
+              <span className="sm:hidden">{showHistory ? "All" : "New"}</span>
             </Button>
             <Button
               size="sm"
@@ -902,11 +905,12 @@ export default function Dashboard() {
               onClick={() => setCompletedOnly(!completedOnly)}
             >
               <Sparkles className="w-3.5 h-3.5" />
-              {completedOnly ? "Completed Only" : "All Stories"}
+              <span className="hidden sm:inline">{completedOnly ? "Completed Only" : "All Stories"}</span>
+              <span className="sm:hidden">{completedOnly ? "Done" : "All"}</span>
             </Button>
             <Select value={filterStatus} onValueChange={setFilterStatus}>
-              <SelectTrigger className="w-44 text-xs h-8">
-                <SelectValue placeholder="Filter by status" />
+              <SelectTrigger className="w-36 lg:w-44 text-xs h-8">
+                <SelectValue placeholder="Filter" />
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All Statuses</SelectItem>
@@ -920,7 +924,7 @@ export default function Dashboard() {
         </div>
 
         {/* Score summary bar */}
-        <div className="grid grid-cols-4 gap-3 mb-6">
+        <div className="grid grid-cols-4 gap-2 lg:gap-3 mb-4 lg:mb-6">
           {[
             { key: "must_post", label: "Must Post", color: "text-emerald-400", bg: "bg-emerald-500/10 border-emerald-500/20" },
             { key: "strong_candidate", label: "Strong Candidate", color: "text-blue-400", bg: "bg-blue-500/10 border-blue-500/20" },
@@ -930,16 +934,16 @@ export default function Dashboard() {
             <button
               key={key}
               className={cn(
-                "rounded-xl border p-3 text-left transition-all",
+                "rounded-xl border p-2 lg:p-3 text-left transition-all",
                 bg,
                 filterStatus === key ? "ring-1 ring-current" : "hover:opacity-80"
               )}
               onClick={() => setFilterStatus(filterStatus === key ? "all" : key)}
             >
-              <p className={cn("text-2xl font-bold", color)} style={{ fontFamily: "Space Grotesk, sans-serif" }}>
+              <p className={cn("text-xl lg:text-2xl font-bold", color)} style={{ fontFamily: "Space Grotesk, sans-serif" }}>
                 {counts[key as keyof typeof counts]}
               </p>
-              <p className="text-xs text-muted-foreground mt-0.5">{label}</p>
+              <p className="text-[10px] lg:text-xs text-muted-foreground mt-0.5 leading-tight">{label}</p>
             </button>
           ))}
         </div>

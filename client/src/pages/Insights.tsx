@@ -69,7 +69,7 @@ export default function Insights() {
 
   return (
     <FlightLayout>
-      <div className="p-6 max-w-5xl mx-auto">
+      <div className="p-4 lg:p-6 max-w-5xl mx-auto">
         {/* Header */}
         <div className="mb-6">
           <div className="flex items-center gap-3 mb-1">
@@ -143,7 +143,7 @@ export default function Insights() {
         )}
 
         {/* Tabs */}
-        <div className="flex gap-1 mb-5 border-b border-border">
+        <div className="flex gap-1 mb-5 border-b border-border overflow-x-auto scrollbar-none -mx-4 px-4 lg:mx-0 lg:px-0">
           {[
             { id: "overrides" as const, label: "Override History", icon: Sliders },
             { id: "rules" as const, label: "Learned Rules", icon: BookOpen },
@@ -155,7 +155,7 @@ export default function Insights() {
               key={id}
               onClick={() => setActiveTab(id)}
               className={cn(
-                "flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors",
+                "flex items-center gap-2 px-3 lg:px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors whitespace-nowrap shrink-0",
                 activeTab === id
                   ? "border-violet-400 text-violet-400"
                   : "border-transparent text-muted-foreground hover:text-foreground"

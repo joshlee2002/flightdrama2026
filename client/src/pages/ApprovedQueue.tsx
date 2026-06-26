@@ -1119,7 +1119,7 @@ function ApprovedCard({ story, pkg, onUnapprove, isUnapproving }: ApprovedCardPr
             <span className="text-xs text-muted-foreground ml-auto">Approved {formatDate(story.updatedAt)}</span>
           </div>
         </div>
-        <div className="flex items-center gap-1.5 shrink-0">
+        <div className="flex items-center gap-1.5 flex-wrap">
           {story.sourceUrl && (
             <a href={story.sourceUrl} target="_blank" rel="noopener noreferrer">
               <Button variant="ghost" size="icon" className="h-7 w-7"><ExternalLink className="w-3.5 h-3.5" /></Button>
@@ -1704,7 +1704,7 @@ export default function ApprovedQueue() {
 
   return (
     <FlightLayout>
-      <div className="p-6 max-w-4xl mx-auto">
+      <div className="p-4 lg:p-6 max-w-4xl mx-auto">
         <div className="flex items-center justify-between mb-6">
           <div>
             <h1 className="text-2xl font-bold text-foreground" style={{ fontFamily: "Space Grotesk, sans-serif" }}>Approved Queue</h1>

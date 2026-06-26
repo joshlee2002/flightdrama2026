@@ -157,7 +157,7 @@ export default function Digest() {
 
   return (
     <FlightLayout>
-      <div className="p-6 max-w-3xl">
+      <div className="p-4 lg:p-6 max-w-3xl">
         {/* Header */}
         <div className="flex items-start justify-between mb-6">
           <div>

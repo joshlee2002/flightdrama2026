@@ -147,7 +147,7 @@ export default function Sources() {
 
   return (
     <FlightLayout>
-      <div className="p-6 max-w-3xl">
+      <div className="p-4 lg:p-6 max-w-3xl">
         <div className="flex items-center justify-between mb-6">
           <div>
             <h1 className="text-2xl font-bold text-foreground" style={{ fontFamily: "Space Grotesk, sans-serif" }}>

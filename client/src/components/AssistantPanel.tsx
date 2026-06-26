@@ -118,7 +118,7 @@ export default function AssistantPanel() {
       {!isOpen && (
         <button
           onClick={() => setIsOpen(true)}
-          className="fixed bottom-6 right-6 z-50 w-14 h-14 rounded-full bg-yellow-500 hover:bg-yellow-400 text-black shadow-lg flex items-center justify-center transition-all hover:scale-105 active:scale-95"
+          className="fixed bottom-20 right-4 lg:bottom-6 lg:right-6 z-50 w-14 h-14 rounded-full bg-yellow-500 hover:bg-yellow-400 text-black shadow-lg flex items-center justify-center transition-all hover:scale-105 active:scale-95"
           title="Open FlightDrama AI Assistant"
         >
           <Bot className="w-6 h-6" />
@@ -129,8 +129,13 @@ export default function AssistantPanel() {
       {isOpen && (
         <div
           className={cn(
-            "fixed bottom-6 right-6 z-50 flex flex-col bg-background border border-border/60 rounded-2xl shadow-2xl transition-all duration-200",
-            isMinimised ? "w-72 h-14" : "w-[380px] h-[560px]"
+            "fixed z-50 flex flex-col bg-background border border-border/60 shadow-2xl transition-all duration-200",
+            // Mobile: full screen panel from bottom
+            "bottom-0 left-0 right-0 lg:bottom-6 lg:left-auto lg:right-6",
+            "rounded-t-2xl lg:rounded-2xl",
+            isMinimised
+              ? "h-14 lg:w-72"
+              : "h-[85vh] lg:h-[560px] lg:w-[380px]"
           )}
         >
           {/* Header */}

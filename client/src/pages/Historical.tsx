@@ -379,7 +379,7 @@ export default function Historical() {
 
   return (
     <FlightLayout>
-      <div className="p-6 max-w-3xl mx-auto">
+      <div className="p-4 lg:p-6 max-w-3xl mx-auto">
 
         {/* ── Header ── */}
         <div className="flex items-center justify-between mb-6">
@@ -617,7 +617,7 @@ export default function Historical() {
                 {/* Core stats */}
                 <div>
                   <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-3">Engagement Stats</p>
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <SmartNumberInput label="Views" placeholder="e.g. 2.1m or 450k" value={form.views} onChange={v => setForm(p => ({ ...p, views: v }))} icon={Eye} iconColor="text-blue-400" />
                     <SmartNumberInput label="Likes" placeholder="e.g. 8.5k or 12000" value={form.likes} onChange={v => setForm(p => ({ ...p, likes: v }))} icon={Heart} iconColor="text-pink-400" />
                     <SmartNumberInput label="Comments" placeholder="e.g. 850" value={form.comments} onChange={v => setForm(p => ({ ...p, comments: v }))} icon={MessageCircle} iconColor="text-purple-400" />
@@ -667,7 +667,7 @@ export default function Historical() {
 
                 {showAdvanced && (
                   <div className="space-y-3 border-t border-border pt-4">
-                    <div className="grid grid-cols-2 gap-3">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                       <div>
                         <Label className="text-xs text-muted-foreground mb-1.5 block">Platform</Label>
                         <Input placeholder="e.g. Instagram, TikTok, Facebook" value={form.platform} onChange={e => setForm(p => ({ ...p, platform: e.target.value }))} className="text-sm bg-muted/30 border-border h-8" />
