@@ -784,40 +784,46 @@ export const appRouter = router({
         const story = await getStoryById(input.storyId);
         if (!story) throw new Error("Story not found");
 
+        // Mark as processing immediately
         await updateStoryPackage(input.storyId, { processingStatus: "processing", processingError: null });
 
-        try {
-          const rp = await extractResearchPackage(
-            story.title,
-            story.content ?? "",
-            story.sourceUrl ?? "",
-            story.viralReason ?? "",
-            story.category ?? "General Aviation"
-          );
-          await updateStoryPackage(input.storyId, {
-            processingStatus: "complete",
-            viralAngle: rp.viralAngle,
-            extractedFacts: JSON.stringify(rp.extractedInfo),
-            sourcesResearched: rp.sourcesResearched,
-            sourceConfirmation: rp.sourceConfirmation,
-            // Research package fields
-            storySummary: rp.storySummary,
-            researchExtracted: rp.extractedInfo,
-            researchTimeline: rp.timeline,
-            researchQuotes: rp.quotes,
-            researchSources: rp.sources,
-            researchContradictions: rp.contradictions,
-            researchMissingInfo: rp.missingInfo,
-          });
-          return { success: true, sourcesResearched: rp.sourcesResearched };
-        } catch (err) {
-          const errorMsg = err instanceof Error ? err.message : "Unknown error";
-          await updateStoryPackage(input.storyId, {
-            processingStatus: "failed",
-            processingError: errorMsg,
-          });
-          throw err;
-        }
+        // Run the research pipeline in the background — return immediately
+        // so the HTTP request never times out (research takes 30-90s)
+        setImmediate(async () => {
+          try {
+            const rp = await extractResearchPackage(
+              story.title,
+              story.content ?? "",
+              story.sourceUrl ?? "",
+              story.viralReason ?? "",
+              story.category ?? "General Aviation"
+            );
+            await updateStoryPackage(input.storyId, {
+              processingStatus: "complete",
+              viralAngle: rp.viralAngle,
+              extractedFacts: JSON.stringify(rp.extractedInfo),
+              sourcesResearched: rp.sourcesResearched,
+              sourceConfirmation: rp.sourceConfirmation,
+              storySummary: rp.storySummary,
+              researchExtracted: rp.extractedInfo,
+              researchTimeline: rp.timeline,
+              researchQuotes: rp.quotes,
+              researchSources: rp.sources,
+              researchContradictions: rp.contradictions,
+              researchMissingInfo: rp.missingInfo,
+            });
+            console.log(`[ReResearch] Package extraction complete for story ${input.storyId}`);
+          } catch (err) {
+            const errorMsg = err instanceof Error ? err.message : "Unknown error";
+            console.error(`[ReResearch] Extraction failed for story ${input.storyId}:`, errorMsg);
+            await updateStoryPackage(input.storyId, {
+              processingStatus: "failed",
+              processingError: errorMsg,
+            }).catch(() => {});
+          }
+        });
+
+        return { success: true };
       }),
 
     /**
