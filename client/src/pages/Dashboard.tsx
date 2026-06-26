@@ -609,6 +609,16 @@ export default function Dashboard() {
   const [sortBy, setSortBy] = useState<"top_scored" | "newest">("top_scored");
   const [processingIds, setProcessingIds] = useState<Set<number>>(new Set());
   const [showLearningPanel, setShowLearningPanel] = useState(false);
+  // Per-section story limit — start at 50, "Show more" adds 50 at a time
+  const SECTION_PAGE_SIZE = 50;
+  const [sectionLimits, setSectionLimits] = useState<Record<string, number>>({
+    must_post: SECTION_PAGE_SIZE,
+    strong_candidate: SECTION_PAGE_SIZE,
+    maybe: SECTION_PAGE_SIZE,
+    reject: SECTION_PAGE_SIZE,
+  });
+  const showMoreSection = (key: string) =>
+    setSectionLimits(prev => ({ ...prev, [key]: (prev[key] ?? SECTION_PAGE_SIZE) + SECTION_PAGE_SIZE }));
   const utils = trpc.useUtils();
   const { data: insights } = trpc.stories.scoringInsights.useQuery();
   const learnMutation = trpc.stories.learnFromOverrides.useMutation({
@@ -1016,6 +1026,9 @@ export default function Dashboard() {
               const sectionStories = grouped[key as keyof typeof grouped];
               if (sectionStories.length === 0) return null;
               const isCollapsed = collapsedSections[key];
+              const limit = sectionLimits[key] ?? SECTION_PAGE_SIZE;
+              const visibleStories = sectionStories.slice(0, limit);
+              const hasMore = sectionStories.length > limit;
               // Running rank offset so rank numbers are global across sections
               const rankOffset = SECTION_CONFIG.slice(0, SECTION_CONFIG.findIndex(s => s.key === key))
                 .reduce((acc, s) => acc + grouped[s.key as keyof typeof grouped].length, 0);
@@ -1037,7 +1050,7 @@ export default function Dashboard() {
                   {/* Section stories */}
                   {!isCollapsed && (
                     <div className="space-y-3 px-3 pb-3">
-                      {sectionStories.map(({ story, package: pkg }, index) => (
+                      {visibleStories.map(({ story, package: pkg }, index) => (
                         <StoryCard
                           key={story.id}
                           rank={rankOffset + index + 1}
@@ -1053,6 +1066,14 @@ export default function Dashboard() {
                           onOverrideScore={(score, label) => handleOverrideScore(story.id, score, label)}
                         />
                       ))}
+                      {hasMore && (
+                        <button
+                          className="w-full py-2 text-xs text-muted-foreground hover:text-foreground border border-dashed border-border rounded-lg hover:border-primary/40 transition-colors"
+                          onClick={() => showMoreSection(key)}
+                        >
+                          Show {Math.min(SECTION_PAGE_SIZE, sectionStories.length - limit)} more stories ({sectionStories.length - limit} remaining)
+                        </button>
+                      )}
                     </div>
                   )}
                 </div>

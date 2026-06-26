@@ -14,6 +14,7 @@ import { scheduledWeeklyDigestHandler } from "../scheduledWeeklyDigest";
 import { scheduledLearnHandler } from "../scheduledLearn";
 import { scheduledInstagramSyncHandler } from "../scheduledInstagramSync";
 import { scheduledPipelineHandler } from "../scheduledPipeline";
+import { scheduledDbCleanupHandler } from "../scheduledDbCleanup";
 import { seedOnStartup } from "../seed";
 
 function isPortAvailable(port: number): Promise<boolean> {
@@ -173,6 +174,7 @@ async function startServer() {
   app.post("/api/scheduled/learn", scheduledLearnHandler);
   app.post("/api/scheduled/instagram-sync", scheduledInstagramSyncHandler);
   app.post("/api/scheduled/pipeline", scheduledPipelineHandler);
+  app.post("/api/scheduled/db-cleanup", scheduledDbCleanupHandler);
 
   // tRPC API
   app.use(

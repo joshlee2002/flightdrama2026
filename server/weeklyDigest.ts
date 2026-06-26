@@ -156,20 +156,24 @@ Write two sections:
 
 Respond in plain text. No markdown headers. No asterisks. Just the two sections, separated by a blank line.`;
 
-  const response = await invokeLLM({
-    model: ENV.defaultLlmModel || "llama-3.3-70b-versatile",
-    messages: [
-      {
-        role: "system",
-        content:
-          "You are an editorial intelligence assistant for a high-performing aviation Instagram account. You write concise, actionable weekly digests for the editor.",
-      },
-      { role: "user", content: prompt },
-    ],
-  });
-
-  const rawText: string =
-    (response as any)?.choices?.[0]?.message?.content ?? "";
+  let rawText = "";
+  try {
+    const response = await invokeLLM({
+      model: ENV.defaultLlmModel || "llama-3.3-70b-versatile",
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are an editorial intelligence assistant for a high-performing aviation Instagram account. You write concise, actionable weekly digests for the editor.",
+        },
+        { role: "user", content: prompt },
+      ],
+    });
+    rawText = (response as any)?.choices?.[0]?.message?.content ?? "";
+  } catch (err) {
+    console.error("[WeeklyDigest] LLM generation failed:", err);
+    rawText = `Weekly Summary\n\nCould not generate summary this week due to an AI generation error. However, ${approvedStories.length} stories were approved.\n\nRecommendations for Next Week\n\n• Please review the dashboard manually.\n• AI generation will be retried next week.`;
+  }
 
   // Split into summary and recommendations
   const parts = rawText.split(/\n\s*\n/);

@@ -976,17 +976,25 @@ export const appRouter = router({
     /**
      * Re-score and re-rank all pending stories.
      */
-        rerank: protectedProcedure.mutation(async () => {
+                rerank: protectedProcedure.mutation(async () => {
       const allStories = await getStoriesWithPackages({ approvalStatus: "pending", limit: 200 });
-
-      for (const { story } of allStories) {
-        // Skip stories with a manual override — preserve the editor's judgement
-        if (story.overrideScore !== null && story.overrideScore !== undefined) continue;
-        const scoring = await scoreStoryWithLLM(story.title, story.content || "");
-        await updateStoryScores(story.id, scoring.score, scoring.statusLabel, scoring.viralReason, scoring.category, scoring.scoringMethod);
-        await updateStoryTriggers(story.id, scoring.triggers);
-      }
-      return { reranked: allStories.length };
+      const toRerank = allStories.filter(
+        ({ story }) => story.overrideScore === null || story.overrideScore === undefined
+      );
+      // Run in the background so the HTTP request returns immediately (avoids timeout on large queues)
+      setImmediate(async () => {
+        for (const { story } of toRerank) {
+          try {
+            const scoring = await scoreStoryWithLLM(story.title, story.content || "");
+            await updateStoryScores(story.id, scoring.score, scoring.statusLabel, scoring.viralReason, scoring.category, scoring.scoringMethod);
+            await updateStoryTriggers(story.id, scoring.triggers);
+          } catch (err) {
+            console.error(`[Rerank] Failed to score story ${story.id}:`, err);
+          }
+        }
+        console.log(`[Rerank] Completed rescoring ${toRerank.length} stories`);
+      });
+      return { reranked: toRerank.length, message: `Rescoring ${toRerank.length} stories in the background. Refresh in 1-2 minutes.` };
     }),
 
     /**
