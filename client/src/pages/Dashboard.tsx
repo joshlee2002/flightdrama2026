@@ -322,26 +322,40 @@ function StoryCard({
       {/* ── Action bar — always full width, sits below the card header ── */}
       <div className="border-t border-border/40 px-3 py-2.5 flex flex-col gap-2">
 
-        {/* Override score row */}
-        <div className="flex items-center gap-2">
-          <span className="text-[10px] text-muted-foreground shrink-0">Override score:</span>
-          <Input
-            type="number"
-            min={0}
-            max={100}
-            value={overrideInput}
-            onChange={(e) => setOverrideInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                const v = parseInt(overrideInput, 10);
-                if (!isNaN(v) && v >= 0 && v <= 100) {
-                  const label = v >= 88 ? "must_post" : v >= 70 ? "strong_candidate" : v >= 55 ? "maybe" : "reject";
-                  onOverrideScore(v, label);
+        {/* Override score row — stepper with +/- buttons for mobile */}
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-[10px] text-muted-foreground shrink-0">Override:</span>
+          <div className="flex items-center gap-1">
+            {/* Decrement */}
+            <button
+              className="w-8 h-8 rounded-md border border-border bg-muted/40 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted/70 active:scale-95 transition-all text-base font-bold select-none"
+              onClick={() => setOverrideInput(v => String(Math.max(0, (parseInt(v, 10) || 0) - 1)))}
+            >−</button>
+            {/* Score display / input */}
+            <input
+              type="number"
+              min={0}
+              max={100}
+              value={overrideInput}
+              onChange={(e) => setOverrideInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  const v = parseInt(overrideInput, 10);
+                  if (!isNaN(v) && v >= 0 && v <= 100) {
+                    const label = v >= 88 ? "must_post" : v >= 70 ? "strong_candidate" : v >= 55 ? "maybe" : "reject";
+                    onOverrideScore(v, label);
+                  }
                 }
-              }
-            }}
-            className="w-16 h-8 text-sm text-center px-1 bg-muted/40 border-border"
-          />
+              }}
+              className="w-12 h-8 text-sm font-bold text-center bg-muted/40 border border-border rounded-md text-foreground focus:outline-none focus:ring-1 focus:ring-amber-500/50 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+            />
+            {/* Increment */}
+            <button
+              className="w-8 h-8 rounded-md border border-border bg-muted/40 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted/70 active:scale-95 transition-all text-base font-bold select-none"
+              onClick={() => setOverrideInput(v => String(Math.min(100, (parseInt(v, 10) || 0) + 1)))}
+            >+</button>
+          </div>
+          {/* Set button */}
           <Button
             size="sm"
             variant="outline"
@@ -362,7 +376,7 @@ function StoryCard({
           </Button>
           {hasOverride && (
             <button
-              className="text-[10px] text-muted-foreground hover:text-red-400 transition-colors ml-1"
+              className="text-[10px] text-muted-foreground hover:text-red-400 transition-colors"
               onClick={() => { setOverrideInput(String(story.viralScore)); onOverrideScore(null, null); }}
             >
               clear
