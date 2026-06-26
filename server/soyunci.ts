@@ -39,6 +39,12 @@ export interface SoyunciOutput {
   article: string;
   hashtags: string[];
   selectedHeadline: string;
+  /** Virality score (1-10) for the selected headline */
+  selectedViralityScore: number | null;
+  /** Structural type of the selected headline (e.g. CONTRADICTION, MONEY, FACT) */
+  selectedHeadlineType: string | null;
+  /** All 10 headline objects with scores and types */
+  headlineObjects: Array<{ headline: string; viralityScore: number | null; type: string | null; reason: string | null; rank: number }>;
   alternativeHeadlines: string[];
   imageRecommendations: ImageRecommendation[];
   imageCandidates: Record<string, ImageRecommendation[]>;
@@ -46,6 +52,8 @@ export interface SoyunciOutput {
   researchContext: string;
   /** Number of sources successfully fetched and used during the research step */
   sourcesResearched: number;
+  /** Human-readable source confirmation string */
+  sourceConfirmation: string;
   /** SEO title (55-60 chars, includes primary keyword) */
   seoTitle: string;
   /** SEO meta description (140-160 chars) */
@@ -1425,6 +1433,7 @@ async function writeFromFactMatrix(
   factMatrix: {
     facts: string[];
     angle: string;
+    primaryStory: string;
     timeline: string;
     keyEntities: string;
     directQuotes: string[];
@@ -1760,7 +1769,7 @@ async function researchAndWrite(
   voiceExamples: string,
   perfContext: string,
   sourcesResearched: number
-): Promise<{ facts: string[]; angle: string; article: string; hashtags: string[]; seoTitle: string; seoDescription: string }> {
+): Promise<{ facts: string[]; angle: string; article: string; hashtags: string[]; seoTitle: string; seoDescription: string; editorReview: EditorReview }> {
   // Step A: Extract everything from the raw sources into a clean fact matrix
   console.log(`[Soyunci] Step A — extracting fact matrix from ${sourcesResearched} source(s)...`);
   const factMatrix = await extractFactMatrix(title, primarySourceText, researchContext, sourcesResearched);
@@ -1818,7 +1827,7 @@ async function generateHeadlinesAndCanva(
   angle: string,
   facts: string[],
   headlinePatterns: string[]
-): Promise<{ selected: string; alternatives: string[]; canvaBrief: CanvaBrief }> {
+): Promise<{ selected: string; alternatives: string[]; canvaBrief: CanvaBrief; headlineObjects: Array<{ headline: string; viralityScore: number | null; type: string | null; reason: string | null; rank: number }>; selectedViralityScore: number | null; selectedType: string | null }> {
   // Load style guide
   let styleGuide = "";
   try {

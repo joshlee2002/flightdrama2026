@@ -108,7 +108,7 @@ async function fetchOverrideSignals(): Promise<{
         r.overrideScore !== null &&
         r.viralScore !== null &&
         r.overrideScore >= 70 &&
-        r.overrideScore - r.viralScore >= 10,
+        r.overrideScore - r.viralScore >= 20,
     )
     .map((r) => ({
       title: r.title,
@@ -123,7 +123,7 @@ async function fetchOverrideSignals(): Promise<{
         r.overrideScore !== null &&
         r.viralScore !== null &&
         r.overrideScore <= 30 &&
-        r.viralScore - r.overrideScore >= 10,
+        r.viralScore - r.overrideScore >= 20,
     )
     .map((r) => ({
       title: r.title,

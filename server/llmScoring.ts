@@ -452,7 +452,12 @@ export async function learnFromOverridesStatistical(): Promise<{
 
   // ── 2. Keyword frequency analysis ────────────────────────────────────────
   // Split examples into "editor scored higher" vs "editor scored lower"
-  const SIGNIFICANT_DRIFT = 10; // only count overrides with ≥10 point drift
+  // Threshold is 20 pts (not 10). A small nudge like 100→90 is a minor correction
+  // and should NOT teach the system to avoid those words. Only deliberate large moves
+  // (e.g. 100→70 or 100→30) represent a genuine signal about topic quality.
+  // This prevents core aviation words like 'boeing' and 'aircraft' from being
+  // incorrectly penalised just because they appear in slightly-downgraded stories.
+  const SIGNIFICANT_DRIFT = 20; // only count overrides with ≥20 point drift
 
   const boostedTitles = examples
     .filter(e => e.overrideScore !== null && e.viralScore !== null && (e.overrideScore - e.viralScore) >= SIGNIFICANT_DRIFT)
