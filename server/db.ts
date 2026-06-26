@@ -111,10 +111,12 @@ export async function getActiveRssSources() {
 export async function upsertRssSource(source: InsertRssSource) {
   const db = await getDb();
   if (!db) return;
+  // Only update name and url on conflict — do NOT overwrite category so that
+  // manual DB category corrections (aviation vs viral) are preserved across reseeds.
   await db
     .insert(rssSources)
     .values(source)
-    .onDuplicateKeyUpdate({ set: { name: source.name, url: source.url, category: source.category } });
+    .onDuplicateKeyUpdate({ set: { name: source.name, url: source.url } });
 }
 
 export async function toggleRssSource(id: number, isActive: boolean) {
@@ -365,10 +367,12 @@ export async function updateStoryPackage(
 ) {
   const db = await getDb();
   if (!db) return;
+  // Upsert: create the package row if it doesn't exist yet, then update
+  // This prevents silent failures when approve fires before a package row exists
   await db
-    .update(storyPackages)
-    .set({ ...data, updatedAt: new Date() })
-    .where(eq(storyPackages.storyId, storyId));
+    .insert(storyPackages)
+    .values({ storyId, processingStatus: "queued", ...data })
+    .onDuplicateKeyUpdate({ set: { ...data, updatedAt: new Date() } });
 }
 
 export async function getPackageByStoryId(storyId: number) {
