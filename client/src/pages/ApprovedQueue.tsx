@@ -514,9 +514,10 @@ interface WikimediaSearchModalProps {
   storyId: number;
   slotIndex: number;
   slotRole: string;
+  storyChips?: string[];
 }
 
-function WikimediaSearchModal({ open, onClose, initialQuery, storyId, slotIndex, slotRole }: WikimediaSearchModalProps) {
+function WikimediaSearchModal({ open, onClose, initialQuery, storyId, slotIndex, slotRole, storyChips }: WikimediaSearchModalProps) {
   const utils = trpc.useUtils();
   const [query, setQuery] = useState(initialQuery);
   const [submittedQuery, setSubmittedQuery] = useState(initialQuery);
@@ -525,9 +526,11 @@ function WikimediaSearchModal({ open, onClose, initialQuery, storyId, slotIndex,
   const [allResults, setAllResults] = useState<any[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const CHIPS = slotRole === "aircraft"
+  // Use story-specific chips if available, otherwise fall back to generic defaults
+  const fallbackChips = slotRole === "aircraft"
     ? ["Boeing 737", "Airbus A320", "Boeing 777", "Airbus A380", "Boeing 787", "Airbus A350", "Boeing 757", "Airbus A220"]
     : ["Airport terminal", "Runway", "Air traffic control", "Aircraft cockpit", "Baggage claim"];
+  const CHIPS = (storyChips && storyChips.length > 0) ? storyChips : fallbackChips;
 
   useEffect(() => {
     if (open) {
@@ -750,14 +753,19 @@ interface PexelsSearchModalProps {
   storyId: number;
   slotIndex: number;
   slotRole: string;
+  storyChips?: string[];
 }
 
-function PexelsSearchModal({ open, onClose, initialQuery, storyId, slotIndex, slotRole }: PexelsSearchModalProps) {
+function PexelsSearchModal({ open, onClose, initialQuery, storyId, slotIndex, slotRole, storyChips }: PexelsSearchModalProps) {
   const utils = trpc.useUtils();
   const [query, setQuery] = useState(initialQuery);
   const [submittedQuery, setSubmittedQuery] = useState(initialQuery);
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // Story-specific chips — fall back to generic context chips
+  const fallbackChips = ["Airport terminal", "Runway", "Cockpit interior", "Emergency responders", "Passengers boarding"];
+  const CHIPS = (storyChips && storyChips.length > 0) ? storyChips : fallbackChips;
 
   useEffect(() => {
     if (open) { setQuery(initialQuery); setSubmittedQuery(initialQuery); setSelectedIdx(null); }
@@ -804,12 +812,30 @@ function PexelsSearchModal({ open, onClose, initialQuery, storyId, slotIndex, sl
         </div>
 
         {/* Search bar */}
-        <div className="px-4 py-3 border-b border-border/30 flex gap-2 shrink-0">
-          <Input ref={inputRef} value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={handleKeyDown}
-            placeholder="Search Pexels photos…" className="flex-1 h-9 text-sm" autoFocus />
-          <Button size="sm" className="h-9 px-4 gap-1.5 shrink-0" onClick={handleSearch} disabled={isFetching}>
-            {isFetching ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />} Search
-          </Button>
+        <div className="px-4 pt-3 pb-2 border-b border-border/30 shrink-0 flex flex-col gap-2">
+          <div className="flex gap-2">
+            <Input ref={inputRef} value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={handleKeyDown}
+              placeholder="Search Pexels photos…" className="flex-1 h-9 text-sm" autoFocus />
+            <Button size="sm" className="h-9 px-4 gap-1.5 shrink-0" onClick={handleSearch} disabled={isFetching}>
+              {isFetching ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />} Search
+            </Button>
+          </div>
+          {/* Quick-search chips — story-specific */}
+          <div className="flex flex-wrap gap-1.5 pb-1">
+            {CHIPS.map(chip => (
+              <button
+                key={chip}
+                onClick={() => { setQuery(chip); setSubmittedQuery(chip); }}
+                className={`text-[11px] px-2.5 py-1 rounded-full border transition-colors ${
+                  submittedQuery === chip
+                    ? "bg-green-500/20 border-green-500/60 text-green-300"
+                    : "bg-muted/30 border-border/50 text-muted-foreground hover:border-green-500/40 hover:text-green-400"
+                }`}
+              >
+                {chip}
+              </button>
+            ))}
+          </div>
         </div>
 
         {/* Grid area */}
@@ -884,9 +910,9 @@ function ApprovedCard({ story, pkg, onUnapprove, isUnapproving }: ApprovedCardPr
   const toggle = (key: string) => setExpanded(p => ({ ...p, [key]: !p[key] }));
 
   // Wikimedia browse modal state
-  const [wikiModal, setWikiModal] = useState<{ open: boolean; query: string; slotIndex: number; slotRole: string } | null>(null);
+  const [wikiModal, setWikiModal] = useState<{ open: boolean; query: string; slotIndex: number; slotRole: string; storyChips: string[] } | null>(null);
   // Pexels browse modal state
-  const [pexelModal, setPexelModal] = useState<{ open: boolean; query: string; slotIndex: number; slotRole: string } | null>(null);
+  const [pexelModal, setPexelModal] = useState<{ open: boolean; query: string; slotIndex: number; slotRole: string; storyChips: string[] } | null>(null);
   // Image picker panel: which slot is open, current search query
   const [pickerSlot, setPickerSlot] = useState<number | null>(null);
   const [pickerQuery, setPickerQuery] = useState("");
@@ -1437,14 +1463,49 @@ function ApprovedCard({ story, pkg, onUnapprove, isUnapproving }: ApprovedCardPr
                           {i === 0 ? (
                             <Button size="sm" variant="ghost"
                               className="h-6 text-[10px] gap-1 px-2 text-blue-400 hover:text-blue-300"
-                              onClick={() => setWikiModal({ open: true, query: browseQuery, slotIndex: i, slotRole: "aircraft" })}
+                              onClick={() => {
+                                // Build story-specific chips from research metadata
+                                const chips: string[] = [];
+                                if (pkg?.researchAircraftType) chips.push(pkg.researchAircraftType);
+                                if (pkg?.researchFlightNumber) chips.push(pkg.researchFlightNumber);
+                                // Extract airport names from route (e.g. "LHR → JFK" → add both)
+                                if (pkg?.researchRoute) {
+                                  const parts = pkg.researchRoute.split(/[→\-\/,]+/).map((s: string) => s.trim()).filter((s: string) => s.length > 1);
+                                  chips.push(...parts.slice(0, 2));
+                                }
+                                // Add key entities (airline name, airport name, etc.)
+                                if (pkg?.researchKeyEntities) {
+                                  const entities = (pkg.researchKeyEntities as string).split(/[,;]+/).map((s: string) => s.trim()).filter((s: string) => s.length > 2);
+                                  chips.push(...entities.slice(0, 3));
+                                }
+                                // Add alt queries from the image recommendation itself
+                                if (img.altQueries) chips.push(...(img.altQueries as string[]).slice(0, 2));
+                                // Deduplicate and cap at 8
+                                const uniqueChips = Array.from(new Set(chips)).slice(0, 8);
+                                setWikiModal({ open: true, query: browseQuery, slotIndex: i, slotRole: "aircraft", storyChips: uniqueChips });
+                              }}
                             >
                               <ExternalLink className="w-3 h-3" /> Browse Wikimedia
                             </Button>
                           ) : (
                             <Button size="sm" variant="ghost"
                               className="h-6 text-[10px] gap-1 px-2 text-green-400 hover:text-green-300"
-                              onClick={() => setPexelModal({ open: true, query: browseQuery, slotIndex: i, slotRole: "context" })}
+                              onClick={() => {
+                                // Build story-specific chips for context/atmosphere slot
+                                const chips: string[] = [];
+                                if (pkg?.researchAircraftType) chips.push(pkg.researchAircraftType);
+                                if (pkg?.researchRoute) {
+                                  const parts = pkg.researchRoute.split(/[→\-\/,]+/).map((s: string) => s.trim()).filter((s: string) => s.length > 1);
+                                  chips.push(...parts.slice(0, 2));
+                                }
+                                if (pkg?.researchKeyEntities) {
+                                  const entities = (pkg.researchKeyEntities as string).split(/[,;]+/).map((s: string) => s.trim()).filter((s: string) => s.length > 2);
+                                  chips.push(...entities.slice(0, 3));
+                                }
+                                if (img.altQueries) chips.push(...(img.altQueries as string[]).slice(0, 2));
+                                const uniqueChips = Array.from(new Set(chips)).slice(0, 8);
+                                setPexelModal({ open: true, query: browseQuery, slotIndex: i, slotRole: "context", storyChips: uniqueChips });
+                              }}
                             >
                               <Search className="w-3 h-3" /> Browse Pexels
                             </Button>
@@ -1591,6 +1652,7 @@ function ApprovedCard({ story, pkg, onUnapprove, isUnapproving }: ApprovedCardPr
           storyId={story.id}
           slotIndex={wikiModal.slotIndex}
           slotRole={wikiModal.slotRole}
+          storyChips={wikiModal.storyChips}
         />
       )}
       {/* Pexels image browser modal */}
@@ -1602,6 +1664,7 @@ function ApprovedCard({ story, pkg, onUnapprove, isUnapproving }: ApprovedCardPr
           storyId={story.id}
           slotIndex={pexelModal.slotIndex}
           slotRole={pexelModal.slotRole}
+          storyChips={pexelModal.storyChips}
         />
       )}
     </div>
