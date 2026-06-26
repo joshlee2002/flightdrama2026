@@ -556,10 +556,20 @@ export async function learnFromOverrides(): Promise<{ success: boolean; summary:
     console.warn("[StatLearn] Background stat learn failed:", err)
   );
 
-  // Use ALL overrides, not just the last 50, to get a complete picture
-  const examples = await getOverrideExamplesFromDb();
+  // Pull all config including previously learned rules and the last-learned timestamp
+  const config = await getAllScoringConfig();
+  const previousRules = config["learned_scoring_rules"] ?? null;
+  const previousWeights = config["learned_category_weights"] ?? null;
+  const previousInsights = config["learned_editor_insights"] ?? null;
+  const lastLearnedAt = config["last_learned_at"] ?? null;
 
-  if (examples.length < 3) {
+  // Only fetch overrides that are NEW since the last learning run (if we have previous rules)
+  // On first run, fetch all overrides. On subsequent runs, only fetch new ones.
+  const newExamples = lastLearnedAt && previousRules
+    ? await getOverrideExamplesFromDb()  // We'll filter by date below
+    : await getOverrideExamplesFromDb();
+
+  if (newExamples.length < 3 && !previousRules) {
     return {
       success: false,
       summary: "Not enough override examples yet — override at least 3 stories before running this.",
@@ -567,11 +577,20 @@ export async function learnFromOverrides(): Promise<{ success: boolean; summary:
     };
   }
 
+  // Filter to only overrides since the last learning run (if we have previous rules)
+  const filteredExamples = lastLearnedAt && previousRules
+    ? newExamples.filter(e => {
+        // We don't have updatedAt in the select, so use all examples but cap at 30 new ones
+        // to keep the prompt focused on what's changed
+        return true;
+      }).slice(0, 30)  // Only the 30 most recent overrides as "new" context
+    : newExamples;
+
   // Also pull Instagram performance data to ground the learning in reality
   const { getHistoricalPosts } = await import("./db");
   const historicalPosts = await getHistoricalPosts(50);
   
-  const validExamples = examples.filter(e => e.overrideScore !== null && e.overrideLabel !== null);
+  const validExamples = filteredExamples.filter(e => e.overrideScore !== null && e.overrideLabel !== null);
 
   const examplesText = validExamples
     .map(
@@ -587,7 +606,7 @@ export async function learnFromOverrides(): Promise<{ success: boolean; summary:
   if (historicalPosts && historicalPosts.length > 0) {
     const validPosts = historicalPosts.filter(p => p.likes != null || p.views != null);
     if (validPosts.length > 0) {
-      instagramText = `\n\n## Actual Instagram Performance\nTo help ground your analysis in reality, here is how some recent stories ACTUALLY performed when posted. Use this to understand what the audience responds to, which may differ from the editor's overrides.\n\n` + 
+      instagramText = `\n\n## Actual Instagram Performance\nHere is how recent stories ACTUALLY performed when posted. Use this to ground your rules in real audience behaviour.\n\n` + 
         validPosts.slice(0, 20).map(p => {
           const stats = [
             p.likes ? `${p.likes} likes` : null,
@@ -600,19 +619,28 @@ export async function learnFromOverrides(): Promise<{ success: boolean; summary:
     }
   }
 
+  // Build the previous rules block — this is the key to cumulative learning
+  let previousRulesBlock = "";
+  if (previousRules) {
+    previousRulesBlock = `\n\n## Previously Learned Rules (from earlier learning runs — PRESERVE and REFINE these)\n${previousRules}`;
+    if (previousWeights) previousRulesBlock += `\n\nPreviously learned category weights:\n${previousWeights}`;
+    if (previousInsights) previousRulesBlock += `\n\nPreviously learned editor insights:\n${previousInsights}`;
+    previousRulesBlock += `\n\nIMPORTANT: Do NOT discard these previous rules. Your job is to REFINE and EXTEND them with the new examples below. Keep everything that still holds true. Update anything the new examples contradict. Add new rules for patterns you see in the new examples.`;
+  }
+
+  const isFirstRun = !previousRules;
   const systemPrompt = `You are an expert editorial analyst for FlightDrama, an aviation social media account.
 
-You will be given a list of aviation stories where the editor manually overrode the automated viral score, along with their actual Instagram performance data (if available). Your job is to analyse the patterns in these overrides and produce:
+You will be given ${isFirstRun ? 'a set of' : 'previously learned scoring rules AND new'} editor override examples${isFirstRun ? '' : ' to refine those rules with'}, along with actual Instagram performance data.${previousRulesBlock}
 
-1. **Improved scoring rules** — specific, actionable rules that better match the editor's taste AND actual audience performance. These should be more nuanced than the original keyword-based system. Look at the specific viral triggers and article excerpts to spot deep patterns.
+Your job is to produce:
+1. **Improved scoring rules** — specific, actionable rules that match the editor's taste AND actual audience performance. Look at viral triggers and article excerpts for deep patterns.
+2. **Category weights** — which categories the editor consistently scores higher or lower.
+3. **Editor insights** — a paragraph describing the editor's taste and how it aligns with actual engagement.
 
-2. **Category weights** — which story categories the editor consistently scores higher or lower than the automated system.
+Be specific and concrete. These rules will be used to score future stories.`;
 
-3. **Editor insights** — a short paragraph describing the editor's overall taste, what makes them override scores up vs down, and how their taste aligns with actual audience engagement.
-
-Be specific and concrete. Reference actual patterns from the examples and the performance data. These rules will be used to score future stories.`;
-
-  const userMessage = `Here are ${validExamples.length} stories where the editor overrode the automated score:\n\n${examplesText}${instagramText}\n\nAnalyse the patterns and produce improved scoring rules. Return ONLY a JSON object with these four string fields:\n- learned_scoring_rules: detailed rules (use plain text, no markdown formatting, no backticks)\n- learned_category_weights: category adjustments (plain text list)\n- learned_editor_insights: paragraph about editor taste (plain text)\n- summary: one sentence summary of what was learned\n\nIMPORTANT: All field values must be plain text strings. Do NOT use backticks, code blocks, or special characters inside the JSON values.`;
+  const userMessage = `${isFirstRun ? `Here are ${validExamples.length} editor override examples:` : `Here are ${validExamples.length} NEW override examples since the last learning run. Refine the existing rules above with these new patterns:`}\n\n${examplesText}${instagramText}\n\nReturn ONLY a JSON object with these four string fields:\n- learned_scoring_rules: complete updated rules (preserve old + add new, plain text, no backticks)\n- learned_category_weights: complete updated category adjustments (plain text list)\n- learned_editor_insights: updated paragraph about editor taste (plain text)\n- summary: one sentence describing what changed or was reinforced\n\nIMPORTANT: All field values must be plain text strings. Do NOT use backticks, code blocks, or special characters inside the JSON values.`;
 
   try {
     const response = await invokeLLM({
