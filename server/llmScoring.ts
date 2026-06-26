@@ -556,7 +556,8 @@ export async function learnFromOverrides(): Promise<{ success: boolean; summary:
     console.warn("[StatLearn] Background stat learn failed:", err)
   );
 
-  const examples = await getOverrideExamplesFromDb(50);
+  // Use ALL overrides, not just the last 50, to get a complete picture
+  const examples = await getOverrideExamplesFromDb();
 
   if (examples.length < 3) {
     return {
@@ -566,28 +567,52 @@ export async function learnFromOverrides(): Promise<{ success: boolean; summary:
     };
   }
 
+  // Also pull Instagram performance data to ground the learning in reality
+  const { getHistoricalPosts } = await import("./db");
+  const historicalPosts = await getHistoricalPosts(50);
+  
   const validExamples = examples.filter(e => e.overrideScore !== null && e.overrideLabel !== null);
 
   const examplesText = validExamples
     .map(
-      (e, i) =>
-        `${i + 1}. Title: "${e.title}"\n   Rule-based score: ${e.viralScore} | Editor score: ${e.overrideScore} (${e.overrideLabel})\n   Category: ${e.category ?? "unknown"}\n   Rule reason: ${e.viralReason ?? "none"}`
+      (e, i) => {
+        const triggers = e.viralTriggers && e.viralTriggers.length > 0 ? `\n   Detected triggers: ${e.viralTriggers.join(", ")}` : "";
+        const contentSnippet = e.content ? `\n   Article excerpt: "${e.content.slice(0, 150).replace(/\n/g, ' ')}..."` : "";
+        return `${i + 1}. Title: "${e.title}"${contentSnippet}\n   AI Score: ${e.viralScore} | Editor Score: ${e.overrideScore} (${e.overrideLabel})\n   Category: ${e.category ?? "unknown"}\n   AI Reason: ${e.viralReason ?? "none"}${triggers}`;
+      }
     )
     .join("\n\n");
+    
+  let instagramText = "";
+  if (historicalPosts && historicalPosts.length > 0) {
+    const validPosts = historicalPosts.filter(p => p.likes != null || p.views != null);
+    if (validPosts.length > 0) {
+      instagramText = `\n\n## Actual Instagram Performance\nTo help ground your analysis in reality, here is how some recent stories ACTUALLY performed when posted. Use this to understand what the audience responds to, which may differ from the editor's overrides.\n\n` + 
+        validPosts.slice(0, 20).map(p => {
+          const stats = [
+            p.likes ? `${p.likes} likes` : null,
+            p.views ? `${p.views} views` : null,
+            p.saves ? `${p.saves} saves` : null,
+            p.comments ? `${p.comments} comments` : null
+          ].filter(Boolean).join(", ");
+          return `- "${p.headline}" (${p.category}): ${stats}`;
+        }).join("\n");
+    }
+  }
 
   const systemPrompt = `You are an expert editorial analyst for FlightDrama, an aviation social media account.
 
-You will be given a list of aviation stories where the editor manually overrode the automated viral score. Your job is to analyse the patterns in these overrides and produce:
+You will be given a list of aviation stories where the editor manually overrode the automated viral score, along with their actual Instagram performance data (if available). Your job is to analyse the patterns in these overrides and produce:
 
-1. **Improved scoring rules** — specific, actionable rules that better match the editor's taste. These should be more nuanced than the original keyword-based system. Include what types of stories score higher or lower than the rule-based system expected.
+1. **Improved scoring rules** — specific, actionable rules that better match the editor's taste AND actual audience performance. These should be more nuanced than the original keyword-based system. Look at the specific viral triggers and article excerpts to spot deep patterns.
 
 2. **Category weights** — which story categories the editor consistently scores higher or lower than the automated system.
 
-3. **Editor insights** — a short paragraph describing the editor's overall taste and what makes them override scores up vs down.
+3. **Editor insights** — a short paragraph describing the editor's overall taste, what makes them override scores up vs down, and how their taste aligns with actual audience engagement.
 
-Be specific and concrete. Reference actual patterns from the examples. These rules will be used to score future stories.`;
+Be specific and concrete. Reference actual patterns from the examples and the performance data. These rules will be used to score future stories.`;
 
-  const userMessage = `Here are ${validExamples.length} stories where the editor overrode the automated score:\n\n${examplesText}\n\nAnalyse the patterns and produce improved scoring rules. Return ONLY a JSON object with these four string fields:\n- learned_scoring_rules: detailed rules (use plain text, no markdown formatting, no backticks)\n- learned_category_weights: category adjustments (plain text list)\n- learned_editor_insights: paragraph about editor taste (plain text)\n- summary: one sentence summary of what was learned\n\nIMPORTANT: All field values must be plain text strings. Do NOT use backticks, code blocks, or special characters inside the JSON values.`;
+  const userMessage = `Here are ${validExamples.length} stories where the editor overrode the automated score:\n\n${examplesText}${instagramText}\n\nAnalyse the patterns and produce improved scoring rules. Return ONLY a JSON object with these four string fields:\n- learned_scoring_rules: detailed rules (use plain text, no markdown formatting, no backticks)\n- learned_category_weights: category adjustments (plain text list)\n- learned_editor_insights: paragraph about editor taste (plain text)\n- summary: one sentence summary of what was learned\n\nIMPORTANT: All field values must be plain text strings. Do NOT use backticks, code blocks, or special characters inside the JSON values.`;
 
   try {
     const response = await invokeLLM({

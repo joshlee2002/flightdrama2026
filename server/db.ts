@@ -536,22 +536,30 @@ export async function getAllScoringConfig(): Promise<Record<string, string>> {
 }
 
 // Fetch stories where the editor applied a manual override — used as few-shot examples
-export async function getOverrideExamplesFromDb(limit = 30) {
+export async function getOverrideExamplesFromDb(limit?: number) {
   const db = await getDb();
   if (!db) return [];
-  return db
+  
+  let query = db
     .select({
+      id: stories.id,
       title: stories.title,
+      content: stories.content,
       overrideScore: stories.overrideScore,
       overrideLabel: stories.overrideLabel,
       viralScore: stories.viralScore,
       category: stories.category,
       viralReason: stories.viralReason,
+      viralTriggers: stories.viralTriggers,
     })
     .from(stories)
     .where(and(sql`${stories.overrideScore} IS NOT NULL`, sql`${stories.overrideLabel} IS NOT NULL`))
-    .orderBy(desc(stories.updatedAt))
-    .limit(limit);
+    .orderBy(desc(stories.updatedAt));
+    
+  if (limit) {
+    return query.limit(limit);
+  }
+  return query;
 }
 
 // Returns the most recent lastFetchedAt across all RSS sources — used as the "last ingested" timestamp in the sidebar
