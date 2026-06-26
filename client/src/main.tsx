@@ -43,9 +43,15 @@ const trpcClient = trpc.createClient({
       url: "/api/trpc",
       transformer: superjson,
       fetch(input, init) {
+        const extraHeaders: Record<string, string> = {};
+        try {
+          const token = localStorage.getItem("app_session_id");
+          if (token) extraHeaders["Authorization"] = `Bearer ${token}`;
+        } catch {}
         return globalThis.fetch(input, {
           ...(init ?? {}),
           credentials: "include",
+          headers: { ...(init?.headers as Record<string, string> ?? {}), ...extraHeaders },
         });
       },
     }),
