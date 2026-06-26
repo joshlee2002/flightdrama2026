@@ -45,7 +45,7 @@ import { stories } from "../drizzle/schema";
 import { fetchArticleContent, fetchRssFeed, isSimilarTitle, isAviationRelevant, DEFAULT_RSS_SOURCES } from "./ingestion";
 import { scoreStory } from "./viralScoring";
 import { scoreStoryWithLLM, learnFromOverrides, learnFromOverridesStatistical } from "./llmScoring";
-import { runFullSoyunciPipeline, rewriteArticleOnly, runResearchAndWrite } from "./soyunci";
+import { runFullSoyunciPipeline, rewriteArticleOnly, runResearchAndWrite, extractResearchPackage } from "./soyunci";
 import { analysePerformance, getPerformanceInsights, analysePerformanceStatistical, getStatPerformanceInsights, analyseArticleStyle, getArticleStyleInsights } from "./performanceAnalysis";
 import { syncInstagramPosts, verifyInstagramToken } from "./instagramSync";
 import { generateWeeklyDigest, getRecentDigests } from "./weeklyDigest";
@@ -169,84 +169,63 @@ export const appRouter = router({
         const snapshotSelected: string | null = existingPkg?.selectedHeadline ?? null;
         // Mark as processing immediately so the UI shows the spinner
         await updateStoryPackage(input.id, { processingStatus: "processing", processingError: null });
-        // Fire-and-forget: run full Soyunci pipeline in background after approval
+        // Fire-and-forget: run research package extraction in background after approval
         setImmediate(async () => {
           try {
             const story = await getStoryById(input.id);
             if (!story) return;
-            const pkg = await runFullSoyunciPipeline(
-              story.title,
-              story.content ?? "",
-              story.sourceUrl ?? "",
-              story.viralReason ?? "",
-              story.category ?? "Aviation"
-            );
+            // New direction: extract research package + images (no article writing)
+            const [rp, imagesResult] = await Promise.all([
+              extractResearchPackage(
+                story.title,
+                story.content ?? "",
+                story.sourceUrl ?? "",
+                story.viralReason ?? "",
+                story.category ?? "Aviation"
+              ),
+              (async () => {
+                const { researchImages } = await import("./soyunci");
+                return researchImages(story.title, "", story.viralReason ?? "");
+              })(),
+            ]);
+            const { recs: imageRecommendations, candidates: imageCandidates } = imagesResult;
             await updateStoryPackage(input.id, {
-              soyunciArticle: pkg.article,
-              hashtags: pkg.hashtags,
-              selectedHeadline: pkg.selectedHeadline,
-              allHeadlines: pkg.alternativeHeadlines,
-              topThreeHeadlines: pkg.alternativeHeadlines.slice(0, 3),
-              imageRecommendations: pkg.imageRecommendations,
-              imageCandidates: pkg.imageCandidates,
-              canvaHeadline: pkg.canvaBrief.headline,
-              canvaAspectRatio: pkg.canvaBrief.aspectRatio,
-              canvaVisualIdea: pkg.canvaBrief.visualIdea,
-              canvaAircraftToShow: pkg.canvaBrief.aircraftToShow,
-              canvaMood: pkg.canvaBrief.mood,
-              canvaBackground: pkg.canvaBrief.background,
-              canvaHierarchy: pkg.canvaBrief.hierarchy,
-              canvaCircleInsert: pkg.canvaBrief.circleInsert,
               processingStatus: "complete",
-              viralAngle: pkg.viralAngle,
-              extractedFacts: JSON.stringify(pkg.extractedFacts),
-              alternativeHeadlines: JSON.stringify(pkg.alternativeHeadlines),
-              researchContext: pkg.researchContext.slice(0, 12000),
-              sourcesResearched: pkg.sourcesResearched ?? 0,
-              sourceConfirmation: pkg.sourceConfirmation ?? null,
-              headlineObjects: pkg.headlineObjects ?? [],
-              selectedViralityScore: pkg.selectedViralityScore ?? null,
-              selectedHeadlineType: pkg.selectedHeadlineType ?? null,
+              viralAngle: rp.viralAngle,
+              extractedFacts: JSON.stringify(rp.extractedInfo),
+              sourcesResearched: rp.sourcesResearched,
+              sourceConfirmation: rp.sourceConfirmation,
+              // Research package fields
+              storySummary: rp.storySummary,
+              researchExtracted: rp.extractedInfo,
+              researchTimeline: rp.timeline,
+              researchQuotes: rp.quotes,
+              researchSources: rp.sources,
+              researchContradictions: rp.contradictions,
+              researchMissingInfo: rp.missingInfo,
+              // Images
+              imageRecommendations,
+              imageCandidates,
             });
 
             // Auto-log to historical_posts so performance data feeds the model.
-            // Use the SNAPSHOT headlines (what the editor saw before pipeline re-ran),
-            // not the freshly generated ones, so the chosen variant is accurate.
             try {
-              const variant = input.usedHeadlineVariant ?? "selected";
-              const usedHeadline =
-                variant === "selected"
-                  ? (snapshotSelected ?? pkg.selectedHeadline)
-                  : variant.startsWith("alt_")
-                    ? snapshotHeadlines[parseInt(variant.replace("alt_", ""), 10) - 1]
-                      ?? snapshotSelected
-                      ?? pkg.selectedHeadline
-                    : snapshotSelected ?? pkg.selectedHeadline;
-              // Find the virality score and type for the chosen headline variant
-              const chosenHeadlineObj = variant === "selected"
-                ? { viralityScore: pkg.selectedViralityScore, type: pkg.selectedHeadlineType }
-                : (pkg.headlineObjects ?? []).find((_: any, i: number) => `alt_${i + 1}` === variant) ?? {};
               await createHistoricalPost({
-                headline: usedHeadline ?? story.title,
-                article: pkg.article ?? null,
-                articleSnippet: pkg.article ? pkg.article.slice(0, 300) : null,
+                headline: story.title,
                 category: story.category ?? null,
-                viralAngle: pkg.viralAngle ?? null,
-                selectedHeadline: pkg.selectedHeadline ?? null,
-                usedHeadlineVariant: variant,
+                viralAngle: rp.viralAngle ?? null,
                 storyId: input.id,
                 sourceType: "approved_story",
-                headlineType: (chosenHeadlineObj as any).type ?? null,
-                headlineViralityScore: (chosenHeadlineObj as any).viralityScore ?? null,
+                usedHeadlineVariant: input.usedHeadlineVariant ?? "selected",
               });
-              console.log(`[Soyunci] Auto-logged historical post for story ${input.id}`);
+              console.log(`[Research] Auto-logged historical post for story ${input.id}`);
             } catch (logErr) {
-              console.warn(`[Soyunci] Failed to log historical post for story ${input.id}:`, logErr);
+              console.warn(`[Research] Failed to log historical post for story ${input.id}:`, logErr);
             }
 
-            console.log(`[Soyunci] Auto-run complete for story ${input.id}`);
+            console.log(`[Research] Package extraction complete for story ${input.id}`);
           } catch (err) {
-            console.error(`[Soyunci] Auto-run failed for story ${input.id}:`, err);
+            console.error(`[Research] Extraction failed for story ${input.id}:`, err);
           }
         });
         return { success: true };
@@ -748,38 +727,36 @@ export const appRouter = router({
         await updateStoryPackage(input.storyId, { processingStatus: "processing", processingError: null });
 
         try {
-                    const pkg = await runFullSoyunciPipeline(
+          // New direction: extract research package (no article writing)
+          const rp = await extractResearchPackage(
             story.title,
             story.content || "",
             story.sourceUrl || "",
             story.viralReason || "",
             story.category || "General Aviation"
           );
+          // Also run image search in parallel for the Approved Queue
+          const { researchImages } = await import("./soyunci");
+          const { recs: imageRecommendations, candidates: imageCandidates } = await researchImages(
+            story.title, "", rp.viralAngle
+          );
           await updateStoryPackage(input.storyId, {
-            soyunciArticle: pkg.article,
-            hashtags: pkg.hashtags,
-            imageRecommendations: pkg.imageRecommendations,
-            imageCandidates: pkg.imageCandidates,
-            allHeadlines: pkg.alternativeHeadlines,
-            topThreeHeadlines: pkg.alternativeHeadlines.slice(0, 3),
-            selectedHeadline: pkg.selectedHeadline,
-            canvaHeadline: pkg.canvaBrief.headline,
-            canvaAspectRatio: pkg.canvaBrief.aspectRatio,
-            canvaVisualIdea: pkg.canvaBrief.visualIdea,
-            canvaAircraftToShow: pkg.canvaBrief.aircraftToShow,
-            canvaMood: pkg.canvaBrief.mood,
-            canvaBackground: pkg.canvaBrief.background,
-            canvaHierarchy: pkg.canvaBrief.hierarchy,
-            canvaCircleInsert: pkg.canvaBrief.circleInsert,
             processingStatus: "complete",
-            viralAngle: pkg.viralAngle,
-            extractedFacts: JSON.stringify(pkg.extractedFacts),
-            alternativeHeadlines: JSON.stringify(pkg.alternativeHeadlines),
-            researchContext: pkg.researchContext.slice(0, 12000),
-            sourcesResearched: pkg.sourcesResearched ?? 0,
-            sourceConfirmation: pkg.sourceConfirmation ?? null,
-            editorReview: pkg.editorReview ?? null,
-            editorScore: pkg.editorReview?.soyunciScore ?? null,
+            viralAngle: rp.viralAngle,
+            extractedFacts: JSON.stringify(rp.extractedInfo),
+            sourcesResearched: rp.sourcesResearched,
+            sourceConfirmation: rp.sourceConfirmation,
+            // Research package fields
+            storySummary: rp.storySummary,
+            researchExtracted: rp.extractedInfo,
+            researchTimeline: rp.timeline,
+            researchQuotes: rp.quotes,
+            researchSources: rp.sources,
+            researchContradictions: rp.contradictions,
+            researchMissingInfo: rp.missingInfo,
+            // Images (still useful for Canva/posting)
+            imageRecommendations,
+            imageCandidates,
           });
 
           return { success: true };
@@ -794,10 +771,8 @@ export const appRouter = router({
       }),
 
     /**
-     * Re-research and rewrite only — runs the Soyunci research, fact extraction,
-     * angle detection, article writing, and headline generation steps but does NOT
-     * regenerate images. Scoped strictly to research + write so the editor's chosen
-     * images are preserved.
+     * Re-research — re-runs the research package extraction for a story.
+     * Preserves existing images (does not regenerate them).
      */
     reResearch: protectedProcedure
       .input(z.object({ storyId: z.number() }))
@@ -808,7 +783,7 @@ export const appRouter = router({
         await updateStoryPackage(input.storyId, { processingStatus: "processing", processingError: null });
 
         try {
-          const result = await runResearchAndWrite(
+          const rp = await extractResearchPackage(
             story.title,
             story.content ?? "",
             story.sourceUrl ?? "",
@@ -816,22 +791,21 @@ export const appRouter = router({
             story.category ?? "General Aviation"
           );
           await updateStoryPackage(input.storyId, {
-            soyunciArticle: result.article,
-            hashtags: result.hashtags,
-            selectedHeadline: result.selectedHeadline,
-            allHeadlines: result.alternativeHeadlines,
-            topThreeHeadlines: result.alternativeHeadlines.slice(0, 3),
             processingStatus: "complete",
-            viralAngle: result.viralAngle,
-            extractedFacts: JSON.stringify(result.extractedFacts),
-            alternativeHeadlines: JSON.stringify(result.alternativeHeadlines),
-            researchContext: result.researchContext.slice(0, 12000),
-            sourcesResearched: result.sourcesResearched,
-            sourceConfirmation: result.sourceConfirmation ?? null,
-            editorReview: result.editorReview ?? null,
-            editorScore: result.editorReview?.soyunciScore ?? null,
+            viralAngle: rp.viralAngle,
+            extractedFacts: JSON.stringify(rp.extractedInfo),
+            sourcesResearched: rp.sourcesResearched,
+            sourceConfirmation: rp.sourceConfirmation,
+            // Research package fields
+            storySummary: rp.storySummary,
+            researchExtracted: rp.extractedInfo,
+            researchTimeline: rp.timeline,
+            researchQuotes: rp.quotes,
+            researchSources: rp.sources,
+            researchContradictions: rp.contradictions,
+            researchMissingInfo: rp.missingInfo,
           });
-          return { success: true, sourcesResearched: result.sourcesResearched };
+          return { success: true, sourcesResearched: rp.sourcesResearched };
         } catch (err) {
           const errorMsg = err instanceof Error ? err.message : "Unknown error";
           await updateStoryPackage(input.storyId, {
@@ -1069,6 +1043,12 @@ export const appRouter = router({
           storyId: z.number().optional(),
           articleSnippet: z.string().optional(),
           usedHeadlineVariant: z.string().max(32).optional(),
+          // New social performance fields
+          saves: z.number().optional(),
+          followersGained: z.number().optional(),
+          platform: z.string().max(64).optional(),
+          airline: z.string().max(128).optional(),
+          imageType: z.string().max(128).optional(),
         })
       )
       .mutation(async ({ input }) => {

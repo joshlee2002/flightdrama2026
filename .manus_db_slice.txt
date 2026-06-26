@@ -1,0 +1,270 @@
+export async function toggleRssSource(id: number, isActive: boolean) {
+  const db = await getDb();
+  if (!db) return;
+  await db.update(rssSources).set({ isActive }).where(eq(rssSources.id, id));
+}
+
+export async function updateRssSourceLastFetched(id: number) {
+  const db = await getDb();
+  if (!db) return;
+  await db.update(rssSources).set({ lastFetchedAt: new Date() }).where(eq(rssSources.id, id));
+}
+
+export async function countRssSources(): Promise<number> {
+  const db = await getDb();
+  if (!db) return DEFAULT_RSS_SOURCES.length;
+  const result = await db.select({ count: sql<number>`count(*)` }).from(rssSources);
+  return result[0]?.count || 0;
+}
+
+// ── Stories ────────────────────────────────────────────────────────────────
+
+export async function createStory(story: InsertStory): Promise<number> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const result = await db.insert(stories).values(story);
+  // MySQL2 returns ResultSetHeader as result[0] with insertId
+  const header = result[0] as any;
+  return header.insertId as number;
+}
+
+export async function getStories(filters?: {
+  statusLabel?: string;
+  approvalStatus?: string;
+  minScore?: number;
+  maxScore?: number;
+  limit?: number;
+  offset?: number;
+}) {
+  const db = await getDb();
+  if (!db) return [];
+
+  const conditions = [];
+  if (filters?.statusLabel) {
+    conditions.push(eq(stories.statusLabel, filters.statusLabel as any));
+  }
+  if (filters?.approvalStatus) {
+    conditions.push(eq(stories.approvalStatus, filters.approvalStatus as any));
+  }
+  if (filters?.minScore !== undefined) {
+    conditions.push(gte(stories.viralScore, filters.minScore));
+  }
+  if (filters?.maxScore !== undefined) {
+    conditions.push(lte(stories.viralScore, filters.maxScore));
+  }
+
+  const query = db
+    .select()
+    .from(stories)
+    .where(conditions.length > 0 ? and(...conditions) : undefined)
+    .orderBy(desc(stories.viralScore), desc(stories.createdAt))
+    .limit(filters?.limit || 50)
+    .offset(filters?.offset || 0);
+
+  return query;
+}
+
+export async function getStoriesWithPackages(filters?: {
+  statusLabel?: string;
+  approvalStatus?: string;
+  minScore?: number;
+  limit?: number;
+  completedOnly?: boolean;
+  sortBy?: "newest" | "top_scored";
+}) {
+  const db = await getDb();
+  if (!db) return [];
+
+  const conditions = [];
+  if (filters?.statusLabel) {
+    conditions.push(eq(stories.statusLabel, filters.statusLabel as any));
+  }
+  if (filters?.approvalStatus) {
+    conditions.push(eq(stories.approvalStatus, filters.approvalStatus as any));
+  } else {
+    // Default: exclude rejected and dismissed stories from the dashboard
+    conditions.push(ne(stories.approvalStatus, "rejected" as any));
+    conditions.push(ne(stories.approvalStatus, "dismissed" as any));
+  }
+  if (filters?.minScore !== undefined) {
+    conditions.push(gte(stories.viralScore, filters.minScore));
+  }
+
+  // Sort order: newest = publishedAt desc (fallback to createdAt), top_scored = score desc then date
+  const sortBy = filters?.sortBy ?? "top_scored";
+  const orderClauses =
+    sortBy === "newest"
+      ? [
+          desc(sql`COALESCE(${stories.publishedAt}, ${stories.createdAt})`),
+          desc(sql`COALESCE(${stories.overrideScore}, ${stories.viralScore})`),
+        ]
+      : [
+          desc(sql`COALESCE(${stories.overrideScore}, ${stories.viralScore})`),
+          desc(sql`COALESCE(${stories.publishedAt}, ${stories.createdAt})`),
+        ];
+
+  const storyRows = await db
+    .select()
+    .from(stories)
+    .where(conditions.length > 0 ? and(...conditions) : undefined)
+    .orderBy(...orderClauses)
+    .limit(filters?.limit || 100);
+
+  if (storyRows.length === 0) return [];
+
+  const storyIds = storyRows.map((s) => s.id);
+  const packages = await db
+    .select()
+    .from(storyPackages)
+    .where(
+      storyIds.length === 1
+        ? eq(storyPackages.storyId, storyIds[0])
+        : sql`${storyPackages.storyId} IN (${sql.join(storyIds.map((id) => sql`${id}`), sql`, `)})`
+    );
+
+  const packageMap = new Map(packages.map((p) => [p.storyId, p]));
+
+  const results = storyRows.map((story) => ({
+    story,
+    package: packageMap.get(story.id) || null,
+  }));
+
+  // If completedOnly, only return stories whose package is complete
+  if (filters?.completedOnly) {
+    return results.filter((r) => r.package?.processingStatus === "complete");
+  }
+
+  return results;
+}
+
+export async function getStoryById(id: number) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db.select().from(stories).where(eq(stories.id, id)).limit(1);
+  return result[0];
+}
+
+export async function updateStoryApproval(
+  id: number,
+  status: "approved" | "rejected" | "edited" | "pending" | "dismissed"
+) {
+  const db = await getDb();
+  if (!db) return;
+  await db.update(stories).set({ approvalStatus: status, updatedAt: new Date() }).where(eq(stories.id, id));
+}
+
+export async function updateStoryScores(
+  id: number,
+  viralScore: number,
+  statusLabel: string,
+  viralReason: string,
+  category: string,
+  scoringMethod: "rule_based" | "llm_assisted" = "rule_based"
+) {
+  const db = await getDb();
+  if (!db) return;
+  await db
+    .update(stories)
+    .set({
+      viralScore,
+      statusLabel: statusLabel as any,
+      viralReason,
+      category,
+      scoringMethod,
+      updatedAt: new Date(),
+    })
+    .where(eq(stories.id, id));
+}
+
+export async function updateStoryOverride(
+  id: number,
+  overrideScore: number | null,
+  overrideLabel: string | null
+) {
+  const db = await getDb();
+  if (!db) return;
+  await db
+    .update(stories)
+    .set({
+      overrideScore: overrideScore ?? null,
+      overrideLabel: overrideLabel as any ?? null,
+      updatedAt: new Date(),
+    })
+    .where(eq(stories.id, id));
+}
+
+export async function updateStoryTriggers(id: number, triggers: string[]) {
+  const db = await getDb();
+  if (!db) return;
+  await db
+    .update(stories)
+    .set({ viralTriggers: triggers, updatedAt: new Date() })
+    .where(eq(stories.id, id));
+}
+
+export async function getRecentStoryTitles(limit = 5000): Promise<string[]> {
+  const db = await getDb();
+  if (!db) return [];
+  // Pull all-time titles (up to 5000) so similarity dedup covers the full history,
+  // not just recent stories. This ensures a story never resurfaces after being seen.
+  const result = await db
+    .select({ title: stories.title })
+    .from(stories)
+    .orderBy(desc(stories.createdAt))
+    .limit(limit);
+  return result.map((r) => r.title);
+}
+
+export async function storyUrlExists(url: string): Promise<boolean> {
+  const db = await getDb();
+  if (!db) return false;
+  const result = await db
+    .select({ id: stories.id })
+    .from(stories)
+    .where(eq(stories.sourceUrl, url))
+    .limit(1);
+  return result.length > 0;
+}
+
+// ── Story Packages ─────────────────────────────────────────────────────────
+
+export async function createStoryPackage(pkg: InsertStoryPackage) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  await db.insert(storyPackages).values(pkg).onDuplicateKeyUpdate({
+    set: {
+      processingStatus: pkg.processingStatus,
+      processingError: pkg.processingError,
+      updatedAt: new Date(),
+    },
+  });
+}
+
+export async function updateStoryPackage(
+  storyId: number,
+  data: Partial<InsertStoryPackage>
+) {
+  const db = await getDb();
+  if (!db) return;
+  await db
+    .update(storyPackages)
+    .set({ ...data, updatedAt: new Date() })
+    .where(eq(storyPackages.storyId, storyId));
+}
+
+export async function getPackageByStoryId(storyId: number) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db
+    .select()
+    .from(storyPackages)
+    .where(eq(storyPackages.storyId, storyId))
+    .limit(1);
+  return result[0];
+}
+
+export async function updatePackageArticle(storyId: number, article: string) {
+  const db = await getDb();
+  if (!db) return;
+  await db
+    .update(storyPackages)

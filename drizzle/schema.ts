@@ -155,6 +155,21 @@ export const storyPackages = mysqlTable("story_packages", {
   }>(),
   /** Editor score (1-10) for quick filtering */
   editorScore: int("editorScore"),
+  // ── Research Package fields (new direction: extract everything, let ChatGPT write) ──
+  /** 1-2 sentence summary of what happened */
+  storySummary: text("storySummary"),
+  /** Exhaustive extracted information (JSON array of strings) */
+  researchExtracted: json("researchExtracted").$type<string[]>(),
+  /** Chronological timeline of events */
+  researchTimeline: text("researchTimeline"),
+  /** Quotes grouped by source (JSON: { passengers, airline, officials, ... }) */
+  researchQuotes: json("researchQuotes").$type<Record<string, string[]>>(),
+  /** Sources used (JSON array: { name, url, type }) */
+  researchSources: json("researchSources").$type<Array<{ name: string; url?: string; type: string }>>(),
+  /** Contradictions between sources */
+  researchContradictions: text("researchContradictions"),
+  /** Information that remains unknown or unconfirmed */
+  researchMissingInfo: text("researchMissingInfo"),
 });
 
 export type StoryPackage = typeof storyPackages.$inferSelect;
@@ -187,6 +202,17 @@ export const historicalPosts = mysqlTable("historical_posts", {
   headlineType: varchar("headlineType", { length: 64 }),
   /** Virality score assigned by the LLM at generation time (1-10) */
   headlineViralityScore: int("headlineViralityScore"),
+  // ── New social performance fields ──
+  /** Number of saves / bookmarks */
+  saves: int("saves"),
+  /** Net followers gained from this post */
+  followersGained: int("followersGained"),
+  /** Platform posted on (e.g. Instagram, TikTok, YouTube) */
+  platform: varchar("platform", { length: 64 }),
+  /** Airline featured in the story */
+  airline: varchar("airline", { length: 128 }),
+  /** Type of image used (e.g. aircraft, airport, cockpit, text-only) */
+  imageType: varchar("imageType", { length: 128 }),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 });
 

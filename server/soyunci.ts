@@ -2112,3 +2112,171 @@ export async function rewriteArticleOnly(
   const combinedExamples = [voiceExamples, feedbackExamples].filter(Boolean).join("\n\n");
   return writeSoyunciArticle(title, content, researchContext, viralAngle, extractedFacts, combinedExamples);
 }
+
+// ── Research Package Pipeline ─────────────────────────────────────────────────
+/**
+ * Research Package — the new primary output of the Soyunci pipeline.
+ *
+ * Philosophy: extract everything, organise everything, let ChatGPT decide.
+ * This function runs deepResearch + a dedicated extraction LLM call that
+ * produces a structured research package with NO article writing.
+ *
+ * Output fields:
+ *   storySummary       — 1-2 sentence summary of what happened
+ *   extractedInfo      — exhaustive list of every meaningful fact
+ *   timeline           — chronological sequence of events
+ *   quotes             — verbatim quotes grouped by source type
+ *   sources            — all sources used (name, url, type)
+ *   contradictions     — disagreements between sources
+ *   missingInfo        — what remains unknown or unconfirmed
+ */
+export interface ResearchPackage {
+  storySummary: string;
+  extractedInfo: string[];
+  timeline: string;
+  quotes: Record<string, string[]>;
+  sources: Array<{ name: string; url?: string; type: string }>;
+  contradictions: string;
+  missingInfo: string;
+  sourcesResearched: number;
+  sourceConfirmation: string;
+  /** The viral angle detected (kept for ranking/learning purposes) */
+  viralAngle: string;
+  /** Key entities: airlines, airports, aircraft, people */
+  keyEntities: string;
+}
+
+export async function extractResearchPackage(
+  title: string,
+  content: string,
+  sourceUrl: string,
+  _viralReason: string,
+  _category: string
+): Promise<ResearchPackage> {
+  console.log(`[Soyunci] Extracting research package for: "${title}"`);
+
+  // Step 1: Deep research — fetch primary source + secondary sources (free, no LLM)
+  const researchResult = await deepResearch(title, sourceUrl, content);
+  const { context: researchContext, sourcesResearched, primarySourceText } = researchResult;
+
+  if (!primarySourceText) {
+    console.warn(`[Soyunci] No primary source text for "${title}" — using RSS content as fallback`);
+  }
+
+  const sourceBlock = primarySourceText.length > 200
+    ? `PRIMARY SOURCE (read every word):\n${primarySourceText.slice(0, 28000)}`
+    : `(Primary source unavailable — research from RSS snippet and secondary sources only)\nRSS CONTENT:\n${content.slice(0, 4000)}`;
+
+  // Step 2: Single LLM call — extract everything, organise, do NOT summarise or reduce
+  const response = await invokeLLM({
+    model: PIPELINE_MODEL,
+    messages: [
+      {
+        role: "system",
+        content: `You are an aviation research analyst for FlightDrama.
+
+Your job is NOT to summarise. Your job is to EXTRACT and ORGANISE every piece of information from the sources.
+
+The golden rule: when in doubt, include it. Missing one important fact is a bigger failure than extracting too much.
+
+You must produce a structured research package that a journalist can hand directly to an editor.
+
+EXTRACTION RULES:
+- Extract EVERY meaningful piece of information: airlines, aircraft, registrations, flight numbers, airports, routes, dates, times, passenger numbers, crew numbers, injuries, fatalities, diversions, inspections, investigations, aircraft affected, financial figures, technical details, legal developments, operational details, historical context, previous related incidents, regulatory actions, safety findings, emotional details, unusual details, surprising facts, dramatic facts, hidden details, consequences.
+- Do NOT decide what is important. Extract everything.
+- Do NOT paraphrase facts — use the exact numbers, names, dates from the source.
+- For quotes: extract verbatim. Group by who said it (airline, passengers, officials, investigators, witnesses, other).
+- For contradictions: if two sources disagree on a fact, show both versions side by side.
+- For missing info: list what is NOT yet known, NOT confirmed, or NOT publicly disclosed.
+
+Return ONLY valid JSON with exactly these fields:
+{
+  "storySummary": "1-2 sentences: what happened, who was involved, when and where",
+  "extractedInfo": ["exact fact 1", "exact fact 2", ...],
+  "timeline": "chronological narrative of events — use specific dates and times where available",
+  "quotes": {
+    "airline": ["verbatim quote — source name/role"],
+    "passengers": ["verbatim quote — source name if known"],
+    "officials": ["verbatim quote — name and role"],
+    "investigators": ["verbatim quote — name and role"],
+    "witnesses": ["verbatim quote — source name if known"],
+    "other": ["verbatim quote — source name/role"]
+  },
+  "sources": [
+    { "name": "source name", "url": "url if available", "type": "primary|secondary|official|social" }
+  ],
+  "contradictions": "describe any disagreements between sources, or 'None identified'",
+  "missingInfo": "list what remains unknown, unconfirmed, or not yet publicly disclosed",
+  "viralAngle": "the single strongest angle from: death_accountability | passenger_outrage | safety_failure | money_scandal | pilot_crew_pay | historic_milestone | rare_aircraft | boeing_airbus_controversy | human_interest | corporate_failure | regulatory_conflict | nostalgia | hidden_fact",
+  "keyEntities": "comma-separated: airlines, airports, aircraft types, registrations, key people"
+}`,
+      },
+      {
+        role: "user",
+        content: `STORY TITLE: ${title}\n\n${sourceBlock}\n\nADDITIONAL SOURCES (${sourcesResearched} total):\n${researchContext.slice(0, 20000)}\n\nExtract everything. Do not summarise. Do not filter. Return ONLY valid JSON.`,
+      },
+    ],
+  });
+
+  const raw = extractText(response);
+  let parsed: any = null;
+  try {
+    const s = raw.indexOf("{");
+    const e = raw.lastIndexOf("}");
+    if (s !== -1 && e > s) {
+      parsed = JSON.parse(raw.slice(s, e + 1));
+    }
+  } catch {
+    console.warn(`[Soyunci] Research package JSON parse failed for "${title}" — using fallback`);
+  }
+
+  // Build source confirmation string
+  const primaryWords = primarySourceText ? primarySourceText.split(/\s+/).length : 0;
+  const secondaryCount = Math.max(0, sourcesResearched - (primarySourceText ? 1 : 0));
+  let sourceConfirmation: string;
+  if (primaryWords > 300) {
+    sourceConfirmation = `\u2705 Read ${primaryWords.toLocaleString()} words from primary source${secondaryCount > 0 ? ` + ${secondaryCount} secondary source${secondaryCount > 1 ? "s" : ""}` : ""}. Full story in hand.`;
+  } else if (primaryWords > 0) {
+    sourceConfirmation = `\u26a0\ufe0f Primary source was short (${primaryWords} words)${secondaryCount > 0 ? ` \u2014 supplemented with ${secondaryCount} secondary source${secondaryCount > 1 ? "s" : ""}` : " \u2014 no secondary sources found"}. Research based on available material.`;
+  } else if (secondaryCount > 0) {
+    sourceConfirmation = `\u26a0\ufe0f Primary source blocked \u2014 researched from ${secondaryCount} secondary source${secondaryCount > 1 ? "s" : ""} covering the same story.`;
+  } else {
+    sourceConfirmation = `\u274c No source text retrieved \u2014 research based on RSS snippet only. May be incomplete.`;
+  }
+
+  // Build sources list from research context (always include the original source)
+  const sources: Array<{ name: string; url?: string; type: string }> = [];
+  if (sourceUrl) {
+    try {
+      sources.push({ name: new URL(sourceUrl).hostname.replace(/^www\./, ""), url: sourceUrl, type: "primary" });
+    } catch {
+      sources.push({ name: "Original source", url: sourceUrl, type: "primary" });
+    }
+  }
+  if (Array.isArray(parsed?.sources)) {
+    for (const s of parsed.sources) {
+      if (s && typeof s === "object" && s.name && s.name !== sources[0]?.name) {
+        sources.push({ name: s.name, url: s.url, type: s.type ?? "secondary" });
+      }
+    }
+  }
+
+  const result: ResearchPackage = {
+    storySummary: parsed?.storySummary ?? `Research extracted for: ${title}`,
+    extractedInfo: Array.isArray(parsed?.extractedInfo) ? parsed.extractedInfo : [],
+    timeline: parsed?.timeline ?? "",
+    quotes: (parsed?.quotes && typeof parsed.quotes === "object" && !Array.isArray(parsed.quotes))
+      ? parsed.quotes
+      : {},
+    sources,
+    contradictions: parsed?.contradictions ?? "None identified",
+    missingInfo: parsed?.missingInfo ?? "Not assessed",
+    sourcesResearched,
+    sourceConfirmation,
+    viralAngle: parsed?.viralAngle ?? "aviation_incident",
+    keyEntities: parsed?.keyEntities ?? "",
+  };
+
+  console.log(`[Soyunci] Research package complete \u2014 ${result.extractedInfo.length} facts, ${sourcesResearched} sources, angle: ${result.viralAngle}`);
+  return result;
+}

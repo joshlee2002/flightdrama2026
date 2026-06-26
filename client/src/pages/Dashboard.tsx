@@ -455,7 +455,7 @@ function StoryCard({
       {pkg?.processingStatus === "processing" && (
         <div className="border-t border-border/50 px-4 py-2 flex items-center gap-2">
           <Loader2 className="w-3 h-3 animate-spin text-primary shrink-0" />
-          <span className="text-xs text-muted-foreground">Soyunci is researching &amp; writing — view progress in Approved Queue</span>
+          <span className="text-xs text-muted-foreground">Soyunci is researching — view full package in Approved Queue once approved</span>
         </div>
       )}
       {isFailed && pkg?.processingError && (
@@ -463,6 +463,91 @@ function StoryCard({
           <p className="text-xs text-red-400">Pipeline failed: {pkg.processingError}</p>
         </div>
       )}
+
+      {/* Research preview — shown when research package is available */}
+      {(() => {
+        const hasResearch = !!(pkg?.storySummary || (pkg?.extractedFacts && pkg.extractedFacts !== "[]") || pkg?.researchExtracted);
+        if (!hasResearch) return null;
+
+        const extracted: string[] = (() => {
+          if (Array.isArray(pkg?.researchExtracted)) return pkg.researchExtracted;
+          if (Array.isArray(pkg?.extractedFacts)) return pkg.extractedFacts;
+          try { return JSON.parse(pkg?.extractedFacts ?? "[]"); } catch { return []; }
+        })();
+
+        const buildResearchCopy = () => {
+          const parts: string[] = [];
+          parts.push(`STORY: ${story.title}`);
+          parts.push(`SOURCE: ${story.sourceUrl ?? ""} (${story.sourceName ?? ""})`);
+          parts.push("");
+          if (pkg?.storySummary) { parts.push("── STORY SUMMARY ──"); parts.push(pkg.storySummary); parts.push(""); }
+          if (extracted.length > 0) {
+            parts.push("── EXTRACTED INFORMATION ──");
+            extracted.forEach((f: string, i: number) => parts.push(`${i + 1}. ${f}`));
+            parts.push("");
+          }
+          if (pkg?.researchTimeline) { parts.push("── TIMELINE ──"); parts.push(pkg.researchTimeline); parts.push(""); }
+          const quotes: Record<string, string[]> = (() => {
+            if (pkg?.researchQuotes && typeof pkg.researchQuotes === "object" && !Array.isArray(pkg.researchQuotes)) return pkg.researchQuotes;
+            try { return JSON.parse(pkg?.researchQuotes ?? "{}"); } catch { return {}; }
+          })();
+          const quoteEntries = Object.entries(quotes).filter(([, arr]) => Array.isArray(arr) && (arr as string[]).length > 0);
+          if (quoteEntries.length > 0) {
+            parts.push("── QUOTES ──");
+            quoteEntries.forEach(([source, qs]) => { parts.push(`[${source.toUpperCase()}]`); (qs as string[]).forEach((q: string) => parts.push(`  "${q}"`)); });
+            parts.push("");
+          }
+          if (pkg?.researchContradictions && pkg.researchContradictions !== "None identified") { parts.push("── CONTRADICTIONS ──"); parts.push(pkg.researchContradictions); parts.push(""); }
+          if (pkg?.researchMissingInfo && pkg.researchMissingInfo !== "Not assessed") { parts.push("── MISSING INFORMATION ──"); parts.push(pkg.researchMissingInfo); parts.push(""); }
+          return parts.join("\n").trim();
+        };
+
+        return (
+          <div className="border-t border-border/50">
+            <div className="px-4 py-2.5 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <BookOpen className="w-3.5 h-3.5 text-primary/60" />
+                <span className="text-xs font-medium text-muted-foreground">Research Package</span>
+                {extracted.length > 0 && (
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary/80 border border-primary/15">{extracted.length} facts</span>
+                )}
+                {pkg?.sourcesResearched != null && pkg.sourcesResearched > 0 && (
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-400 border border-sky-500/20">{pkg.sourcesResearched} sources</span>
+                )}
+              </div>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-6 text-xs gap-1 text-primary/80 hover:text-primary font-medium"
+                onClick={() => { navigator.clipboard.writeText(buildResearchCopy()); toast.success("Research package copied"); }}
+                title="Copy complete research package ready to paste into ChatGPT"
+              >
+                <Copy className="w-3 h-3" />Copy Research
+              </Button>
+            </div>
+            {pkg?.storySummary && (
+              <div className="px-4 pb-3">
+                <p className="text-xs text-foreground/80 leading-relaxed">{pkg.storySummary}</p>
+              </div>
+            )}
+            {extracted.length > 0 && (
+              <div className="px-4 pb-3">
+                <ul className="space-y-0.5">
+                  {extracted.slice(0, 5).map((fact: string, i: number) => (
+                    <li key={i} className="flex gap-2 text-xs text-foreground/75 leading-relaxed">
+                      <span className="text-muted-foreground shrink-0 tabular-nums w-4">{i + 1}.</span>
+                      <span>{fact}</span>
+                    </li>
+                  ))}
+                  {extracted.length > 5 && (
+                    <li className="text-xs text-muted-foreground pl-6 italic">+{extracted.length - 5} more facts — approve to see full package</li>
+                  )}
+                </ul>
+              </div>
+            )}
+          </div>
+        );
+      })()}
     </div>
   );
 }

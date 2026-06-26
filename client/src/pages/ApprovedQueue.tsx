@@ -58,10 +58,78 @@ function buildArticleWithHashtags(pkg: any): string {
 function buildCopyAll(story: any, pkg: any): string {
   const parts: string[] = [];
   if (pkg?.selectedHeadline) parts.push(`HEADLINE:\n${pkg.selectedHeadline}`);
-  // Article already includes hashtags appended at the end
   const articleWithTags = buildArticleWithHashtags(pkg);
   if (articleWithTags) parts.push(`ARTICLE:\n${articleWithTags}`);
   return parts.join("\n\n");
+}
+
+/** Build the complete research package in clean ChatGPT-ready format */
+function buildResearchCopy(story: any, pkg: any): string {
+  const parts: string[] = [];
+  parts.push(`STORY: ${story.title}`);
+  parts.push(`SOURCE: ${story.sourceUrl ?? ""} (${story.sourceName ?? ""})`);
+  parts.push("");
+
+  if (pkg?.storySummary) {
+    parts.push("── STORY SUMMARY ──");
+    parts.push(pkg.storySummary);
+    parts.push("");
+  }
+
+  const extracted: string[] = (() => {
+    if (Array.isArray(pkg?.researchExtracted)) return pkg.researchExtracted;
+    if (Array.isArray(pkg?.extractedFacts)) return pkg.extractedFacts;
+    try { return JSON.parse(pkg?.extractedFacts ?? "[]"); } catch { return []; }
+  })();
+  if (extracted.length > 0) {
+    parts.push("── EXTRACTED INFORMATION ──");
+    extracted.forEach((f: string, i: number) => parts.push(`${i + 1}. ${f}`));
+    parts.push("");
+  }
+
+  if (pkg?.researchTimeline) {
+    parts.push("── TIMELINE ──");
+    parts.push(pkg.researchTimeline);
+    parts.push("");
+  }
+
+  const quotes: Record<string, string[]> = (() => {
+    if (pkg?.researchQuotes && typeof pkg.researchQuotes === "object" && !Array.isArray(pkg.researchQuotes)) return pkg.researchQuotes;
+    try { return JSON.parse(pkg?.researchQuotes ?? "{}"); } catch { return {}; }
+  })();
+  const quoteEntries = Object.entries(quotes).filter(([, arr]) => Array.isArray(arr) && arr.length > 0);
+  if (quoteEntries.length > 0) {
+    parts.push("── QUOTES ──");
+    quoteEntries.forEach(([source, qs]) => {
+      parts.push(`[${source.toUpperCase()}]`);
+      (qs as string[]).forEach((q: string) => parts.push(`  "${q}"`));
+    });
+    parts.push("");
+  }
+
+  const sources: Array<{ name: string; url?: string; type: string }> = (() => {
+    if (Array.isArray(pkg?.researchSources)) return pkg.researchSources;
+    try { return JSON.parse(pkg?.researchSources ?? "[]"); } catch { return []; }
+  })();
+  if (sources.length > 0) {
+    parts.push("── SOURCES ──");
+    sources.forEach((s: any) => parts.push(`${s.type?.toUpperCase() ?? "SOURCE"}: ${s.name}${s.url ? " — " + s.url : ""}`));
+    parts.push("");
+  }
+
+  if (pkg?.researchContradictions && pkg.researchContradictions !== "None identified") {
+    parts.push("── CONTRADICTIONS ──");
+    parts.push(pkg.researchContradictions);
+    parts.push("");
+  }
+
+  if (pkg?.researchMissingInfo && pkg.researchMissingInfo !== "Not assessed") {
+    parts.push("── MISSING INFORMATION ──");
+    parts.push(pkg.researchMissingInfo);
+    parts.push("");
+  }
+
+  return parts.join("\n").trim();
 }
 
 function exportToCSV(items: { story: any; package: any }[]) {
@@ -848,7 +916,8 @@ function ApprovedCard({ story, pkg, onUnapprove, isUnapproving }: ApprovedCardPr
     onError: (e) => toast.error(`Rewrite failed: ${e.message}`),
   });
 
-  const isProcessing = pkg?.processingStatus === "processing" || pkg?.processingStatus === "queued" || (!pkg?.soyunciArticle && pkg?.processingStatus !== "failed");
+  const hasResearch = !!(pkg?.storySummary || (pkg?.extractedFacts && pkg.extractedFacts !== "[]") || pkg?.researchExtracted);
+  const isProcessing = pkg?.processingStatus === "processing" || pkg?.processingStatus === "queued" || (!hasResearch && pkg?.processingStatus !== "failed");
   const isFailed = pkg?.processingStatus === "failed";
   const score = story.overrideScore ?? story.viralScore ?? 0;
 
@@ -977,8 +1046,15 @@ function ApprovedCard({ story, pkg, onUnapprove, isUnapproving }: ApprovedCardPr
           <Button variant="ghost" size="sm" className="h-7 text-xs gap-1.5 text-muted-foreground hover:text-foreground" onClick={() => regenerate.mutate({ id: story.id })} disabled={regenerate.isPending || isProcessing}>
             <RefreshCw className={cn("w-3 h-3", regenerate.isPending && "animate-spin")} />Regen
           </Button>
-          <Button variant="ghost" size="sm" className="h-7 text-xs gap-1.5" onClick={() => copyText(buildCopyAll(story, pkg), "Full package")} disabled={isProcessing || !pkg?.soyunciArticle}>
-            <Copy className="w-3 h-3" />Copy All
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 text-xs gap-1.5 text-primary/80 hover:text-primary font-medium"
+            onClick={() => { copyText(buildResearchCopy(story, pkg), "Research package"); }}
+            disabled={isProcessing || !hasResearch}
+            title="Copy complete research package ready to paste into ChatGPT"
+          >
+            <Copy className="w-3 h-3" />Copy Research
           </Button>
           <Button variant="ghost" size="sm" className="h-7 text-xs gap-1.5 text-primary/80 hover:text-primary" onClick={handleLogPost} disabled={isProcessing} title="Pre-fill Performance Data form with this story">
             <ClipboardList className="w-3 h-3" />Log Post
@@ -1000,109 +1076,169 @@ function ApprovedCard({ story, pkg, onUnapprove, isUnapproving }: ApprovedCardPr
         </div>
       )}
 
-      {!isProcessing && !isFailed && pkg?.soyunciArticle && (
+      {!isProcessing && !isFailed && hasResearch && (
         <div className="divide-y divide-border/40">
-          {/* Article */}
-          <div>
-            <button className="w-full px-4 py-2.5 flex items-center justify-between text-xs font-medium text-muted-foreground hover:text-foreground transition-colors" onClick={() => toggle("article")}>
-              <span className="flex items-center gap-2"><FileText className="w-3.5 h-3.5" />Article</span>
-              {expanded.article ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
-            </button>
-            {expanded.article && (
-              <div className="px-4 pb-3">
-                {editingArticle ? (
-                  <div className="space-y-2">
-                    <Textarea value={articleDraft} onChange={e => setArticleDraft(e.target.value)} className="text-sm min-h-[140px] bg-muted/20 border-border/60 resize-none" autoFocus />
-                    <div className="flex gap-2">
-                      <Button size="sm" className="h-7 text-xs gap-1" onClick={() => updateArticle.mutate({ storyId: story.id, article: articleDraft })} disabled={updateArticle.isPending}>
-                        {updateArticle.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}Save
-                      </Button>
-                      <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => { setEditingArticle(false); setArticleDraft(pkg.soyunciArticle); }}>Cancel</Button>
-                      <span className="text-xs text-muted-foreground self-center ml-auto">{articleDraft.split(/\s+/).filter(Boolean).length} words</span>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="group relative">
-                    <p className="text-sm text-foreground/90 leading-relaxed whitespace-pre-wrap">{buildArticleWithHashtags(pkg)}</p>
-                    <div className="flex gap-2 mt-2 flex-wrap">
-                      <Button size="sm" variant="ghost" className="h-6 text-xs gap-1 opacity-0 group-hover:opacity-100 transition-opacity" onClick={() => { setEditingArticle(true); setArticleDraft(pkg.soyunciArticle); }}>
-                        <Pencil className="w-3 h-3" />Edit
-                      </Button>
-                      <Button size="sm" variant="ghost" className="h-6 text-xs gap-1 opacity-0 group-hover:opacity-100 transition-opacity" onClick={() => copyText(buildArticleWithHashtags(pkg), "Article + hashtags")}>
-                        <Copy className="w-3 h-3" />Copy
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="h-6 text-xs gap-1 border-violet-500/30 text-violet-400 hover:bg-violet-500/10 opacity-0 group-hover:opacity-100 transition-opacity"
-                        onClick={() => rewriteArticle.mutate({ storyId: story.id })}
-                        disabled={rewriteArticle.isPending}
-                        title="Re-run the writing step only — keeps existing research, images, and headlines"
-                      >
-                        {rewriteArticle.isPending ? <><Loader2 className="w-3 h-3 animate-spin" />Rewriting…</> : <><RefreshCw className="w-3 h-3" />Rewrite Article</>}
-                      </Button>
-                      <span className="text-xs text-muted-foreground self-center ml-auto">{pkg.soyunciArticle.split(/\s+/).filter(Boolean).length} words</span>
-                    </div>
+          {/* ── Research Package ── */}
+          {/* Story Summary */}
+          {pkg?.storySummary && (
+            <div className="px-4 py-3">
+              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1.5 flex items-center gap-1.5">
+                <BookOpen className="w-3 h-3" />Story Summary
+              </p>
+              <p className="text-sm text-foreground/90 leading-relaxed">{pkg.storySummary}</p>
+              {pkg?.sourceConfirmation && (
+                <p className="text-xs text-muted-foreground/70 mt-1.5 italic">{pkg.sourceConfirmation}</p>
+              )}
+            </div>
+          )}
+
+          {/* Extracted Information */}
+          {(() => {
+            const extracted: string[] = (() => {
+              if (Array.isArray(pkg?.researchExtracted)) return pkg.researchExtracted;
+              if (Array.isArray(pkg?.extractedFacts)) return pkg.extractedFacts;
+              try { return JSON.parse(pkg?.extractedFacts ?? "[]"); } catch { return []; }
+            })();
+            if (extracted.length === 0) return null;
+            return (
+              <div>
+                <button className="w-full px-4 py-2.5 flex items-center justify-between text-xs font-medium text-muted-foreground hover:text-foreground transition-colors" onClick={() => toggle("extracted")}>
+                  <span className="flex items-center gap-2">
+                    <FileText className="w-3.5 h-3.5" />Extracted Information
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary/80 border border-primary/15">{extracted.length} facts</span>
+                  </span>
+                  {expanded.extracted ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+                </button>
+                {expanded.extracted && (
+                  <div className="px-4 pb-3">
+                    <ol className="space-y-1">
+                      {extracted.map((fact: string, i: number) => (
+                        <li key={i} className="flex gap-2 text-sm text-foreground/85 leading-relaxed">
+                          <span className="text-muted-foreground shrink-0 tabular-nums text-xs mt-0.5 w-5">{i + 1}.</span>
+                          <span>{fact}</span>
+                        </li>
+                      ))}
+                    </ol>
                   </div>
                 )}
               </div>
-            )}
-          </div>
+            );
+          })()}
 
-          {/* Headlines */}
-          {(pkg?.selectedHeadline || altHeadlines.length > 0) && (
+          {/* Timeline */}
+          {pkg?.researchTimeline && (
             <div>
-              <button className="w-full px-4 py-2.5 flex items-center justify-between text-xs font-medium text-muted-foreground hover:text-foreground transition-colors" onClick={() => toggle("headlines")}>
-                <span className="flex items-center gap-2"><Newspaper className="w-3.5 h-3.5" />Headlines</span>
-                {expanded.headlines ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+              <button className="w-full px-4 py-2.5 flex items-center justify-between text-xs font-medium text-muted-foreground hover:text-foreground transition-colors" onClick={() => toggle("timeline")}>
+                <span className="flex items-center gap-2"><Hash className="w-3.5 h-3.5" />Timeline</span>
+                {expanded.timeline ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
               </button>
-              {expanded.headlines && (
-                <div className="px-4 pb-3 space-y-2">
-                  {pkg?.selectedHeadline && (
-                    <div className="group flex items-start gap-2 bg-primary/5 border border-primary/20 rounded-lg px-3 py-2">
-                      <Star className="w-3.5 h-3.5 text-primary shrink-0 mt-0.5" />
-                      {editingHeadline ? (
-                        <div className="flex-1 flex gap-2">
-                          <input className="flex-1 bg-transparent text-sm font-medium text-foreground focus:outline-none" value={headlineDraft} onChange={e => setHeadlineDraft(e.target.value)} autoFocus
-                            onKeyDown={e => { if (e.key === "Enter") setEditingHeadline(false); if (e.key === "Escape") { setEditingHeadline(false); setHeadlineDraft(pkg.selectedHeadline); } }} />
-                          <Button size="sm" variant="ghost" className="h-6 text-xs" onClick={() => setEditingHeadline(false)}><Check className="w-3 h-3" /></Button>
-                        </div>
-                      ) : (
-                        <div className="flex-1 flex items-start justify-between gap-2">
-                          <span className="text-sm font-medium text-foreground">{headlineDraft || pkg.selectedHeadline}</span>
-                          <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
-                            <button onClick={() => setEditingHeadline(true)} className="text-muted-foreground hover:text-foreground"><Pencil className="w-3 h-3" /></button>
-                            <button onClick={() => copyText(headlineDraft || pkg.selectedHeadline, "Headline")} className="text-muted-foreground hover:text-foreground"><Copy className="w-3 h-3" /></button>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  {altHeadlines.map((h, i) => (
-                    <div key={i} className="group flex items-start gap-2 rounded-lg px-3 py-2 hover:bg-muted/30 transition-colors">
-                      <span className="text-xs text-muted-foreground shrink-0 mt-0.5 w-4">{i + 1}.</span>
-                      <span className="text-sm text-foreground/80 flex-1">{h}</span>
-                      <button onClick={() => copyText(h, "Headline")} className="opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-foreground shrink-0"><Copy className="w-3 h-3" /></button>
-                    </div>
-                  ))}
+              {expanded.timeline && (
+                <div className="px-4 pb-3">
+                  <p className="text-sm text-foreground/85 leading-relaxed whitespace-pre-wrap">{pkg.researchTimeline}</p>
                 </div>
               )}
             </div>
           )}
 
-          {/* Hashtags */}
-          {hashtags.length > 0 && (
+          {/* Quotes */}
+          {(() => {
+            const quotes: Record<string, string[]> = (() => {
+              if (pkg?.researchQuotes && typeof pkg.researchQuotes === "object" && !Array.isArray(pkg.researchQuotes)) return pkg.researchQuotes;
+              try { return JSON.parse(pkg?.researchQuotes ?? "{}"); } catch { return {}; }
+            })();
+            const quoteEntries = Object.entries(quotes).filter(([, arr]) => Array.isArray(arr) && (arr as string[]).length > 0);
+            if (quoteEntries.length === 0) return null;
+            const totalQuotes = quoteEntries.reduce((n, [, arr]) => n + (arr as string[]).length, 0);
+            return (
+              <div>
+                <button className="w-full px-4 py-2.5 flex items-center justify-between text-xs font-medium text-muted-foreground hover:text-foreground transition-colors" onClick={() => toggle("quotes")}>
+                  <span className="flex items-center gap-2">
+                    <Newspaper className="w-3.5 h-3.5" />Quotes
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20">{totalQuotes} quote{totalQuotes !== 1 ? "s" : ""}</span>
+                  </span>
+                  {expanded.quotes ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+                </button>
+                {expanded.quotes && (
+                  <div className="px-4 pb-3 space-y-3">
+                    {quoteEntries.map(([source, qs]) => (
+                      <div key={source}>
+                        <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-1">{source}</p>
+                        {(qs as string[]).map((q: string, i: number) => (
+                          <blockquote key={i} className="border-l-2 border-primary/30 pl-3 py-0.5 text-sm text-foreground/80 italic leading-relaxed mb-1">"{q}"</blockquote>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
+          {/* Sources */}
+          {(() => {
+            const sources: Array<{ name: string; url?: string; type: string }> = (() => {
+              if (Array.isArray(pkg?.researchSources)) return pkg.researchSources;
+              try { return JSON.parse(pkg?.researchSources ?? "[]"); } catch { return []; }
+            })();
+            if (sources.length === 0) return null;
+            return (
+              <div>
+                <button className="w-full px-4 py-2.5 flex items-center justify-between text-xs font-medium text-muted-foreground hover:text-foreground transition-colors" onClick={() => toggle("sources")}>
+                  <span className="flex items-center gap-2">
+                    <FlaskConical className="w-3.5 h-3.5" />Sources
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-400 border border-sky-500/20">{sources.length} source{sources.length !== 1 ? "s" : ""}</span>
+                  </span>
+                  {expanded.sources ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+                </button>
+                {expanded.sources && (
+                  <div className="px-4 pb-3 space-y-1">
+                    {sources.map((s: any, i: number) => (
+                      <div key={i} className="flex items-center gap-2 text-xs">
+                        <span className={`px-1.5 py-0.5 rounded text-[9px] font-medium uppercase ${
+                          s.type === "primary" ? "bg-emerald-500/10 text-emerald-400" :
+                          s.type === "official" ? "bg-blue-500/10 text-blue-400" :
+                          "bg-muted/50 text-muted-foreground"
+                        }`}>{s.type ?? "source"}</span>
+                        {s.url ? (
+                          <a href={s.url} target="_blank" rel="noopener noreferrer" className="text-foreground/80 hover:text-primary hover:underline flex items-center gap-1">
+                            {s.name} <ExternalLink className="w-2.5 h-2.5" />
+                          </a>
+                        ) : (
+                          <span className="text-foreground/80">{s.name}</span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
+          {/* Contradictions */}
+          {pkg?.researchContradictions && pkg.researchContradictions !== "None identified" && (
             <div>
-              <button className="w-full px-4 py-2.5 flex items-center justify-between text-xs font-medium text-muted-foreground hover:text-foreground transition-colors" onClick={() => toggle("hashtags")}>
-                <span className="flex items-center gap-2"><Hash className="w-3.5 h-3.5" />Hashtags</span>
-                {expanded.hashtags ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+              <button className="w-full px-4 py-2.5 flex items-center justify-between text-xs font-medium text-amber-400/80 hover:text-amber-400 transition-colors" onClick={() => toggle("contradictions")}>
+                <span className="flex items-center gap-2"><span className="text-sm">⚠</span>Contradictions</span>
+                {expanded.contradictions ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
               </button>
-              {expanded.hashtags && (
-                <div className="px-4 pb-3 flex items-center gap-2 flex-wrap">
-                  {hashtags.map((h, i) => (
-                    <button key={i} onClick={() => copyText(h, "Hashtag")} className="px-2.5 py-1 rounded-full bg-muted/40 border border-border/50 text-xs text-foreground/80 hover:bg-muted/70 hover:text-foreground transition-colors">{h}</button>
-                  ))}
-                  <Button size="sm" variant="ghost" className="h-6 text-xs gap-1 ml-auto" onClick={() => copyText(hashtags.join(" "), "Hashtags")}><Copy className="w-3 h-3" />Copy all</Button>
+              {expanded.contradictions && (
+                <div className="px-4 pb-3">
+                  <p className="text-sm text-foreground/85 leading-relaxed whitespace-pre-wrap">{pkg.researchContradictions}</p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Missing Information */}
+          {pkg?.researchMissingInfo && pkg.researchMissingInfo !== "Not assessed" && (
+            <div>
+              <button className="w-full px-4 py-2.5 flex items-center justify-between text-xs font-medium text-muted-foreground hover:text-foreground transition-colors" onClick={() => toggle("missing")}>
+                <span className="flex items-center gap-2"><span className="text-sm">?</span>Missing Information</span>
+                {expanded.missing ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+              </button>
+              {expanded.missing && (
+                <div className="px-4 pb-3">
+                  <p className="text-sm text-foreground/85 leading-relaxed whitespace-pre-wrap">{pkg.researchMissingInfo}</p>
                 </div>
               )}
             </div>
@@ -1234,14 +1370,14 @@ function ApprovedCard({ story, pkg, onUnapprove, isUnapproving }: ApprovedCardPr
           )}
 
           {/* Pipeline progress bar — shown while processing or after completion */}
-          {(isProcessing || isFailed || pkg?.soyunciArticle) && (() => {
+          {(isProcessing || isFailed || hasResearch) && (() => {
             const steps = [
-              { label: "Research", done: !!(pkg?.researchContext) },
-              { label: "Facts",    done: !!(pkg?.extractedFacts) },
-              { label: "Angle",    done: !!(pkg?.viralAngle) },
-              { label: "Article",  done: !!(pkg?.soyunciArticle) },
-              { label: "Headlines",done: !!(pkg?.allHeadlines && (Array.isArray(pkg.allHeadlines) ? pkg.allHeadlines : JSON.parse(pkg.allHeadlines ?? "[]")).length > 0) },
-              { label: "Images",   done: !!(pkg?.imageRecommendations && (Array.isArray(pkg.imageRecommendations) ? pkg.imageRecommendations : JSON.parse(pkg.imageRecommendations ?? "[]")).length > 0) },
+              { label: "Research",  done: !!(pkg?.researchContext) },
+              { label: "Summary",   done: !!(pkg?.storySummary) },
+              { label: "Facts",     done: !!(pkg?.extractedFacts && pkg.extractedFacts !== "[]") },
+              { label: "Timeline",  done: !!(pkg?.researchTimeline) },
+              { label: "Quotes",    done: !!(pkg?.researchQuotes && pkg.researchQuotes !== "{}") },
+              { label: "Images",    done: !!(pkg?.imageRecommendations && (Array.isArray(pkg.imageRecommendations) ? pkg.imageRecommendations : JSON.parse(pkg.imageRecommendations ?? "[]")).length > 0) },
             ];
             const doneCount = steps.filter(s => s.done).length;
             return (
@@ -1249,7 +1385,7 @@ function ApprovedCard({ story, pkg, onUnapprove, isUnapproving }: ApprovedCardPr
                 <div className="flex items-center gap-2 mb-1.5">
                   {isProcessing && <Loader2 className="w-3 h-3 animate-spin text-primary shrink-0" />}
                   <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">
-                    {isProcessing ? `Pipeline running — ${doneCount}/6 steps` : isFailed ? "Pipeline failed" : `Complete — ${doneCount}/6 steps`}
+                    {isProcessing ? `Pipeline running — ${doneCount}/6 steps` : isFailed ? "Pipeline failed" : `Research complete — ${doneCount}/6 steps`}
                   </span>
                 </div>
                 <div className="flex items-center gap-1">
@@ -1267,53 +1403,35 @@ function ApprovedCard({ story, pkg, onUnapprove, isUnapproving }: ApprovedCardPr
             );
           })()}
 
-          {/* Research context — always shown on complete cards; Re-Research available even without prior context */}
-          {!isProcessing && !isFailed && pkg?.soyunciArticle && (
-            <div>
-              <button className="w-full px-4 py-2.5 flex items-center justify-between text-xs font-medium text-muted-foreground hover:text-foreground transition-colors" onClick={() => toggle("research")}>
-                <span className="flex items-center gap-2">
-                  <BookOpen className="w-3.5 h-3.5" />
-                  Research Sources
-                  {pkg?.sourcesResearched != null && (
-                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-400 border border-sky-500/20">
-                      {pkg.sourcesResearched} fetched
-                    </span>
-                  )}
+          {/* Re-Research button — always available on complete cards */}
+          {!isProcessing && !isFailed && (
+            <div className="px-4 py-3 flex items-center gap-2 flex-wrap">
+              <Button
+                size="sm"
+                variant="outline"
+                className="text-xs gap-1.5 border-sky-500/30 text-sky-400 hover:bg-sky-500/10"
+                onClick={() => reResearch.mutate({ storyId: story.id })}
+                disabled={reResearch.isPending}
+                title="Re-run research pipeline — images are NOT regenerated"
+              >
+                {reResearch.isPending ? (
+                  <><Loader2 className="w-3 h-3 animate-spin" /> Re-researching...</>
+                ) : (
+                  <><FlaskConical className="w-3 h-3" /> Re-Research</>
+                )}
+              </Button>
+              {pkg?.sourcesResearched != null && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-400 border border-sky-500/20">
+                  {pkg.sourcesResearched} source{pkg.sourcesResearched !== 1 ? "s" : ""} fetched
                 </span>
-                {expanded.research ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
-              </button>
-              {expanded.research && (
-                <div className="px-4 pb-3">
-                  <div className="flex items-center gap-2 mb-2 flex-wrap">
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="text-xs gap-1.5 border-sky-500/30 text-sky-400 hover:bg-sky-500/10"
-                      onClick={() => reResearch.mutate({ storyId: story.id })}
-                      disabled={reResearch.isPending}
-                      title="Re-run research and article writing only — images are NOT regenerated"
-                    >
-                      {reResearch.isPending ? (
-                        <><Loader2 className="w-3 h-3 animate-spin" /> Re-researching...</>
-                      ) : (
-                        <><FlaskConical className="w-3 h-3" /> Re-Research &amp; Rewrite</>
-                      )}
-                    </Button>
-                    <span className="text-[10px] text-muted-foreground italic">Images are preserved</span>
-                  </div>
-                  {pkg?.researchContext ? (
-                    <p className="text-xs text-muted-foreground whitespace-pre-wrap leading-relaxed">{pkg.researchContext}</p>
-                  ) : (
-                    <p className="text-xs text-muted-foreground italic">No research context recorded for this story. Use Re-Research & Rewrite to fetch sources now.</p>
-                  )}
-                </div>
               )}
+              <span className="text-[10px] text-muted-foreground italic">Images are preserved</span>
             </div>
           )}
         </div>
       )}
 
-      {!isProcessing && !isFailed && pkg?.soyunciArticle && (
+      {!isProcessing && !isFailed && hasResearch && (
         <FeedbackBar storyId={story.id} currentRating={pkg?.soyunciRating} currentNote={pkg?.soyunciFeedbackNote} />
       )}
 

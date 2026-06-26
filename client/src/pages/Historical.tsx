@@ -23,8 +23,13 @@ interface FormData {
   likes: string;
   comments: string;
   shares: string;
+  saves: string;
+  followersGained: string;
   revenue: string;
   netFollows: string;
+  platform: string;
+  airline: string;
+  imageType: string;
   sourceType: string;
   aircraftType: string;
   storyType: string;
@@ -42,8 +47,13 @@ const emptyForm: FormData = {
   likes: "",
   comments: "",
   shares: "",
+  saves: "",
+  followersGained: "",
   revenue: "",
   netFollows: "",
+  platform: "",
+  airline: "",
+  imageType: "",
   sourceType: "",
   aircraftType: "",
   storyType: "",
@@ -327,8 +337,13 @@ export default function Historical() {
       likes: parseSmartNumber(form.likes),
       comments: parseSmartNumber(form.comments),
       shares: parseSmartNumber(form.shares),
+      saves: parseSmartNumber(form.saves),
+      followersGained: parseSmartNumber(form.followersGained),
       revenue: form.revenue ? parseFloat(form.revenue) : undefined,
       netFollows: parseSmartNumber(form.netFollows),
+      platform: form.platform || undefined,
+      airline: form.airline || undefined,
+      imageType: form.imageType || undefined,
       sourceType: form.sourceType || undefined,
       aircraftType: form.aircraftType || undefined,
       storyType: form.storyType || undefined,
@@ -607,6 +622,8 @@ export default function Historical() {
                     <SmartNumberInput label="Likes" placeholder="e.g. 8.5k or 12000" value={form.likes} onChange={v => setForm(p => ({ ...p, likes: v }))} icon={Heart} iconColor="text-pink-400" />
                     <SmartNumberInput label="Comments" placeholder="e.g. 850" value={form.comments} onChange={v => setForm(p => ({ ...p, comments: v }))} icon={MessageCircle} iconColor="text-purple-400" />
                     <SmartNumberInput label="Shares" placeholder="e.g. 3.2k" value={form.shares} onChange={v => setForm(p => ({ ...p, shares: v }))} icon={Share2} iconColor="text-amber-400" />
+                    <SmartNumberInput label="Saves" placeholder="e.g. 1.4k" value={form.saves} onChange={v => setForm(p => ({ ...p, saves: v }))} icon={Download} iconColor="text-indigo-400" />
+                    <SmartNumberInput label="Followers Gained" placeholder="e.g. 320" value={form.followersGained} onChange={v => setForm(p => ({ ...p, followersGained: v }))} icon={Users} iconColor="text-teal-400" />
                   </div>
                 </div>
 
@@ -651,6 +668,18 @@ export default function Historical() {
                 {showAdvanced && (
                   <div className="space-y-3 border-t border-border pt-4">
                     <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <Label className="text-xs text-muted-foreground mb-1.5 block">Platform</Label>
+                        <Input placeholder="e.g. Instagram, TikTok, Facebook" value={form.platform} onChange={e => setForm(p => ({ ...p, platform: e.target.value }))} className="text-sm bg-muted/30 border-border h-8" />
+                      </div>
+                      <div>
+                        <Label className="text-xs text-muted-foreground mb-1.5 block">Airline / Subject</Label>
+                        <Input placeholder="e.g. Ryanair, British Airways" value={form.airline} onChange={e => setForm(p => ({ ...p, airline: e.target.value }))} className="text-sm bg-muted/30 border-border h-8" />
+                      </div>
+                      <div>
+                        <Label className="text-xs text-muted-foreground mb-1.5 block">Image Type</Label>
+                        <Input placeholder="e.g. Aircraft photo, AI poster, Text card" value={form.imageType} onChange={e => setForm(p => ({ ...p, imageType: e.target.value }))} className="text-sm bg-muted/30 border-border h-8" />
+                      </div>
                       <div>
                         <Label className="text-xs text-muted-foreground mb-1.5 block">Category</Label>
                         <Input placeholder="e.g. Safety & Accountability" value={form.category} onChange={e => setForm(p => ({ ...p, category: e.target.value }))} className="text-sm bg-muted/30 border-border h-8" />
@@ -972,9 +1001,24 @@ export default function Historical() {
                   {post.likes != null && <StatBadge icon={Heart} label="likes" value={post.likes} color="bg-pink-500/10 text-pink-400" />}
                   {post.comments != null && <StatBadge icon={MessageCircle} label="comments" value={post.comments} color="bg-purple-500/10 text-purple-400" />}
                   {post.shares != null && <StatBadge icon={Share2} label="shares" value={post.shares} color="bg-amber-500/10 text-amber-400" />}
+                  {(post as any).saves != null && <StatBadge icon={Download} label="saves" value={(post as any).saves} color="bg-indigo-500/10 text-indigo-400" />}
+                  {(post as any).followersGained != null && <StatBadge icon={Users} label="followers gained" value={(post as any).followersGained} color="bg-teal-500/10 text-teal-400" />}
                   {post.revenue != null && <StatBadge icon={DollarSign} label="revenue" value={`£${post.revenue.toFixed(2)}`} color="bg-emerald-500/10 text-emerald-400" />}
                   {post.netFollows != null && <StatBadge icon={Users} label="net follows" value={post.netFollows} color="bg-cyan-500/10 text-cyan-400" />}
                 </div>
+                {((post as any).platform || (post as any).airline || (post as any).imageType) && (
+                  <div className="flex flex-wrap gap-1.5 mt-2">
+                    {(post as any).platform && (
+                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-violet-500/10 text-violet-400 border border-violet-500/20">{(post as any).platform}</span>
+                    )}
+                    {(post as any).airline && (
+                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-sky-500/10 text-sky-400 border border-sky-500/20">{(post as any).airline}</span>
+                    )}
+                    {(post as any).imageType && (
+                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-rose-500/10 text-rose-400 border border-rose-500/20">{(post as any).imageType}</span>
+                    )}
+                  </div>
+                )}
               </div>
             ))}
           </div>
