@@ -2,7 +2,7 @@ import { Request, Response } from "express";
 import { getDb } from "./db";
 import { stories, storyPackages } from "../drizzle/schema";
 import { inArray, lt, and } from "drizzle-orm";
-import sdk from "@manus-app/express";
+import { sdk } from "./_core/sdk";
 
 /**
  * Scheduled DB Cleanup Job
