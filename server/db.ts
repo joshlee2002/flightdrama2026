@@ -373,12 +373,41 @@ export async function updateStoryPackage(
     .values({ storyId, processingStatus: "queued" })
     .onDuplicateKeyUpdate({ set: { storyId } }) // no-op on conflict, just ensures row exists
     .catch(() => {}); // ignore if row already exists with different constraint
-  // Step 2: update the row with the actual data
+  // Step 2: update the row with the actual data using raw SQL to avoid Drizzle
+  // JSON serialization issues with json-typed columns (quotes, sources, etc.)
   const { id: _id, storyId: _sid, createdAt: _ca, ...safeData } = data as any;
-  await db
-    .update(storyPackages)
-    .set({ ...safeData, updatedAt: new Date() })
-    .where(eq(storyPackages.storyId, storyId));
+  // JSON-typed fields that need explicit serialization
+  const JSON_FIELDS = new Set([
+    "researchExtracted", "researchQuotes", "researchSources",
+    "imageRecommendations", "imageCandidates", "hashtags",
+    "allHeadlines", "topThreeHeadlines", "headlineObjects", "editorReview",
+  ]);
+  const setClauses: string[] = ["updatedAt = NOW()"];
+  const params: any[] = [];
+  for (const [key, value] of Object.entries(safeData)) {
+    if (value === undefined) continue;
+    setClauses.push(`\`${key}\` = ?`);
+    if (JSON_FIELDS.has(key) && value !== null && typeof value !== "string") {
+      params.push(JSON.stringify(value));
+    } else {
+      params.push(value);
+    }
+  }
+  if (setClauses.length <= 1) return; // nothing to update
+  params.push(storyId);
+  // Use the underlying mysql2 client for raw parameterized SQL to avoid
+  // Drizzle ORM JSON serialization issues with json-typed columns
+  const rawClient = (db as any).$client;
+  const rawQuery = `UPDATE \`story_packages\` SET ${setClauses.join(", ")} WHERE \`storyId\` = ?`;
+  // mysql2 $client may be promise-based or callback-based
+  if (typeof rawClient.execute === "function") {
+    await rawClient.execute(rawQuery, params);
+  } else if (typeof rawClient.query === "function") {
+    await rawClient.query(rawQuery, params);
+  } else {
+    // Fallback: use Drizzle's sql template with explicit JSON stringification
+    await db.execute(sql`${sql.raw(rawQuery)}`);
+  }
 }
 
 export async function getPackageByStoryId(storyId: number) {
