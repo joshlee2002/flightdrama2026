@@ -176,6 +176,23 @@ export const storyPackages = mysqlTable("story_packages", {
   researchEditorialHooks: json("researchEditorialHooks").$type<string[]>(),
   /** Quality assessment of the story */
   researchStoryQuality: json("researchStoryQuality").$type<string[]>(),
+  // ── Structured aviation fields ──
+  /** Flight number (e.g. AA123) */
+  researchFlightNumber: varchar("researchFlightNumber", { length: 64 }),
+  /** Route (e.g. London Heathrow to New York JFK) */
+  researchRoute: text("researchRoute"),
+  /** Aircraft type and registration */
+  researchAircraftType: text("researchAircraftType"),
+  /** Number of passengers on board */
+  researchPassengerCount: varchar("researchPassengerCount", { length: 64 }),
+  /** Number of crew on board */
+  researchCrewCount: varchar("researchCrewCount", { length: 64 }),
+  /** Date the event occurred */
+  researchEventDate: varchar("researchEventDate", { length: 64 }),
+  /** Publication date of the primary source */
+  researchPublicationDate: varchar("researchPublicationDate", { length: 64 }),
+  /** Key entities: airlines, airports, aircraft, people */
+  researchKeyEntities: text("researchKeyEntities"),
 });
 
 export type StoryPackage = typeof storyPackages.$inferSelect;

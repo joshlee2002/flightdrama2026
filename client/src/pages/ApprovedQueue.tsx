@@ -66,33 +66,50 @@ function buildCopyAll(story: any, pkg: any): string {
 /** Build the complete research package in clean ChatGPT-ready format */
 function buildResearchCopy(story: any, pkg: any): string {
   const parts: string[] = [];
-  parts.push(`STORY: ${story.title}`);
-  parts.push(`SOURCE: ${story.sourceUrl ?? ""} (${story.sourceName ?? ""})`);
+
+  // ── Header ──
+  parts.push(`FLIGHTDRAMA RESEARCH PACKAGE`);
+  parts.push(`Story: ${story.title}`);
+  parts.push(`Source: ${story.sourceUrl ?? ""} (${story.sourceName ?? ""})`);
   parts.push("");
 
+  // ── Story Summary ──
   if (pkg?.storySummary) {
     parts.push("── STORY SUMMARY ──");
     parts.push(pkg.storySummary);
+    if (pkg?.sourceConfirmation) parts.push(pkg.sourceConfirmation);
     parts.push("");
   }
 
+  // ── Key Details (structured aviation fields) ──
+  const keyDetails: string[] = [];
+  if (pkg?.researchEventDate) keyDetails.push(`Event Date: ${pkg.researchEventDate}`);
+  if (pkg?.researchPublicationDate) keyDetails.push(`Published: ${pkg.researchPublicationDate}`);
+  if (pkg?.researchFlightNumber) keyDetails.push(`Flight: ${pkg.researchFlightNumber}`);
+  if (pkg?.researchRoute) keyDetails.push(`Route: ${pkg.researchRoute}`);
+  if (pkg?.researchAircraftType) keyDetails.push(`Aircraft: ${pkg.researchAircraftType}`);
+  if (pkg?.researchPassengerCount) keyDetails.push(`Passengers: ${pkg.researchPassengerCount}`);
+  if (pkg?.researchCrewCount) keyDetails.push(`Crew: ${pkg.researchCrewCount}`);
+  if (pkg?.researchKeyEntities) keyDetails.push(`Key Entities: ${pkg.researchKeyEntities}`);
+  if (keyDetails.length > 0) {
+    parts.push("── KEY DETAILS ──");
+    keyDetails.forEach(d => parts.push(d));
+    parts.push("");
+  }
+
+  // ── Extracted Facts ──
   const extracted: string[] = (() => {
     if (Array.isArray(pkg?.researchExtracted)) return pkg.researchExtracted;
     if (Array.isArray(pkg?.extractedFacts)) return pkg.extractedFacts;
     try { return JSON.parse(pkg?.extractedFacts ?? "[]"); } catch { return []; }
   })();
   if (extracted.length > 0) {
-    parts.push("── EXTRACTED INFORMATION ──");
+    parts.push("── EXTRACTED FACTS ──");
     extracted.forEach((f: string, i: number) => parts.push(`${i + 1}. ${f}`));
     parts.push("");
   }
 
-  if (pkg?.researchTimeline) {
-    parts.push("── TIMELINE ──");
-    parts.push(pkg.researchTimeline);
-    parts.push("");
-  }
-
+  // ── Quotes ──
   const quotes: Record<string, string[]> = (() => {
     if (pkg?.researchQuotes && typeof pkg.researchQuotes === "object" && !Array.isArray(pkg.researchQuotes)) return pkg.researchQuotes;
     try { return JSON.parse(pkg?.researchQuotes ?? "{}"); } catch { return {}; }
@@ -107,25 +124,64 @@ function buildResearchCopy(story: any, pkg: any): string {
     parts.push("");
   }
 
+  // ── Timeline ──
+  if (pkg?.researchTimeline) {
+    parts.push("── TIMELINE ──");
+    parts.push(pkg.researchTimeline);
+    parts.push("");
+  }
+
+  // ── Sources ──
   const sources: Array<{ name: string; url?: string; type: string }> = (() => {
     if (Array.isArray(pkg?.researchSources)) return pkg.researchSources;
     try { return JSON.parse(pkg?.researchSources ?? "[]"); } catch { return []; }
   })();
   if (sources.length > 0) {
     parts.push("── SOURCES ──");
-    sources.forEach((s: any) => parts.push(`${s.type?.toUpperCase() ?? "SOURCE"}: ${s.name}${s.url ? " — " + s.url : ""}`));
+    sources.forEach((s: any) => parts.push(`[${s.type?.toUpperCase() ?? "SOURCE"}] ${s.name}${s.url ? " — " + s.url : ""}`));
     parts.push("");
   }
 
+  // ── Contradictions ──
   if (pkg?.researchContradictions && pkg.researchContradictions !== "None identified") {
     parts.push("── CONTRADICTIONS ──");
     parts.push(pkg.researchContradictions);
     parts.push("");
   }
 
+  // ── Missing Information ──
   if (pkg?.researchMissingInfo && pkg.researchMissingInfo !== "Not assessed") {
     parts.push("── MISSING INFORMATION ──");
     parts.push(pkg.researchMissingInfo);
+    parts.push("");
+  }
+
+  // ── Additional Context ──
+  if (pkg?.researchAdditionalContext && pkg.researchAdditionalContext !== "None identified") {
+    parts.push("── ADDITIONAL CONTEXT ──");
+    parts.push(pkg.researchAdditionalContext);
+    parts.push("");
+  }
+
+  // ── Editorial Hooks ──
+  const hooks: string[] = (() => {
+    if (Array.isArray(pkg?.researchEditorialHooks)) return pkg.researchEditorialHooks;
+    try { return JSON.parse(pkg?.researchEditorialHooks ?? "[]"); } catch { return []; }
+  })();
+  if (hooks.length > 0) {
+    parts.push("── POSSIBLE EDITORIAL HOOKS ──");
+    hooks.forEach((h: string) => parts.push(`• ${h}`));
+    parts.push("");
+  }
+
+  // ── Story Quality Check ──
+  const quality: string[] = (() => {
+    if (Array.isArray(pkg?.researchStoryQuality)) return pkg.researchStoryQuality;
+    try { return JSON.parse(pkg?.researchStoryQuality ?? "[]"); } catch { return []; }
+  })();
+  if (quality.length > 0) {
+    parts.push("── STORY QUALITY CHECK ──");
+    quality.forEach((q: string) => parts.push(q));
     parts.push("");
   }
 
@@ -1092,6 +1148,35 @@ function ApprovedCard({ story, pkg, onUnapprove, isUnapproving }: ApprovedCardPr
             </div>
           )}
 
+          {/* Key Details — structured aviation fields */}
+          {(() => {
+            const details: { label: string; value: string }[] = [];
+            if (pkg?.researchEventDate) details.push({ label: "Event Date", value: pkg.researchEventDate });
+            if (pkg?.researchPublicationDate) details.push({ label: "Published", value: pkg.researchPublicationDate });
+            if (pkg?.researchFlightNumber) details.push({ label: "Flight", value: pkg.researchFlightNumber });
+            if (pkg?.researchRoute) details.push({ label: "Route", value: pkg.researchRoute });
+            if (pkg?.researchAircraftType) details.push({ label: "Aircraft", value: pkg.researchAircraftType });
+            if (pkg?.researchPassengerCount) details.push({ label: "Passengers", value: pkg.researchPassengerCount });
+            if (pkg?.researchCrewCount) details.push({ label: "Crew", value: pkg.researchCrewCount });
+            if (pkg?.researchKeyEntities) details.push({ label: "Key Entities", value: pkg.researchKeyEntities });
+            if (details.length === 0) return null;
+            return (
+              <div className="px-4 py-3">
+                <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2 flex items-center gap-1.5">
+                  <Hash className="w-3 h-3" />Key Details
+                </p>
+                <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+                  {details.map(({ label, value }) => (
+                    <div key={label} className="flex gap-1.5 text-xs">
+                      <span className="text-muted-foreground/60 shrink-0 w-20">{label}:</span>
+                      <span className="text-foreground/85 font-medium">{value}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
+
           {/* Extracted Information & Quotes — unified collapsible box */}
           {(() => {
             const extracted: string[] = (() => {
@@ -1237,6 +1322,71 @@ function ApprovedCard({ story, pkg, onUnapprove, isUnapproving }: ApprovedCardPr
               )}
             </div>
           )}
+
+          {/* Additional Context */}
+          {pkg?.researchAdditionalContext && pkg.researchAdditionalContext !== "None identified" && (
+            <div>
+              <button className="w-full px-4 py-2.5 flex items-center justify-between text-xs font-medium text-muted-foreground hover:text-foreground transition-colors" onClick={() => toggle("additionalContext")}>
+                <span className="flex items-center gap-2"><Newspaper className="w-3.5 h-3.5" />Additional Context</span>
+                {expanded.additionalContext ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+              </button>
+              {expanded.additionalContext && (
+                <div className="px-4 pb-3">
+                  <p className="text-sm text-foreground/85 leading-relaxed whitespace-pre-wrap">{pkg.researchAdditionalContext}</p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Editorial Hooks */}
+          {(() => {
+            const hooks: string[] = (() => {
+              if (Array.isArray(pkg?.researchEditorialHooks)) return pkg.researchEditorialHooks;
+              try { return JSON.parse(pkg?.researchEditorialHooks ?? "[]"); } catch { return []; }
+            })();
+            if (hooks.length === 0) return null;
+            return (
+              <div>
+                <button className="w-full px-4 py-2.5 flex items-center justify-between text-xs font-medium text-muted-foreground hover:text-foreground transition-colors" onClick={() => toggle("editorialHooks")}>
+                  <span className="flex items-center gap-2">
+                    <Sparkles className="w-3.5 h-3.5 text-violet-400" />
+                    <span className="text-violet-400/80">Possible Editorial Hooks</span>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-violet-500/10 text-violet-400 border border-violet-500/20">{hooks.length}</span>
+                  </span>
+                  {expanded.editorialHooks ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+                </button>
+                {expanded.editorialHooks && (
+                  <div className="px-4 pb-3 space-y-1.5">
+                    {hooks.map((h: string, i: number) => (
+                      <div key={i} className="flex gap-2 text-sm text-foreground/85 leading-relaxed">
+                        <span className="text-violet-400 shrink-0 mt-0.5">•</span>
+                        <span>{h}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
+          {/* Story Quality Check */}
+          {(() => {
+            const quality: string[] = (() => {
+              if (Array.isArray(pkg?.researchStoryQuality)) return pkg.researchStoryQuality;
+              try { return JSON.parse(pkg?.researchStoryQuality ?? "[]"); } catch { return []; }
+            })();
+            if (quality.length === 0) return null;
+            return (
+              <div className="px-4 py-3">
+                <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">Story Quality Check</p>
+                <div className="space-y-1">
+                  {quality.map((q: string, i: number) => (
+                    <p key={i} className={`text-xs leading-relaxed ${q.startsWith("✅") ? "text-emerald-400" : q.startsWith("⚠") ? "text-amber-400" : "text-muted-foreground"}`}>{q}</p>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
 
           {/* Image recs — skeleton shown while image regeneration is in progress */}
           {regenImages.isPending && (

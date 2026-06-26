@@ -2147,6 +2147,21 @@ export interface ResearchPackage {
   viralAngle: string;
   /** Key entities: airlines, airports, aircraft, people */
   keyEntities: string;
+  // ── Structured aviation fields ──
+  /** Flight number (e.g. AA123, BA456) — empty string if not applicable */
+  flightNumber: string;
+  /** Route (e.g. London Heathrow to New York JFK) — empty string if not applicable */
+  route: string;
+  /** Aircraft type and registration (e.g. Boeing 737-800, reg G-ABCD) */
+  aircraftTypeDetail: string;
+  /** Number of passengers on board — empty string if not known */
+  passengerCount: string;
+  /** Number of crew on board — empty string if not known */
+  crewCount: string;
+  /** Date the event occurred (not the publication date) — empty string if not known */
+  eventDate: string;
+  /** Publication date of the primary source article — empty string if not found */
+  publicationDate: string;
 }
 
 export async function extractResearchPackage(
@@ -2223,7 +2238,14 @@ Return ONLY valid JSON with exactly these fields:
   "contradictions": "describe any disagreements between sources, or 'None identified'",
   "missingInfo": "list what remains unknown, unconfirmed, or not yet publicly disclosed",
   "viralAngle": "the single strongest angle from: death_accountability | passenger_outrage | safety_failure | money_scandal | pilot_crew_pay | historic_milestone | rare_aircraft | boeing_airbus_controversy | human_interest | corporate_failure | regulatory_conflict | nostalgia | hidden_fact",
-  "keyEntities": "comma-separated: airlines, airports, aircraft types, registrations, key people"
+  "keyEntities": "comma-separated: airlines, airports, aircraft types, registrations, key people",
+  "flightNumber": "flight number (e.g. AA123) — empty string if not applicable or not mentioned",
+  "route": "full route (e.g. London Heathrow to New York JFK) — empty string if not applicable",
+  "aircraftTypeDetail": "aircraft type and registration if known (e.g. Boeing 737-800, reg G-ABCD) — empty string if not mentioned",
+  "passengerCount": "number of passengers on board as stated in the source (e.g. 189 passengers) — empty string if not mentioned",
+  "crewCount": "number of crew on board as stated in the source (e.g. 6 crew) — empty string if not mentioned",
+  "eventDate": "date the event occurred, not the publication date (e.g. 14 June 2025) — empty string if not known",
+  "publicationDate": "publication date of the primary source article (e.g. 15 June 2025) — empty string if not found"
 }`,
       },
       {
@@ -2293,6 +2315,13 @@ Return ONLY valid JSON with exactly these fields:
     sourceConfirmation,
     viralAngle: parsed?.viralAngle ?? "aviation_incident",
     keyEntities: parsed?.keyEntities ?? "",
+    flightNumber: parsed?.flightNumber ?? "",
+    route: parsed?.route ?? "",
+    aircraftTypeDetail: parsed?.aircraftTypeDetail ?? "",
+    passengerCount: parsed?.passengerCount ?? "",
+    crewCount: parsed?.crewCount ?? "",
+    eventDate: parsed?.eventDate ?? "",
+    publicationDate: parsed?.publicationDate ?? "",
   };
 
   console.log(`[Soyunci] Research package complete \u2014 ${result.extractedInfo.length} facts, ${sourcesResearched} sources, angle: ${result.viralAngle}`);
