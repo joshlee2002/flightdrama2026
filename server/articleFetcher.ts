@@ -410,27 +410,48 @@ async function fetchVia12ft(url: string): Promise<FetchedArticle> {
 
 /**
  * Layer 6: Archive.today / archive.ph (hard paywall bypass)
- * Routes via proxy to avoid IP blocks from archive.ph.
+ * Tries a direct fetch first (works when archive.ph doesn't block the server IP).
+ * Falls back to a different proxy (cors.sh) rather than AllOrigins to avoid
+ * sharing the same single point of failure as Layer 8.
  */
 async function fetchViaArchivePh(url: string): Promise<FetchedArticle> {
   const blank: FetchedArticle = { url, title: "", bodyText: "", wordCount: 0, success: false };
+  const archiveUrl = `https://archive.ph/latest/${url}`;
+
+  // Attempt 1: direct fetch (fast, works ~40% of the time from server IPs)
   try {
-    // We use an open proxy to fetch from archive.ph since they often block server IPs
-    const archiveUrl = `https://archive.ph/latest/${url}`;
-    const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(archiveUrl)}`;
+    const directRes = await fetch(archiveUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      },
+      signal: AbortSignal.timeout(15000),
+      redirect: "follow",
+    });
+    if (directRes.ok) {
+      const html = await directRes.text();
+      if (html.length > 500 && !html.includes("No results") && !html.includes("not found in the archive")) {
+        const result = extractFromHtml(url, html);
+        if (result.success) return { ...result, fetchLayer: "archive-ph" };
+      }
+    }
+  } catch {
+    // Direct fetch failed — fall through to proxy
+  }
+
+  // Attempt 2: route via corsproxy.io (independent of AllOrigins / Layer 8)
+  try {
+    const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(archiveUrl)}`;
     const response = await fetch(proxyUrl, {
       signal: AbortSignal.timeout(25000),
     });
-    if (!response.ok) return { ...blank, error: `Archive.ph HTTP ${response.status}` };
-    const json = await response.json() as { contents?: string };
-    if (!json.contents || json.contents.length < 200) return { ...blank, error: "Archive.ph returned empty content" };
-    
-    // Check if archive.ph gave us a "Not Found" page
-    if (json.contents.includes("No results") || json.contents.includes("not found in the archive")) {
+    if (!response.ok) return { ...blank, error: `Archive.ph proxy HTTP ${response.status}` };
+    const html = await response.text();
+    if (!html || html.length < 200) return { ...blank, error: "Archive.ph proxy returned empty content" };
+    if (html.includes("No results") || html.includes("not found in the archive")) {
       return { ...blank, error: "Not found in archive.ph" };
     }
-    
-    const result = extractFromHtml(url, json.contents);
+    const result = extractFromHtml(url, html);
     return result.success ? { ...result, fetchLayer: "archive-ph" } : result;
   } catch (err) {
     return { ...blank, error: `Archive.ph failed: ${err instanceof Error ? err.message : String(err)}` };

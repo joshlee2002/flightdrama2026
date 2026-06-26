@@ -960,9 +960,12 @@ function ApprovedCard({ story, pkg, onUnapprove, isUnapproving }: ApprovedCardPr
   });
 
   const reResearch = trpc.stories.reResearch.useMutation({
-    onSuccess: (data) => {
-      toast.success(`Re-research complete — ${data.sourcesResearched} source${data.sourcesResearched !== 1 ? 's' : ''} fetched`);
-      utils.stories.list.invalidate();
+    onSuccess: () => {
+      toast.success("Re-research started — package will update in 30–90 seconds");
+      // Poll for completion at 5s, 30s, and 60s after triggering
+      setTimeout(() => utils.stories.list.invalidate(), 5000);
+      setTimeout(() => utils.stories.list.invalidate(), 30000);
+      setTimeout(() => utils.stories.list.invalidate(), 60000);
     },
     onError: (e) => toast.error(`Re-research failed: ${e.message}`),
   });

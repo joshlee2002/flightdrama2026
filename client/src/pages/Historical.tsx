@@ -6,7 +6,7 @@ import {
   Plus, Loader2, TrendingUp, Eye, Heart, MessageCircle, Share2,
   DollarSign, Users, Brain, RefreshCw, ChevronDown, ChevronUp,
   Zap, Target, PenLine, Lightbulb, Upload, CheckCircle2, X, Instagram,
-  ChevronRight, Clock, ArrowLeft
+  ChevronRight, Clock, ArrowLeft, Download
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
