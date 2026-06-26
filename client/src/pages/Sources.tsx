@@ -1,11 +1,13 @@
 import FlightLayout from "@/components/FlightLayout";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
-import { Rss, Loader2, RefreshCw, DatabaseZap, Sparkles, Clock, BarChart2, Zap } from "lucide-react";
+import { Rss, Loader2, RefreshCw, DatabaseZap, Sparkles, Clock, BarChart2, Zap, Filter } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
+import { useState } from "react";
 
 const categoryLabel: Record<string, string> = {
   aviation: "Aviation",
@@ -64,6 +66,18 @@ function formatExpiryDate(date: Date | string | null | undefined): string {
 export default function Sources() {
   const { data: sources, isLoading, refetch } = trpc.rssSources.list.useQuery();
   const utils = trpc.useUtils();
+  // Track which source's threshold input is being edited
+  const [editingThreshold, setEditingThreshold] = useState<Record<number, string>>({});
+
+  const updateThreshold = trpc.rssSources.updateThreshold.useMutation({
+    onSuccess: (_, vars) => {
+      toast.success(`Score gate updated to ${vars.scoreThreshold}`);
+      utils.rssSources.list.invalidate();
+    },
+    onError: (err) => {
+      toast.error(`Failed to update threshold: ${err.message}`);
+    },
+  });
 
   const toggle = trpc.rssSources.toggle.useMutation({
     onSuccess: () => {
@@ -230,7 +244,7 @@ export default function Sources() {
                                   isExpired && "opacity-60"
                                 )}
                               >
-                                <Rss className={cn("w-4 h-4 shrink-0 mt-0.5", feed.isActive ? "text-violet-400" : "text-muted-foreground")} />
+                                    <Rss className={cn("w-4 h-4 shrink-0 mt-0.5", feed.isActive ? "text-violet-400" : "text-muted-foreground")} />
                                 <div className="flex-1 min-w-0">
                                   {/* Feed name — strip the [AI Core] prefix for cleaner display */}
                                   <p className={cn("text-sm font-medium", feed.isActive ? "text-foreground" : "text-muted-foreground")}>
@@ -260,6 +274,27 @@ export default function Sources() {
                                         Expires {formatExpiryDate(feed.expiresAt)}
                                       </span>
                                     )}
+                                    {/* Score gate threshold */}
+                                    <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                                      <Filter className="w-3 h-3" />
+                                      Gate:
+                                      <Input
+                                        type="number"
+                                        min={0}
+                                        max={100}
+                                        className="w-14 h-5 text-xs px-1 py-0 ml-0.5"
+                                        value={editingThreshold[feed.id] ?? String(feed.scoreThreshold ?? 0)}
+                                        onChange={(e) => setEditingThreshold(prev => ({ ...prev, [feed.id]: e.target.value }))}
+                                        onBlur={() => {
+                                          const val = parseInt(editingThreshold[feed.id] ?? "", 10);
+                                          if (!isNaN(val) && val >= 0 && val <= 100 && val !== (feed.scoreThreshold ?? 0)) {
+                                            updateThreshold.mutate({ id: feed.id, scoreThreshold: val });
+                                          }
+                                          setEditingThreshold(prev => { const n = { ...prev }; delete n[feed.id]; return n; });
+                                        }}
+                                        onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+                                      />
+                                    </span>
                                   </div>
                                 </div>
                                 <Switch
@@ -324,11 +359,35 @@ export default function Sources() {
                               {source?.name}
                             </p>
                             <p className="text-xs text-muted-foreground truncate">{source?.url}</p>
-                            {source?.lastFetchedAt && (
-                              <p className="text-xs text-muted-foreground mt-0.5">
-                                Last fetched: {new Date(source.lastFetchedAt!).toLocaleString()}
-                              </p>
-                            )}
+                            <div className="flex items-center gap-3 mt-1 flex-wrap">
+                              {source?.lastFetchedAt && (
+                                <span className="text-xs text-muted-foreground">
+                                  Last fetched: {new Date(source.lastFetchedAt!).toLocaleString()}
+                                </span>
+                              )}
+                              {/* Score gate threshold */}
+                              <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                                <Filter className="w-3 h-3" />
+                                Gate:
+                                <Input
+                                  type="number"
+                                  min={0}
+                                  max={100}
+                                  className="w-14 h-5 text-xs px-1 py-0 ml-0.5"
+                                  value={editingThreshold[source?.id] ?? String(source?.scoreThreshold ?? 0)}
+                                  onChange={(e) => source?.id && setEditingThreshold(prev => ({ ...prev, [source.id]: e.target.value }))}
+                                  onBlur={() => {
+                                    if (!source?.id) return;
+                                    const val = parseInt(editingThreshold[source.id] ?? "", 10);
+                                    if (!isNaN(val) && val >= 0 && val <= 100 && val !== (source.scoreThreshold ?? 0)) {
+                                      updateThreshold.mutate({ id: source.id, scoreThreshold: val });
+                                    }
+                                    setEditingThreshold(prev => { const n = { ...prev }; delete n[source.id]; return n; });
+                                  }}
+                                  onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+                                />
+                              </span>
+                            </div>
                           </div>
                           <Switch
                             checked={source?.isActive ?? false}

@@ -100,7 +100,8 @@ Score from 0–100 where:
   "score": <integer 0-100>,
   "statusLabel": "<must_post|strong_candidate|maybe|reject>",
   "category": "<category string>",
-  "viralReason": "<one sentence explanation>",
+  "viralReason": "<one sentence explanation of the score>",
+  "viralExplanation": "<two to three sentences explaining WHY this would or would not go viral — what emotional hook, what audience reaction, what makes it shareable or not>",
   "triggers": ["<trigger 1>", "<trigger 2>"]
 }`;
 
@@ -265,11 +266,10 @@ export async function batchScoreStoriesWithLLM(
   const { systemPrompt } = await buildScoringContext();
 
   // Modify system prompt for batch output
-  const batchSystemPrompt = systemPrompt.replace(
+    const batchSystemPrompt = systemPrompt.replace(
     /Respond ONLY with a valid JSON object[\s\S]*/,
     `Respond ONLY with a valid JSON array of ${stories.length} objects, one per story, in the same order as the input. Each object must have:
-{ "score": <integer 0-100>, "statusLabel": "<must_post|strong_candidate|maybe|reject>", "category": "<category>", "viralReason": "<one sentence>", "triggers": ["<trigger 1>", "<trigger 2>"] }
-
+{ "score": <integer 0-100>, "statusLabel": "<must_post|strong_candidate|maybe|reject>", "category": "<category>", "viralReason": "<one sentence>", "viralExplanation": "<two to three sentences on why it would or would not go viral>", "triggers": ["<trigger 1>", "<trigger 2>"] }
 Return ONLY the JSON array. No other text.`
   );
 
@@ -352,7 +352,7 @@ Return ONLY the JSON array. No other text.`
         category: llmCategory,
         viralReason: p.viralReason ?? s.ruleScore.viralReason,
         triggers: Array.isArray(p.triggers) ? p.triggers : s.ruleScore.triggers,
-        viralExplanation: s.ruleScore.viralExplanation,
+        viralExplanation: (p as any).viralExplanation ?? s.ruleScore.viralExplanation,
         scoringMethod: "llm_assisted",
       });
     }
@@ -563,11 +563,11 @@ export async function learnFromOverrides(): Promise<{ success: boolean; summary:
   const previousInsights = config["learned_editor_insights"] ?? null;
   const lastLearnedAt = config["last_learned_at"] ?? null;
 
-  // Only fetch overrides that are NEW since the last learning run (if we have previous rules)
-  // On first run, fetch all overrides. On subsequent runs, only fetch new ones.
-  const newExamples = lastLearnedAt && previousRules
-    ? await getOverrideExamplesFromDb()  // We'll filter by date below
-    : await getOverrideExamplesFromDb();
+  // On first run: fetch all overrides.
+  // On subsequent runs: only fetch overrides that are NEW since the last learning run.
+  // This keeps the prompt focused and avoids re-analysing the same examples every day.
+  const sinceDate = lastLearnedAt && previousRules ? new Date(lastLearnedAt) : undefined;
+  const newExamples = await getOverrideExamplesFromDb(undefined, sinceDate);
 
   if (newExamples.length < 3 && !previousRules) {
     return {
@@ -577,14 +577,17 @@ export async function learnFromOverrides(): Promise<{ success: boolean; summary:
     };
   }
 
-  // Filter to only overrides since the last learning run (if we have previous rules)
-  const filteredExamples = lastLearnedAt && previousRules
-    ? newExamples.filter(e => {
-        // We don't have updatedAt in the select, so use all examples but cap at 30 new ones
-        // to keep the prompt focused on what's changed
-        return true;
-      }).slice(0, 30)  // Only the 30 most recent overrides as "new" context
-    : newExamples;
+  // If this is a subsequent run and there are no new overrides since last time, skip the LLM call
+  if (sinceDate && newExamples.length === 0) {
+    console.log("[LLMScoring] No new overrides since last learning run — skipping LLM call");
+    return {
+      success: true,
+      summary: "No new overrides since last learning run — existing rules unchanged.",
+      examplesUsed: 0,
+    };
+  }
+
+  const filteredExamples = newExamples;
 
   // Also pull Instagram performance data to ground the learning in reality
   const { getHistoricalPosts } = await import("./db");

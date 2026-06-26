@@ -536,10 +536,18 @@ export async function getAllScoringConfig(): Promise<Record<string, string>> {
 }
 
 // Fetch stories where the editor applied a manual override — used as few-shot examples
-export async function getOverrideExamplesFromDb(limit?: number) {
+export async function getOverrideExamplesFromDb(limit?: number, since?: Date) {
   const db = await getDb();
   if (!db) return [];
-  
+
+  const conditions: any[] = [
+    sql`${stories.overrideScore} IS NOT NULL`,
+    sql`${stories.overrideLabel} IS NOT NULL`,
+  ];
+  if (since) {
+    conditions.push(gte(stories.updatedAt, since));
+  }
+
   let query = db
     .select({
       id: stories.id,
@@ -551,11 +559,12 @@ export async function getOverrideExamplesFromDb(limit?: number) {
       category: stories.category,
       viralReason: stories.viralReason,
       viralTriggers: stories.viralTriggers,
+      updatedAt: stories.updatedAt,
     })
     .from(stories)
-    .where(and(sql`${stories.overrideScore} IS NOT NULL`, sql`${stories.overrideLabel} IS NOT NULL`))
+    .where(and(...conditions))
     .orderBy(desc(stories.updatedAt));
-    
+
   if (limit) {
     return query.limit(limit);
   }

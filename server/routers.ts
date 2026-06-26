@@ -109,6 +109,21 @@ export const appRouter = router({
     }),
 
     /**
+     * Update the score gate threshold for a single RSS source.
+     * Stories scoring below this threshold are silently dropped at ingestion.
+     * Default is 40. Set to 0 to let all stories through.
+     */
+    updateThreshold: protectedProcedure
+      .input(z.object({ id: z.number(), scoreThreshold: z.number().min(0).max(100) }))
+      .mutation(async ({ input }) => {
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        const { rssSources: rssSourcesTable } = await import("../drizzle/schema");
+        await db.update(rssSourcesTable).set({ scoreThreshold: input.scoreThreshold }).where(eq(rssSourcesTable.id, input.id));
+        return { success: true };
+      }),
+
+    /**
      * Regenerate AI keyword feeds based on rated story patterns.
      * Analyses amazing/good-rated articles and generates targeted Google News
      * RSS search URLs, organised into Core/Explore/Test tiers.

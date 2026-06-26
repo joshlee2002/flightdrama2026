@@ -218,13 +218,62 @@ export async function syncInstagramPosts(limit = 50): Promise<SyncResult> {
 }
 
 /**
- * Check whether the Instagram token is configured and valid.
- * Returns the connected account username on success.
+ * Check whether the Instagram token is configured, valid, and has the required permissions.
+ * Returns the connected account username, granted permissions, and token expiry on success.
  */
-export async function verifyInstagramToken(): Promise<{ ok: boolean; username?: string; error?: string }> {
+export async function verifyInstagramToken(): Promise<{
+  ok: boolean;
+  username?: string;
+  error?: string;
+  permissions?: string[];
+  missingPermissions?: string[];
+  tokenExpiresAt?: string | null;
+}> {
+  const REQUIRED_PERMISSIONS = [
+    "instagram_basic",
+    "instagram_manage_insights",
+    "pages_read_engagement",
+  ];
+
   try {
+    // 1. Verify token is valid and get username
     const data = await graphGet<{ id: string; username: string }>("/me", { fields: "id,username" });
-    return { ok: true, username: data.username };
+
+    // 2. Check granted permissions and token expiry via the token debug endpoint
+    const token = ENV.instagramAccessToken;
+    let grantedPermissions: string[] = [];
+    let tokenExpiresAt: string | null = null;
+    try {
+      const debugUrl = `https://graph.facebook.com/debug_token?input_token=${token}&access_token=${token}`;
+      const debugRes = await fetch(debugUrl);
+      if (debugRes.ok) {
+        const debugData = await debugRes.json() as {
+          data?: { scopes?: string[]; expires_at?: number; is_valid?: boolean };
+        };
+        grantedPermissions = debugData?.data?.scopes ?? [];
+        if (debugData?.data?.expires_at) {
+          tokenExpiresAt = new Date(debugData.data.expires_at * 1000).toISOString();
+        }
+      }
+    } catch {
+      // Permission check failed — token is valid but we can't verify scopes.
+      // Non-fatal: sync will fail with a clear API error if permissions are missing.
+    }
+
+    const missingPermissions = grantedPermissions.length > 0
+      ? REQUIRED_PERMISSIONS.filter(p => !grantedPermissions.includes(p))
+      : []; // If debug endpoint unavailable, assume permissions are OK
+
+    return {
+      ok: missingPermissions.length === 0,
+      username: data.username,
+      permissions: grantedPermissions.length > 0 ? grantedPermissions : undefined,
+      missingPermissions: missingPermissions.length > 0 ? missingPermissions : undefined,
+      tokenExpiresAt,
+      error: missingPermissions.length > 0
+        ? `Token is missing required permissions: ${missingPermissions.join(", ")}. Re-authorise the Instagram connection in Settings.`
+        : undefined,
+    };
   } catch (err) {
     return { ok: false, error: String(err) };
   }
