@@ -367,12 +367,18 @@ export async function updateStoryPackage(
 ) {
   const db = await getDb();
   if (!db) return;
-  // Upsert: create the package row if it doesn't exist yet, then update
-  // This prevents silent failures when approve fires before a package row exists
+  // Step 1: ensure the row exists (minimal insert, safe for any schema)
   await db
     .insert(storyPackages)
-    .values({ storyId, processingStatus: "queued", ...data })
-    .onDuplicateKeyUpdate({ set: { ...data, updatedAt: new Date() } });
+    .values({ storyId, processingStatus: "queued" })
+    .onDuplicateKeyUpdate({ set: { storyId } }) // no-op on conflict, just ensures row exists
+    .catch(() => {}); // ignore if row already exists with different constraint
+  // Step 2: update the row with the actual data
+  const { id: _id, storyId: _sid, createdAt: _ca, ...safeData } = data as any;
+  await db
+    .update(storyPackages)
+    .set({ ...safeData, updatedAt: new Date() })
+    .where(eq(storyPackages.storyId, storyId));
 }
 
 export async function getPackageByStoryId(storyId: number) {
