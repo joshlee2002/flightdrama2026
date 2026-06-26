@@ -502,6 +502,13 @@ function StoryCard({
           return parts.join("\n").trim();
         };
 
+        const quotes: Record<string, string[]> = (() => {
+          if (pkg?.researchQuotes && typeof pkg.researchQuotes === "object" && !Array.isArray(pkg.researchQuotes)) return pkg.researchQuotes as Record<string, string[]>;
+          try { return JSON.parse(pkg?.researchQuotes ?? "{}") as Record<string, string[]>; } catch { return {}; }
+        })();
+        const quoteEntries = Object.entries(quotes).filter(([, arr]) => Array.isArray(arr) && (arr as string[]).length > 0);
+        const totalQuotes = quoteEntries.reduce((sum, [, arr]) => sum + (arr as string[]).length, 0);
+
         return (
           <div className="border-t border-border/50">
             <div className="px-4 py-2.5 flex items-center justify-between gap-2">
@@ -510,6 +517,9 @@ function StoryCard({
                 <span className="text-xs font-medium text-muted-foreground">Research Package</span>
                 {extracted.length > 0 && (
                   <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary/80 border border-primary/15">{extracted.length} facts</span>
+                )}
+                {totalQuotes > 0 && (
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20">{totalQuotes} quotes</span>
                 )}
                 {pkg?.sourcesResearched != null && pkg.sourcesResearched > 0 && (
                   <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-400 border border-sky-500/20">{pkg.sourcesResearched} sources</span>
@@ -525,24 +535,42 @@ function StoryCard({
                 <Copy className="w-3 h-3" />Copy Research
               </Button>
             </div>
-            {pkg?.storySummary && (
-              <div className="px-4 pb-3">
-                <p className="text-xs text-foreground/80 leading-relaxed">{pkg.storySummary}</p>
-              </div>
-            )}
-            {extracted.length > 0 && (
-              <div className="px-4 pb-3">
-                <ul className="space-y-0.5">
-                  {extracted.slice(0, 5).map((fact: string, i: number) => (
-                    <li key={i} className="flex gap-2 text-xs text-foreground/75 leading-relaxed">
-                      <span className="text-muted-foreground shrink-0 tabular-nums w-4">{i + 1}.</span>
-                      <span>{fact}</span>
-                    </li>
-                  ))}
-                  {extracted.length > 5 && (
-                    <li className="text-xs text-muted-foreground pl-6 italic">+{extracted.length - 5} more facts — approve to see full package</li>
-                  )}
-                </ul>
+            {/* Single unified box: summary + extracted facts + quotes */}
+            {(pkg?.storySummary || extracted.length > 0 || quoteEntries.length > 0) && (
+              <div className="mx-4 mb-3 rounded-md border border-border/40 bg-muted/20 px-3 py-2.5 space-y-2.5">
+                {pkg?.storySummary && (
+                  <p className="text-xs text-foreground/80 leading-relaxed">{pkg.storySummary}</p>
+                )}
+                {(extracted.length > 0 || quoteEntries.length > 0) && pkg?.storySummary && (
+                  <div className="border-t border-border/30" />
+                )}
+                {extracted.length > 0 && (
+                  <ul className="space-y-0.5">
+                    {extracted.map((fact: string, i: number) => (
+                      <li key={i} className="flex gap-2 text-xs text-foreground/75 leading-relaxed">
+                        <span className="text-muted-foreground shrink-0 tabular-nums w-4">{i + 1}.</span>
+                        <span>{fact}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {quoteEntries.length > 0 && extracted.length > 0 && (
+                  <div className="border-t border-border/30" />
+                )}
+                {quoteEntries.length > 0 && (
+                  <div className="space-y-1.5">
+                    {quoteEntries.map(([source, qs]) => (
+                      <div key={source}>
+                        <span className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{source}</span>
+                        <ul className="mt-0.5 space-y-0.5">
+                          {(qs as string[]).map((q: string, qi: number) => (
+                            <li key={qi} className="text-xs text-foreground/75 leading-relaxed pl-2 border-l-2 border-amber-500/40 italic">"{q}"</li>
+                          ))}
+                        </ul>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
           </div>

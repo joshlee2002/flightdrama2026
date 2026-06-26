@@ -1092,33 +1092,61 @@ function ApprovedCard({ story, pkg, onUnapprove, isUnapproving }: ApprovedCardPr
             </div>
           )}
 
-          {/* Extracted Information */}
+          {/* Extracted Information & Quotes — unified collapsible box */}
           {(() => {
             const extracted: string[] = (() => {
               if (Array.isArray(pkg?.researchExtracted)) return pkg.researchExtracted;
               if (Array.isArray(pkg?.extractedFacts)) return pkg.extractedFacts;
               try { return JSON.parse(pkg?.extractedFacts ?? "[]"); } catch { return []; }
             })();
-            if (extracted.length === 0) return null;
+            const quotes: Record<string, string[]> = (() => {
+              if (pkg?.researchQuotes && typeof pkg.researchQuotes === "object" && !Array.isArray(pkg.researchQuotes)) return pkg.researchQuotes as Record<string, string[]>;
+              try { return JSON.parse(pkg?.researchQuotes ?? "{}") as Record<string, string[]>; } catch { return {}; }
+            })();
+            const quoteEntries = Object.entries(quotes).filter(([, arr]) => Array.isArray(arr) && (arr as string[]).length > 0);
+            const totalQuotes = quoteEntries.reduce((n, [, arr]) => n + (arr as string[]).length, 0);
+            if (extracted.length === 0 && quoteEntries.length === 0) return null;
             return (
               <div>
                 <button className="w-full px-4 py-2.5 flex items-center justify-between text-xs font-medium text-muted-foreground hover:text-foreground transition-colors" onClick={() => toggle("extracted")}>
                   <span className="flex items-center gap-2">
-                    <FileText className="w-3.5 h-3.5" />Extracted Information
-                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary/80 border border-primary/15">{extracted.length} facts</span>
+                    <FileText className="w-3.5 h-3.5" />Extracted Info &amp; Quotes
+                    {extracted.length > 0 && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary/80 border border-primary/15">{extracted.length} facts</span>
+                    )}
+                    {totalQuotes > 0 && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20">{totalQuotes} quote{totalQuotes !== 1 ? "s" : ""}</span>
+                    )}
                   </span>
                   {expanded.extracted ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
                 </button>
                 {expanded.extracted && (
-                  <div className="px-4 pb-3">
-                    <ol className="space-y-1">
-                      {extracted.map((fact: string, i: number) => (
-                        <li key={i} className="flex gap-2 text-sm text-foreground/85 leading-relaxed">
-                          <span className="text-muted-foreground shrink-0 tabular-nums text-xs mt-0.5 w-5">{i + 1}.</span>
-                          <span>{fact}</span>
-                        </li>
-                      ))}
-                    </ol>
+                  <div className="px-4 pb-3 space-y-3">
+                    {extracted.length > 0 && (
+                      <ol className="space-y-1">
+                        {extracted.map((fact: string, i: number) => (
+                          <li key={i} className="flex gap-2 text-sm text-foreground/85 leading-relaxed">
+                            <span className="text-muted-foreground shrink-0 tabular-nums text-xs mt-0.5 w-5">{i + 1}.</span>
+                            <span>{fact}</span>
+                          </li>
+                        ))}
+                      </ol>
+                    )}
+                    {extracted.length > 0 && quoteEntries.length > 0 && (
+                      <div className="border-t border-border/30" />
+                    )}
+                    {quoteEntries.length > 0 && (
+                      <div className="space-y-3">
+                        {quoteEntries.map(([source, qs]) => (
+                          <div key={source}>
+                            <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-1">{source}</p>
+                            {(qs as string[]).map((q: string, i: number) => (
+                              <blockquote key={i} className="border-l-2 border-amber-500/40 pl-3 py-0.5 text-sm text-foreground/80 italic leading-relaxed mb-1">"{q}"</blockquote>
+                            ))}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -1139,40 +1167,6 @@ function ApprovedCard({ story, pkg, onUnapprove, isUnapproving }: ApprovedCardPr
               )}
             </div>
           )}
-
-          {/* Quotes */}
-          {(() => {
-            const quotes: Record<string, string[]> = (() => {
-              if (pkg?.researchQuotes && typeof pkg.researchQuotes === "object" && !Array.isArray(pkg.researchQuotes)) return pkg.researchQuotes;
-              try { return JSON.parse(pkg?.researchQuotes ?? "{}"); } catch { return {}; }
-            })();
-            const quoteEntries = Object.entries(quotes).filter(([, arr]) => Array.isArray(arr) && (arr as string[]).length > 0);
-            if (quoteEntries.length === 0) return null;
-            const totalQuotes = quoteEntries.reduce((n, [, arr]) => n + (arr as string[]).length, 0);
-            return (
-              <div>
-                <button className="w-full px-4 py-2.5 flex items-center justify-between text-xs font-medium text-muted-foreground hover:text-foreground transition-colors" onClick={() => toggle("quotes")}>
-                  <span className="flex items-center gap-2">
-                    <Newspaper className="w-3.5 h-3.5" />Quotes
-                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20">{totalQuotes} quote{totalQuotes !== 1 ? "s" : ""}</span>
-                  </span>
-                  {expanded.quotes ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
-                </button>
-                {expanded.quotes && (
-                  <div className="px-4 pb-3 space-y-3">
-                    {quoteEntries.map(([source, qs]) => (
-                      <div key={source}>
-                        <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-1">{source}</p>
-                        {(qs as string[]).map((q: string, i: number) => (
-                          <blockquote key={i} className="border-l-2 border-primary/30 pl-3 py-0.5 text-sm text-foreground/80 italic leading-relaxed mb-1">"{q}"</blockquote>
-                        ))}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-          })()}
 
           {/* Sources */}
           {(() => {
