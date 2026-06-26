@@ -229,7 +229,7 @@ export async function getStoriesWithPackages(filters?: {
     .from(stories)
     .where(conditions.length > 0 ? and(...conditions) : undefined)
     .orderBy(...orderClauses)
-    .limit(filters?.limit || 100);
+    .limit(filters?.limit || 500);
 
   if (storyRows.length === 0) return [];
 

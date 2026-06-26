@@ -764,12 +764,41 @@ export default function Dashboard() {
   };
 
   const stories = data || [];
+
+  // Use override label when set, otherwise statusLabel
+  const effectiveLabel = (s: any) => s.overrideLabel || s.statusLabel;
+
   const counts = {
-    must_post: stories.filter((s) => s.story.statusLabel === "must_post").length,
-    strong_candidate: stories.filter((s) => s.story.statusLabel === "strong_candidate").length,
-    maybe: stories.filter((s) => s.story.statusLabel === "maybe").length,
-    reject: stories.filter((s) => s.story.statusLabel === "reject").length,
+    must_post: stories.filter((s) => effectiveLabel(s.story) === "must_post").length,
+    strong_candidate: stories.filter((s) => effectiveLabel(s.story) === "strong_candidate").length,
+    maybe: stories.filter((s) => effectiveLabel(s.story) === "maybe").length,
+    reject: stories.filter((s) => effectiveLabel(s.story) === "reject").length,
   };
+
+  // Group stories into sections by effective label
+  const grouped = {
+    must_post: stories.filter((s) => effectiveLabel(s.story) === "must_post"),
+    strong_candidate: stories.filter((s) => effectiveLabel(s.story) === "strong_candidate"),
+    maybe: stories.filter((s) => effectiveLabel(s.story) === "maybe"),
+    reject: stories.filter((s) => effectiveLabel(s.story) === "reject"),
+  };
+
+  // Collapsible section state — top two open by default, bottom two collapsed
+  const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>({
+    must_post: false,
+    strong_candidate: false,
+    maybe: true,
+    reject: true,
+  });
+  const toggleSection = (key: string) =>
+    setCollapsedSections((prev) => ({ ...prev, [key]: !prev[key] }));
+
+  const SECTION_CONFIG = [
+    { key: "must_post",        label: "Must Post",        color: "text-emerald-400", border: "border-emerald-500/30", bg: "bg-emerald-500/5" },
+    { key: "strong_candidate", label: "Strong Candidate", color: "text-blue-400",    border: "border-blue-500/30",    bg: "bg-blue-500/5" },
+    { key: "maybe",            label: "Maybe",            color: "text-amber-400",   border: "border-amber-500/30",   bg: "bg-amber-500/5" },
+    { key: "reject",           label: "Reject",           color: "text-red-400",     border: "border-red-500/30",     bg: "bg-red-500/5" },
+  ];
 
   return (
     <FlightLayout>
@@ -931,7 +960,7 @@ export default function Dashboard() {
           </div>
         )}
 
-        {/* Story cards */}
+        {/* Story cards — grouped by section */}
         {isLoading ? (
           <div className="flex items-center justify-center py-24">
             <Loader2 className="w-8 h-8 animate-spin text-primary" />
@@ -947,22 +976,52 @@ export default function Dashboard() {
             </p>
           </div>
         ) : (
-          <div className="space-y-3">
-            {stories.map(({ story, package: pkg }, index) => (
-              <StoryCard
-                key={story.id}
-                rank={index + 1}
-                story={story}
-                pkg={pkg}
-                isProcessing={processingIds.has(story.id)}
-                isSavingOverride={overridingIds.has(story.id)}
-                onApprove={(variant) => approve.mutate({ id: story.id, usedHeadlineVariant: variant })}
-                onReject={() => reject.mutate({ id: story.id })}
-                onDismiss={() => dismiss.mutate({ id: story.id })}
-                onProcess={() => handleProcess(story.id)}
-                onOverrideScore={(score, label) => handleOverrideScore(story.id, score, label)}
-              />
-            ))}
+          <div className="space-y-6">
+            {SECTION_CONFIG.map(({ key, label, color, border, bg }) => {
+              const sectionStories = grouped[key as keyof typeof grouped];
+              if (sectionStories.length === 0) return null;
+              const isCollapsed = collapsedSections[key];
+              // Running rank offset so rank numbers are global across sections
+              const rankOffset = SECTION_CONFIG.slice(0, SECTION_CONFIG.findIndex(s => s.key === key))
+                .reduce((acc, s) => acc + grouped[s.key as keyof typeof grouped].length, 0);
+              return (
+                <div key={key} className={cn("rounded-xl border overflow-hidden", border, bg)}>
+                  {/* Section header */}
+                  <button
+                    className="w-full flex items-center justify-between px-4 py-3 hover:bg-white/5 transition-colors"
+                    onClick={() => toggleSection(key)}
+                  >
+                    <div className="flex items-center gap-3">
+                      <span className={cn("text-sm font-semibold", color)}>{label}</span>
+                      <span className={cn("text-xs px-2 py-0.5 rounded-full font-medium border", border, color)}>
+                        {sectionStories.length} {sectionStories.length === 1 ? "story" : "stories"}
+                      </span>
+                    </div>
+                    <ChevronRight className={cn("w-4 h-4 text-muted-foreground transition-transform", !isCollapsed && "rotate-90")} />
+                  </button>
+                  {/* Section stories */}
+                  {!isCollapsed && (
+                    <div className="space-y-3 px-3 pb-3">
+                      {sectionStories.map(({ story, package: pkg }, index) => (
+                        <StoryCard
+                          key={story.id}
+                          rank={rankOffset + index + 1}
+                          story={story}
+                          pkg={pkg}
+                          isProcessing={processingIds.has(story.id)}
+                          isSavingOverride={overridingIds.has(story.id)}
+                          onApprove={(variant) => approve.mutate({ id: story.id, usedHeadlineVariant: variant })}
+                          onReject={() => reject.mutate({ id: story.id })}
+                          onDismiss={() => dismiss.mutate({ id: story.id })}
+                          onProcess={() => handleProcess(story.id)}
+                          onOverrideScore={(score, label) => handleOverrideScore(story.id, score, label)}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
