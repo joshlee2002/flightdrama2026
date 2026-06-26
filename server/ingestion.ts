@@ -122,46 +122,84 @@ export const DEFAULT_RSS_SOURCES = [
 // Strict keywords for viral/mainstream sources — title must contain one of these.
 // Only unambiguous aviation-specific terms. No short abbreviations that appear in other contexts.
 const VIRAL_SOURCE_AVIATION_KEYWORDS = [
-  // Core aviation terms (unambiguous)
+  // Core aviation terms
   "flight", "airline", "airlines", "airport", "airports", "aircraft", "plane", "planes",
-  "pilot", "pilots", "aviation", "aviator",
-  // Manufacturers & models (all unambiguous)
-  "boeing", "airbus", "embraer", "bombardier", "cessna", "gulfstream", "dassault",
-  "a380", "a350", "a330", "a320", "a321", "a319", "a318", "a220",
-  "747", "737", "777", "787", "767", "757", "727", "717",
-  "dreamliner", "concorde", "supersonic jet",
-  // Infrastructure (unambiguous in title context)
-  "runway", "taxiway", "tarmac", "hangar",
-  "cockpit", "flight attendant", "air hostess", "stewardess",
-  "air traffic control", "air traffic controller",
-  // Regulators
-  "faa ", "ntsb", "easa", "icao", "iata",
-  // Incidents (specific phrases only)
-  "plane crash", "aircraft crash", "mid-air collision", "runway collision",
+  "pilot", "pilots", "co-pilot", "copilot", "aviation", "aviator", "airfare", "airfares",
+  "fly ", "flying ", "flew ", "flyer", "frequent flyer",
+  // Manufacturers & models
+  "boeing", "airbus", "embraer", "bombardier", "cessna", "gulfstream", "dassault", "saab",
+  "lockheed", "mcdonnell douglas", "de havilland", "atr ", "fokker",
+  "a380", "a350", "a330", "a320", "a321", "a319", "a318", "a220", "a310", "a300",
+  "747", "737", "777", "787", "767", "757", "727", "717", "707",
+  "dreamliner", "concorde", "supersonic jet", "max 8", "max 9", "737 max",
+  // Infrastructure
+  "runway", "taxiway", "tarmac", "hangar", "terminal ", "departure gate", "boarding gate",
+  "cockpit", "flight deck", "flight attendant", "cabin crew", "air hostess", "stewardess",
+  "air traffic control", "air traffic controller", "atc ",
+  // Regulators & bodies
+  "faa ", "ntsb", "easa", "icao", "iata", "caa ", "dgca",
+  // Incidents & safety
+  "plane crash", "aircraft crash", "mid-air collision", "runway collision", "runway incursion",
   "aviation incident", "aviation accident", "flight emergency", "in-flight emergency", "mayday",
-  "emergency landing", "belly landing", "bird strike", "engine failure",
-  "flight diverted", "plane diverted", "plane grounded",
-  // Passenger experience (specific phrases)
+  "emergency landing", "belly landing", "bird strike", "engine failure", "engine fire",
+  "flight diverted", "plane diverted", "plane grounded", "aircraft grounded",
+  "turbulence", "severe turbulence", "depressurisation", "decompression",
+  "near miss", "near-miss", "close call", "runway excursion", "overrun",
+  "ditching", "ditched", "crash landing", "hard landing",
+  // Passenger experience
   "passenger chaos", "passengers stranded", "flight cancelled", "flight delayed",
-  "checked baggage", "carry-on", "overhead bin", "first class", "business class",
-  "economy class", "airport lounge", "flight lounge",
-  // Aircraft types (specific enough)
-  "helicopter crash", "helicopter emergency", "private jet", "cargo plane", "cargo aircraft",
-  "low-cost carrier", "budget airline",
-  // Airlines by full name (no ambiguous short names)
+  "flight cancellation", "mass cancellation", "stranded passengers",
+  "checked baggage", "carry-on", "overhead bin", "hand luggage",
+  "first class", "business class", "economy class", "premium economy",
+  "airport lounge", "flight lounge", "boarding pass", "check-in",
+  "seat upgrade", "bumped from flight", "overbooking", "overbooked",
+  "lost luggage", "delayed baggage", "baggage claim",
+  "airline staff", "airline crew", "unruly passenger", "disruptive passenger",
+  "passenger removed", "passenger arrested", "passenger banned",
+  "mile high", "miles high",
+  // Aircraft types
+  "helicopter", "private jet", "cargo plane", "cargo aircraft", "cargo flight",
+  "low-cost carrier", "budget airline", "charter flight", "charter plane",
+  "military aircraft", "fighter jet", "drone strike", "unmanned aircraft",
+  // Loyalty & points
+  "frequent flyer", "air miles", "airmiles", "airline miles", "avios", "skywards",
+  "mileage plus", "advantage miles", "rapidrewards", "trueblue",
+  // Airlines — full names and common short forms
   "united airlines", "american airlines", "delta air", "southwest airlines", "spirit airlines",
-  "ryanair", "easyjet", "wizz air", "british airways", "virgin atlantic",
+  "ryanair", "easyjet", "wizz air", "british airways", "virgin atlantic", "virgin australia",
   "lufthansa", "air france", "klm", "emirates", "etihad", "qatar airways",
   "singapore airlines", "cathay pacific", "qantas", "air canada",
   "turkish airlines", "aeromexico", "frontier airlines", "allegiant", "jetblue",
   "alaska airlines", "hawaiian airlines", "indigo airlines", "air india",
   "flydubai", "flyadeal", "wizz", "vueling", "transavia", "norwegian air",
   "sun country", "breeze airways", "avelo airlines", "riyadh air",
-  // Airports by full name (not 3-letter codes which are too ambiguous)
-  "heathrow", "gatwick", "stansted", "jfk airport", "lax airport",
-  "o'hare", "ohare airport", "schiphol", "charles de gaulle",
-  "frankfurt airport", "dubai airport", "changi airport", "hong kong airport",
-  "narita", "incheon airport", "doha airport",
+  "air arabia", "flyone", "corendon", "tui airways", "jet2", "loganair",
+  "aer lingus", "iberia", "tap air", "finnair", "sas ", "scandinavian airlines",
+  "swiss air", "swiss international", "austrian airlines", "brussels airlines",
+  "air europa", "volotea", "wizz", "pegasus airlines", "sunexpress",
+  "air new zealand", "air pacific", "fiji airways", "royal brunei",
+  "malaysia airlines", "garuda", "thai airways", "vietnam airlines",
+  "china eastern", "china southern", "air china", "hainan airlines",
+  "korean air", "asiana", "japan airlines", "ana ", "all nippon",
+  "indigo ", "spicejet", "vistara", "go first", "akasa air",
+  "flydubai", "air arabia", "oman air", "gulf air", "kuwait airways",
+  "saudia", "flynas", "egyptair", "ethiopian airlines", "kenya airways",
+  "south african airways", "rwandair", "air mauritius",
+  "aerolíneas argentinas", "latam", "avianca", "copa airlines", "sky airline",
+  "westjet", "air transat", "porter airlines",
+  // Airports — major ones by name
+  "heathrow", "gatwick", "stansted", "luton airport", "manchester airport",
+  "edinburgh airport", "glasgow airport", "birmingham airport",
+  "jfk airport", "lax airport", "o'hare", "ohare airport", "laguardia",
+  "schiphol", "charles de gaulle", "orly airport",
+  "frankfurt airport", "munich airport", "berlin airport",
+  "dubai airport", "abu dhabi airport", "doha airport",
+  "changi airport", "hong kong airport", "narita", "haneda",
+  "incheon airport", "beijing airport", "shanghai airport",
+  "sydney airport", "melbourne airport",
+  "toronto pearson", "vancouver airport",
+  "madrid airport", "barcelona airport", "rome airport", "milan airport",
+  "istanbul airport", "athens airport", "amsterdam airport",
 ];
 
 export function isAviationRelevant(title: string, content: string, category: string): boolean {
@@ -185,7 +223,7 @@ export function isAviationRelevant(title: string, content: string, category: str
 }
 
 /** How far back (in days) to accept articles from RSS feeds. */
-const RSS_LOOKBACK_DAYS = 7;
+const RSS_LOOKBACK_DAYS = 2;
 
 /**
  * Fetch and parse a single RSS feed.
