@@ -828,57 +828,39 @@ export const appRouter = router({
         let newCount = 0;
         let skippedCount = 0;
 
-        for (const source of sources) {
-          // Per-feed score threshold — AI keyword feeds have higher bars
-          // Default to 40 for standard feeds (scoreThreshold=0 means use default)
+        // Process sources in parallel batches of 10 for speed
+        const BATCH_SIZE = 10;
+        const processSingleSource = async (source: typeof sources[0]) => {
           const feedThreshold = (source.scoreThreshold && source.scoreThreshold > 0)
             ? source.scoreThreshold
             : 40;
-
-          // Auto-expiry: skip AI keyword feeds that have passed their expiry date
           if (source.sourceType === "ai_keyword" && source.expiresAt && source.expiresAt < new Date()) {
             console.log(`[Feeds] Skipping expired AI feed: ${source.name}`);
-            continue;
+            return;
           }
-
           try {
             const items = await fetchRssFeed(source.url, source.name);
             await updateRssSourceLastFetched(source.id);
-
             for (const item of items) {
-              // Fast dedup: check seen_urls table first (covers all URLs ever seen,
-              // including those rejected by the score gate or aviation filter)
               if (await hasSeenUrl(item.sourceUrl)) { skippedCount++; continue; }
-
-              // Title similarity check (catches reposts with slightly different URLs)
               if (isSimilarTitle(item.title, recentTitles)) {
                 await markUrlAsSeen(item.sourceUrl, "similar_title");
                 skippedCount++;
                 continue;
               }
-
-              // Aviation gate for viral/mainstream sources
               if (!isAviationRelevant(item.title, item.content, source.category)) {
                 await markUrlAsSeen(item.sourceUrl, "not_aviation");
                 skippedCount++;
                 continue;
               }
-
-              // Cost control: use rule-based scoring if LLM scoring is disabled (default: off)
               const { llmScoringEnabled } = await getCostControlConfig();
               const scoring = llmScoringEnabled
                 ? await scoreStoryWithLLM(item.title, item.content)
                 : (() => { const s = scoreStory(item.title, item.content); return { ...s, scoringMethod: "rule_based" as const }; })();
-
-              // Mark as seen BEFORE the score gate — so low-scoring stories are
-              // never re-evaluated on the next fetch, even though they won't be stored.
               await markUrlAsSeen(item.sourceUrl, scoring.score < feedThreshold ? "score_below_threshold" : undefined);
-
               if (scoring.score < feedThreshold) { skippedCount++; continue; }
               const newStoryId = await createStory({
                 sourceUrl: item.sourceUrl,
-                // Use the rss_sources.name (not the feed title) so AI keyword feeds
-                // can be matched back to their source row for performance tracking
                 sourceName: source.name,
                 title: item.title,
                 content: item.content,
@@ -893,7 +875,6 @@ export const appRouter = router({
                 approvalStatus: "pending",
                 processedAt: new Date(),
               });
-
               if (newStoryId) {
                 await createStoryPackage({ storyId: newStoryId, processingStatus: "queued" });
                 recentTitles.push(item.title);
@@ -903,6 +884,10 @@ export const appRouter = router({
           } catch (err) {
             console.error(`[Feeds] Error fetching ${source.name}:`, err);
           }
+        };
+        for (let i = 0; i < sources.length; i += BATCH_SIZE) {
+          const batch = sources.slice(i, i + BATCH_SIZE);
+          await Promise.all(batch.map(processSingleSource));
         }
         console.log(`[Feeds] Background ingest complete — ${newCount} new, ${skippedCount} skipped`);
       });
