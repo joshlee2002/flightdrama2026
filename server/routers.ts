@@ -211,6 +211,9 @@ export const appRouter = router({
               researchSources: rp.sources,
               researchContradictions: rp.contradictions,
               researchMissingInfo: rp.missingInfo,
+              researchAdditionalContext: rp.additionalContext,
+              researchEditorialHooks: rp.editorialHooks,
+              researchStoryQuality: rp.storyQuality,
               imageRecommendations,
               imageCandidates,
             });
@@ -762,6 +765,9 @@ export const appRouter = router({
             researchSources: rp.sources,
             researchContradictions: rp.contradictions,
             researchMissingInfo: rp.missingInfo,
+            researchAdditionalContext: rp.additionalContext,
+            researchEditorialHooks: rp.editorialHooks,
+            researchStoryQuality: rp.storyQuality,
             // Images (still useful for Canva/posting)
             imageRecommendations,
             imageCandidates,
@@ -815,6 +821,9 @@ export const appRouter = router({
               researchSources: rp.sources,
               researchContradictions: rp.contradictions,
               researchMissingInfo: rp.missingInfo,
+              researchAdditionalContext: rp.additionalContext,
+              researchEditorialHooks: rp.editorialHooks,
+              researchStoryQuality: rp.storyQuality,
             });
             console.log(`[ReResearch] Package extraction complete for story ${input.storyId}`);
           } catch (err) {

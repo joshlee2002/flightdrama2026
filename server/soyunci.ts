@@ -2138,6 +2138,9 @@ export interface ResearchPackage {
   sources: Array<{ name: string; url?: string; type: string }>;
   contradictions: string;
   missingInfo: string;
+  additionalContext: string;
+  editorialHooks: string[];
+  storyQuality: string[];
   sourcesResearched: number;
   sourceConfirmation: string;
   /** The viral angle detected (kept for ranking/learning purposes) */
@@ -2185,6 +2188,8 @@ EXTRACTION RULES:
 - Extract EVERY meaningful piece of information: airlines, aircraft, registrations, flight numbers, airports, routes, dates, times, passenger numbers, crew numbers, injuries, fatalities, diversions, inspections, investigations, aircraft affected, financial figures, technical details, legal developments, operational details, historical context, previous related incidents, regulatory actions, safety findings, emotional details, unusual details, surprising facts, dramatic facts, hidden details, consequences.
 - Do NOT decide what is important. Extract everything.
 - Do NOT paraphrase facts — use the exact numbers, names, dates from the source.
+- REMOVE DUPLICATE FACTS: If multiple sources mention the same fact (e.g., fleet size, aircraft age), or if it is stated multiple times in different words, merge it into ONE unique fact in the extractedInfo array.
+- STAY FOCUSED ON THE MAIN STORY: Identify the primary story. If an article includes unrelated background info (e.g., an article about MD-11s also discusses new Boeing 777 routes), place that unrelated info into "additionalContext" instead of "extractedInfo".
 - For quotes: extract verbatim. Group by who said it (airline, passengers, officials, investigators, witnesses, other).
 - For contradictions: if two sources disagree on a fact, show both versions side by side.
 - For missing info: list what is NOT yet known, NOT confirmed, or NOT publicly disclosed.
@@ -2193,6 +2198,7 @@ Return ONLY valid JSON with exactly these fields:
 {
   "storySummary": "1-2 sentences: what happened, who was involved, when and where",
   "extractedInfo": ["exact fact 1", "exact fact 2", ...],
+  "additionalContext": "Unrelated background info or secondary announcements found in the text, separated from the main story",
   "timeline": "chronological narrative of events — use specific dates and times where available",
   "quotes": {
     "airline": ["verbatim quote — source name/role"],
@@ -2202,6 +2208,15 @@ Return ONLY valid JSON with exactly these fields:
     "witnesses": ["verbatim quote — source name if known"],
     "other": ["verbatim quote — source name/role"]
   },
+  "editorialHooks": [
+    "Factual observation identifying interesting relationships between the extracted facts (e.g. 'FedEx is returning MD-11s while UPS retired theirs'). Do not write headlines, articles, or clickbait."
+  ],
+  "storyQuality": [
+    "✅ Multiple reputable sources",
+    "✅ Direct quotes available",
+    "⚠ Developing story",
+    "... include 3-5 checkmarks/warnings assessing reliability and completeness"
+  ],
   "sources": [
     { "name": "source name", "url": "url if available", "type": "primary|secondary|official|social" }
   ],
@@ -2271,6 +2286,9 @@ Return ONLY valid JSON with exactly these fields:
     sources,
     contradictions: parsed?.contradictions ?? "None identified",
     missingInfo: parsed?.missingInfo ?? "Not assessed",
+    additionalContext: parsed?.additionalContext ?? "None identified",
+    editorialHooks: Array.isArray(parsed?.editorialHooks) ? parsed.editorialHooks : [],
+    storyQuality: Array.isArray(parsed?.storyQuality) ? parsed.storyQuality : [],
     sourcesResearched,
     sourceConfirmation,
     viralAngle: parsed?.viralAngle ?? "aviation_incident",

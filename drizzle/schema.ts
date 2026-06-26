@@ -170,6 +170,12 @@ export const storyPackages = mysqlTable("story_packages", {
   researchContradictions: text("researchContradictions"),
   /** Information that remains unknown or unconfirmed */
   researchMissingInfo: text("researchMissingInfo"),
+  /** Additional context separated from the main story */
+  researchAdditionalContext: text("researchAdditionalContext"),
+  /** Possible editorial hooks for the writer */
+  researchEditorialHooks: json("researchEditorialHooks").$type<string[]>(),
+  /** Quality assessment of the story */
+  researchStoryQuality: json("researchStoryQuality").$type<string[]>(),
 });
 
 export type StoryPackage = typeof storyPackages.$inferSelect;
