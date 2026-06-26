@@ -31,7 +31,7 @@ import {
   isAviationRelevant,
 } from "./ingestion";
 import { scoreStory } from "./viralScoring";
-import { scoreStoryWithLLM } from "./llmScoring";
+import { scoreStoryWithLLM, batchScoreStoriesWithLLM, type BatchScoringInput } from "./llmScoring";
 import { rssSources } from "../drizzle/schema";
 import { and, eq, isNotNull, lt } from "drizzle-orm";
 
@@ -69,14 +69,28 @@ export async function scheduledIngestHandler(req: Request, res: Response) {
     let newCount = 0;
     let skippedCount = 0;
 
+    // ── Phase 1: Fetch all feeds and rule-score every item ────────────────────
+    // Collect borderline stories (rule score 40–69) for batch LLM scoring.
+    // Clear winners (≥70) and clear rejects (<40) skip the LLM entirely.
+    type PendingStory = {
+      title: string;
+      sourceUrl: string;
+      sourceName: string;
+      content: string;
+      publishedAt: Date | null;
+      feedThreshold: number;
+      ruleScore: ReturnType<typeof scoreStory>;
+    };
+
+    const clearWinners: PendingStory[] = [];   // rule score ≥ 70 — save immediately
+    const borderlineStories: PendingStory[] = []; // rule score 40–69 — batch LLM score
+
     for (const source of sources) {
-      // Per-feed score threshold — AI keyword feeds have higher bars
-      // Default to 40 for standard feeds (scoreThreshold=0 means use default)
       const feedThreshold = (source.scoreThreshold && source.scoreThreshold > 0)
         ? source.scoreThreshold
         : 40;
 
-      // Double-check expiry (in case the batch disable above missed any)
+      // Double-check expiry
       if (source.sourceType === "ai_keyword" && source.expiresAt && source.expiresAt < new Date()) {
         console.log(`[ScheduledIngest] Skipping expired AI feed: ${source.name}`);
         continue;
@@ -88,103 +102,139 @@ export async function scheduledIngestHandler(req: Request, res: Response) {
         for (const item of items) {
           if (!item.sourceUrl) continue;
 
-          // Dedup check
           const alreadySeen = await hasSeenUrl(item.sourceUrl);
-          if (alreadySeen) {
-            skippedCount++;
-            continue;
-          }
+          if (alreadySeen) { skippedCount++; continue; }
 
-          // Aviation relevance gate
           if (!isAviationRelevant(item.title || "", item.content || "", source.category)) {
             await markUrlAsSeen(item.sourceUrl, "not_aviation");
             skippedCount++;
             continue;
           }
 
-          // Title dedup
           if (isSimilarTitle(item.title || "", recentTitles)) {
             await markUrlAsSeen(item.sourceUrl, "duplicate_title");
             skippedCount++;
             continue;
           }
 
-          // Fetch full article content if too short
           let content = item.content || "";
           if (content.length < 200) {
             try {
               const fetched = await fetchArticleContent(item.sourceUrl);
               content = fetched.content || content;
-            } catch {
-              // Use RSS content as fallback
-            }
+            } catch { /* use RSS content */ }
           }
 
-          // Score the story
           const ruleScore = scoreStory(item.title || "", content);
-
-          // LLM scoring for borderline stories
-          let finalScore = ruleScore.score;
-          let finalLabel = ruleScore.statusLabel;
-          let finalCategory = ruleScore.category;
-          let finalReason = ruleScore.viralReason;
-          let finalTriggers = ruleScore.triggers;
-          let scoringMethod: "rule_based" | "llm_assisted" = "rule_based";
-
-          if (ruleScore.score >= 40 && ruleScore.score < 70) {
-            try {
-              const llmResult = await scoreStoryWithLLM(item.title || "", content);
-              if (llmResult.score !== undefined) {
-                finalScore = llmResult.score;
-                finalLabel = llmResult.statusLabel;
-                finalCategory = llmResult.category;
-                finalReason = llmResult.viralReason;
-                finalTriggers = llmResult.triggers;
-                scoringMethod = "llm_assisted";
-              }
-            } catch {
-              // Fall back to rule-based score
-            }
-          }
-
-          // Mark as seen BEFORE the score gate — so low-scoring stories are
-          // never re-evaluated on the next fetch
-          await markUrlAsSeen(item.sourceUrl, finalScore < feedThreshold ? "score_below_threshold" : undefined);
-
-          if (finalScore < feedThreshold) {
-            skippedCount++;
-            continue;
-          }
-
-          // Create the story — use source.name (not item.sourceName) so AI keyword
-          // feeds can be matched back to their rss_sources row for performance tracking
-          const storyId = await createStory({
+          const pending: PendingStory = {
             title: item.title || "Untitled",
             sourceUrl: item.sourceUrl,
             sourceName: source.name,
             content,
-            publishedAt: item.publishedAt,
-            viralScore: finalScore,
-            statusLabel: finalLabel,
-            category: finalCategory,
-            viralReason: finalReason,
-            viralTriggers: finalTriggers,
-            scoringMethod,
-            processedAt: new Date(),
-          });
+            publishedAt: item.publishedAt ?? null,
+            feedThreshold,
+            ruleScore,
+          };
 
-          await createStoryPackage({
-            storyId,
-            processingStatus: "queued",
-          });
-          recentTitles.push(item.title || "");
-          newCount++;
+          if (ruleScore.score >= 70) {
+            // Clear winner — no LLM needed
+            clearWinners.push(pending);
+          } else if (ruleScore.score >= 40) {
+            // Borderline — queue for batch LLM scoring
+            borderlineStories.push(pending);
+          } else {
+            // Clear reject — mark as seen and skip
+            await markUrlAsSeen(item.sourceUrl, "score_below_threshold");
+            skippedCount++;
+          }
         }
 
         await updateRssSourceLastFetched(source.id);
       } catch (sourceErr) {
         console.error(`[ScheduledIngest] Error fetching source ${source.name}:`, sourceErr);
       }
+    }
+
+    // ── Phase 2: Batch LLM score the borderline stories ───────────────────────
+    // Send up to 10 stories per LLM call instead of one-at-a-time.
+    // This pays the system prompt overhead once per batch, not per story.
+    const BATCH_SIZE = 10;
+    const llmScoredStories: Array<PendingStory & { finalScore: number; finalLabel: string; finalCategory: string; finalReason: string; finalTriggers: string[]; scoringMethod: "rule_based" | "llm_assisted" }> = [];
+
+    for (let i = 0; i < borderlineStories.length; i += BATCH_SIZE) {
+      const batch = borderlineStories.slice(i, i + BATCH_SIZE);
+      const batchInputs: BatchScoringInput[] = batch.map(s => ({
+        title: s.title,
+        content: s.content,
+        ruleScore: s.ruleScore,
+      }));
+
+      let batchResults;
+      try {
+        batchResults = await batchScoreStoriesWithLLM(batchInputs);
+      } catch {
+        // Full batch failure — fall back to rule-based for all in this batch
+        batchResults = batch.map(s => ({ ...s.ruleScore, scoringMethod: "rule_based" as const }));
+      }
+
+      for (let j = 0; j < batch.length; j++) {
+        const s = batch[j];
+        const r = batchResults[j] ?? { ...s.ruleScore, scoringMethod: "rule_based" as const };
+        llmScoredStories.push({
+          ...s,
+          finalScore: r.score,
+          finalLabel: r.statusLabel,
+          finalCategory: r.category,
+          finalReason: r.viralReason,
+          finalTriggers: r.triggers ?? [],
+          scoringMethod: r.scoringMethod,
+        });
+      }
+    }
+
+    console.log(`[ScheduledIngest] Scored: ${clearWinners.length} clear winners, ${borderlineStories.length} borderline (${Math.ceil(borderlineStories.length / BATCH_SIZE)} LLM batch calls)`);
+
+    // ── Phase 3: Persist all stories that meet their feed threshold ───────────
+    const allScored = [
+      // Clear winners keep their rule-based score
+      ...clearWinners.map(s => ({
+        ...s,
+        finalScore: s.ruleScore.score,
+        finalLabel: s.ruleScore.statusLabel,
+        finalCategory: s.ruleScore.category,
+        finalReason: s.ruleScore.viralReason,
+        finalTriggers: s.ruleScore.triggers ?? [],
+        scoringMethod: "rule_based" as const,
+      })),
+      ...llmScoredStories,
+    ];
+
+    for (const s of allScored) {
+      await markUrlAsSeen(s.sourceUrl, s.finalScore < s.feedThreshold ? "score_below_threshold" : undefined);
+
+      if (s.finalScore < s.feedThreshold) {
+        skippedCount++;
+        continue;
+      }
+
+      const storyId = await createStory({
+        title: s.title,
+        sourceUrl: s.sourceUrl,
+        sourceName: s.sourceName,
+        content: s.content,
+        publishedAt: s.publishedAt ?? undefined,
+        viralScore: s.finalScore,
+        statusLabel: s.finalLabel as "reject" | "must_post" | "strong_candidate" | "maybe",
+        category: s.finalCategory,
+        viralReason: s.finalReason,
+        viralTriggers: s.finalTriggers,
+        scoringMethod: s.scoringMethod,
+        processedAt: new Date(),
+      });
+
+      await createStoryPackage({ storyId, processingStatus: "queued" });
+      recentTitles.push(s.title);
+      newCount++;
     }
 
     console.log(`[ScheduledIngest] Complete — ${newCount} new stories, ${skippedCount} skipped`);

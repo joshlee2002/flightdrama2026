@@ -21,14 +21,21 @@ export const ENV = {
     ? customApiKey
     : (process.env.BUILT_IN_FORGE_API_KEY ?? ""),
 
-  // Use llama-3.3-70b-versatile for everything — Dev tier gives 300k TPM
+  // Use llama-3.3-70b-versatile for research, synthesis, and headlines
   defaultLlmModel: useCustomOpenAI
     ? (customApiUrl.includes("groq.com") ? "llama-3.3-70b-versatile" : "gpt-4o-mini")
     : "",
 
-  // Same model for headlines (no need to split now)
+  // Same model for headlines
   headlineModel: useCustomOpenAI && customApiUrl.includes("groq.com")
     ? "llama-3.3-70b-versatile"
+    : "",
+
+  // Lightweight model for initial scoring pass — fast and cheap.
+  // 8B is sufficient for scoring; 70B is reserved for research extraction.
+  // Falls back to defaultLlmModel if not on Groq.
+  scoringLlmModel: useCustomOpenAI && customApiUrl.includes("groq.com")
+    ? "llama-3.1-8b-instant"
     : "",
 
   // ── Manus Forge DataAPI — ALWAYS Manus built-in, never replaced by Groq ──

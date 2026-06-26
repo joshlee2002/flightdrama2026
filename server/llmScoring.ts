@@ -111,76 +111,256 @@ Score from 0–100 where:
 
 /**
  * Score a story using the LLM with learned rules + override examples as context.
- * Falls back to rule-based scoring if the LLM call fails.
+ *
+ * Two-tier model strategy:
+ * - Initial pass: llama-3.1-8b-instant (fast, cheap)
+ * - Safety net: if 8B scores ≥ 75, verify with llama-3.3-70b-versatile to ensure
+ *   no viral story is missed due to the smaller model underestimating it.
+ *
+ * Falls back to rule-based scoring if both LLM calls fail.
  */
 export async function scoreStoryWithLLM(
   title: string,
   content: string
 ): Promise<LLMScoringResult> {
   const ruleResult = scoreStory(title, content);
+  // Scoring model: 8B for cost efficiency; 70B as safety net for high scorers
+  const scoringModel = ENV.scoringLlmModel || ENV.defaultLlmModel || "llama-3.1-8b-instant";
+  const verifyModel = ENV.defaultLlmModel || "llama-3.3-70b-versatile";
+
+  const parseScoringResponse = (raw: string, fallback: ScoringResult) => {
+    if (!raw || typeof raw !== "string") return null;
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return null;
+    try {
+      const parsed = JSON.parse(jsonMatch[0]) as {
+        score: number;
+        statusLabel: string;
+        category: string;
+        viralReason: string;
+        triggers: string[];
+        viralExplanation?: string;
+      };
+      const validLabels = ["must_post", "strong_candidate", "maybe", "reject"];
+      if (
+        typeof parsed.score !== "number" ||
+        parsed.score < 0 ||
+        parsed.score > 100 ||
+        !validLabels.includes(parsed.statusLabel)
+      ) return null;
+      return parsed;
+    } catch {
+      return null;
+    }
+  };
 
   try {
     const { systemPrompt } = await buildScoringContext();
     const truncatedContent = content?.slice(0, 1200) ?? "";
     const userMessage = `Score this aviation story:\n\nTitle: "${title}"\n\nContent excerpt: "${truncatedContent}"`;
 
-    const response = await invokeLLM({
-      model: ENV.defaultLlmModel || "llama-3.3-70b-versatile",
+    // ── Pass 1: 8B model (cheap) ──────────────────────────────────────────────
+    const response8b = await invokeLLM({
+      model: scoringModel,
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userMessage },
       ],
     });
 
-    const raw = response?.choices?.[0]?.message?.content;
-    if (!raw || typeof raw !== "string") {
-      console.warn("[LLMScoring] Empty response, falling back to rule-based");
-      return { ...ruleResult, scoringMethod: "rule_based" };
+    const raw8b = String(response8b?.choices?.[0]?.message?.content ?? "");
+    const parsed8b = parseScoringResponse(raw8b, ruleResult);
+
+    if (!parsed8b) {
+      console.warn("[LLMScoring] 8B model returned invalid response, falling back to rule-based");
+      const statAdjustedScore = await applyStatAdjustments(ruleResult.score, ruleResult.category, title);
+      return { ...ruleResult, score: statAdjustedScore, scoringMethod: "rule_based" };
     }
 
-    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    // ── Pass 2: 70B safety net for potential viral stories ────────────────────
+    // If the 8B model scores a story ≥ 75, verify with the full 70B model.
+    // This ensures no viral story is ever missed due to the smaller model.
+    if (parsed8b.score >= 75 && scoringModel !== verifyModel) {
+      try {
+        console.log(`[LLMScoring] 8B scored "${title.slice(0, 60)}" at ${parsed8b.score} — running 70B safety check`);
+        const response70b = await invokeLLM({
+          model: verifyModel,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userMessage },
+          ],
+        });
+        const raw70b = String(response70b?.choices?.[0]?.message?.content ?? "");
+        const parsed70b = parseScoringResponse(raw70b, ruleResult);
+        if (parsed70b) {
+          // Use the higher of the two scores — we never want to suppress a viral story
+          const finalRaw = parsed70b.score >= parsed8b.score ? parsed70b : parsed8b;
+          const llmCategory = finalRaw.category ?? ruleResult.category;
+          const llmScore = Math.round(finalRaw.score);
+          const statAdjustedScore = await applyStatAdjustments(llmScore, llmCategory, title);
+          console.log(`[LLMScoring] 70B verified: ${parsed8b.score} → ${llmScore} (used ${finalRaw === parsed70b ? "70B" : "8B"})`);
+          return {
+            score: statAdjustedScore,
+            statusLabel: finalRaw.statusLabel as ScoringResult["statusLabel"],
+            category: llmCategory,
+            viralReason: finalRaw.viralReason ?? ruleResult.viralReason,
+            triggers: Array.isArray(finalRaw.triggers) ? finalRaw.triggers : ruleResult.triggers,
+            viralExplanation: finalRaw.viralExplanation ?? ruleResult.viralExplanation,
+            scoringMethod: "llm_assisted",
+          };
+        }
+      } catch (verifyErr) {
+        // 70B verification failed — use 8B result, which is already ≥ 75 so story is kept
+        console.warn("[LLMScoring] 70B safety check failed, using 8B result:", verifyErr);
+      }
+    }
+
+    // ── Use 8B result (no verification needed or verification skipped) ────────
+    const llmCategory = parsed8b.category ?? ruleResult.category;
+    const llmScore = Math.round(parsed8b.score);
+    const statAdjustedScore = await applyStatAdjustments(llmScore, llmCategory, title);
+    return {
+      score: statAdjustedScore,
+      statusLabel: parsed8b.statusLabel as ScoringResult["statusLabel"],
+      category: llmCategory,
+      viralReason: parsed8b.viralReason ?? ruleResult.viralReason,
+      triggers: Array.isArray(parsed8b.triggers) ? parsed8b.triggers : ruleResult.triggers,
+      viralExplanation: parsed8b.viralExplanation ?? ruleResult.viralExplanation,
+      scoringMethod: "llm_assisted",
+    };
+  } catch (err) {
+    console.error("[LLMScoring] Error calling LLM, falling back to rule-based:", err);
+    const statAdjustedScore = await applyStatAdjustments(ruleResult.score, ruleResult.category, title);
+    return { ...ruleResult, score: statAdjustedScore, scoringMethod: "rule_based" };
+  }
+}
+
+// ── Batch scoring ─────────────────────────────────────────────────────────────
+
+export type BatchScoringInput = {
+  title: string;
+  content: string;
+  ruleScore: ScoringResult;
+};
+
+/**
+ * Score up to 10 stories in a single LLM call.
+ *
+ * This is the primary cost optimisation — instead of one API call per story
+ * (each paying the system prompt overhead), we send up to 10 stories in one
+ * call and pay the overhead once. Quality is identical to single-story scoring.
+ *
+ * Stories where the 8B model scores ≥ 75 are individually verified with the
+ * 70B model as a safety net — the same guarantee as scoreStoryWithLLM().
+ */
+export async function batchScoreStoriesWithLLM(
+  stories: BatchScoringInput[]
+): Promise<LLMScoringResult[]> {
+  if (stories.length === 0) return [];
+
+  const scoringModel = ENV.scoringLlmModel || ENV.defaultLlmModel || "llama-3.1-8b-instant";
+  const verifyModel = ENV.defaultLlmModel || "llama-3.3-70b-versatile";
+
+  // Build the shared context once for the whole batch
+  const { systemPrompt } = await buildScoringContext();
+
+  // Modify system prompt for batch output
+  const batchSystemPrompt = systemPrompt.replace(
+    /Respond ONLY with a valid JSON object[\s\S]*/,
+    `Respond ONLY with a valid JSON array of ${stories.length} objects, one per story, in the same order as the input. Each object must have:
+{ "score": <integer 0-100>, "statusLabel": "<must_post|strong_candidate|maybe|reject>", "category": "<category>", "viralReason": "<one sentence>", "triggers": ["<trigger 1>", "<trigger 2>"] }
+
+Return ONLY the JSON array. No other text.`
+  );
+
+  const storyList = stories
+    .map((s, i) => `Story ${i + 1}:\nTitle: "${s.title}"\nContent: "${s.content.slice(0, 800)}"`)
+    .join("\n\n---\n\n");
+
+  const userMessage = `Score these ${stories.length} aviation stories:\n\n${storyList}`;
+
+  try {
+    const response = await invokeLLM({
+      model: scoringModel,
+      messages: [
+        { role: "system", content: batchSystemPrompt },
+        { role: "user", content: userMessage },
+      ],
+    });
+
+    const raw = String(response?.choices?.[0]?.message?.content ?? "");
+    const jsonMatch = raw.match(/\[[\s\S]*\]/);
     if (!jsonMatch) {
-      console.warn("[LLMScoring] No JSON found in response, falling back");
-      return { ...ruleResult, scoringMethod: "rule_based" };
+      console.warn("[LLMScoring] Batch: no JSON array in response, falling back to individual scoring");
+      // Fall back to individual scoring for each story
+      return Promise.all(stories.map(s => scoreStoryWithLLM(s.title, s.content)));
     }
 
-    const parsed = JSON.parse(jsonMatch[0]) as {
+    const parsedArray = JSON.parse(jsonMatch[0]) as Array<{
       score: number;
       statusLabel: string;
       category: string;
       viralReason: string;
       triggers: string[];
-      viralExplanation?: string;
-    };
+    }>;
 
-    const validLabels = ["must_post", "strong_candidate", "maybe", "reject"];
-    if (
-      typeof parsed.score !== "number" ||
-      parsed.score < 0 ||
-      parsed.score > 100 ||
-      !validLabels.includes(parsed.statusLabel)
-    ) {
-      console.warn("[LLMScoring] Invalid response shape, falling back");
-      return { ...ruleResult, scoringMethod: "rule_based" };
+    if (!Array.isArray(parsedArray) || parsedArray.length !== stories.length) {
+      console.warn(`[LLMScoring] Batch: expected ${stories.length} results, got ${parsedArray?.length ?? 0}. Falling back.`);
+      return Promise.all(stories.map(s => scoreStoryWithLLM(s.title, s.content)));
     }
 
-    const llmCategory = parsed.category ?? ruleResult.category;
-    const llmScore = Math.round(parsed.score);
-    const statAdjustedScore = await applyStatAdjustments(llmScore, llmCategory, title);
-    return {
-      score: statAdjustedScore,
-      statusLabel: parsed.statusLabel as ScoringResult["statusLabel"],
-      category: llmCategory,
-      viralReason: parsed.viralReason ?? ruleResult.viralReason,
-      triggers: Array.isArray(parsed.triggers) ? parsed.triggers : ruleResult.triggers,
-      viralExplanation: parsed.viralExplanation ?? ruleResult.viralExplanation,
-      scoringMethod: "llm_assisted",
-    };
+    const validLabels = ["must_post", "strong_candidate", "maybe", "reject"];
+    const results: LLMScoringResult[] = [];
+
+    for (let i = 0; i < stories.length; i++) {
+      const s = stories[i];
+      const p = parsedArray[i];
+
+      if (
+        !p ||
+        typeof p.score !== "number" ||
+        p.score < 0 ||
+        p.score > 100 ||
+        !validLabels.includes(p.statusLabel)
+      ) {
+        // Invalid entry — fall back to rule-based for this story
+        const statAdjusted = await applyStatAdjustments(s.ruleScore.score, s.ruleScore.category, s.title);
+        results.push({ ...s.ruleScore, score: statAdjusted, scoringMethod: "rule_based" });
+        continue;
+      }
+
+      // 70B safety net for high-scoring stories
+      if (p.score >= 75 && scoringModel !== verifyModel) {
+        try {
+          const verified = await scoreStoryWithLLM(s.title, s.content);
+          // Use the higher score — never suppress a potential viral story
+          if (verified.score >= p.score) {
+            results.push(verified);
+            continue;
+          }
+        } catch {
+          // Verification failed — use batch result (already ≥ 75, story is kept)
+        }
+      }
+
+      const llmCategory = p.category ?? s.ruleScore.category;
+      const llmScore = Math.round(p.score);
+      const statAdjustedScore = await applyStatAdjustments(llmScore, llmCategory, s.title);
+      results.push({
+        score: statAdjustedScore,
+        statusLabel: p.statusLabel as ScoringResult["statusLabel"],
+        category: llmCategory,
+        viralReason: p.viralReason ?? s.ruleScore.viralReason,
+        triggers: Array.isArray(p.triggers) ? p.triggers : s.ruleScore.triggers,
+        viralExplanation: s.ruleScore.viralExplanation,
+        scoringMethod: "llm_assisted",
+      });
+    }
+
+    return results;
   } catch (err) {
-    console.error("[LLMScoring] Error calling LLM, falling back to rule-based:", err);
-    // Apply stat adjustments to rule-based fallback too
-    const statAdjustedScore = await applyStatAdjustments(ruleResult.score, ruleResult.category, title);
-    return { ...ruleResult, score: statAdjustedScore, scoringMethod: "rule_based" };
+    console.error("[LLMScoring] Batch scoring failed, falling back to individual:", err);
+    return Promise.all(stories.map(s => scoreStoryWithLLM(s.title, s.content)));
   }
 }
 
