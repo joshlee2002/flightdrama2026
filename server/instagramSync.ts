@@ -167,6 +167,7 @@ export async function syncInstagramPosts(limit = 50): Promise<SyncResult> {
             likes: post.like_count ?? 0,
             comments: post.comments_count ?? 0,
             shares: insights.shares ?? 0,
+            saves: insights.saved ?? 0,
             reach: insights.reach ?? 0,
             views: insights.impressions ?? insights.plays ?? 0,
           })
@@ -201,8 +202,10 @@ export async function syncInstagramPosts(limit = 50): Promise<SyncResult> {
         likes: post.like_count ?? 0,
         comments: post.comments_count ?? 0,
         shares: insights.shares ?? 0,
+        saves: insights.saved ?? 0,
         reach: insights.reach ?? 0,
         views: insights.impressions ?? insights.plays ?? 0,
+        platform: "Instagram",
         sourceType: "instagram_sync",
         instagramPostId: post.id,
         createdAt: postedAt,

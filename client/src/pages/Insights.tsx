@@ -334,12 +334,39 @@ export default function Insights() {
                 {insights?.statCategoryWeights && insights.statCategoryWeights !== "Not enough data per category yet." && (
                   <section className="rounded-xl border border-border bg-card/40 p-5">
                     <h2 className="text-sm font-semibold text-foreground mb-3 flex items-center gap-2">
-                      <TrendingUp className="w-3.5 h-3.5 text-muted-foreground" /> Category Patterns (from overrides)
+                      <TrendingUp className="w-3.5 h-3.5 text-muted-foreground" /> Category Patterns
+                      <span className="text-xs text-muted-foreground font-normal">(negative = AI overestimates, positive = AI underestimates)</span>
                     </h2>
-                    <div className="space-y-1.5">
-                      {insights.statCategoryWeights.split("; ").map((entry, i) => (
-                        <p key={i} className="text-sm text-foreground/80 font-mono text-xs bg-muted/30 rounded px-3 py-1.5">{entry}</p>
-                      ))}
+                    <div className="space-y-2">
+                      {insights.statCategoryWeights.split("; ").map((entry, i) => {
+                        const isNeg = entry.includes("-") && !entry.includes("+");
+                        const isPos = entry.includes("+");
+                        const pts = entry.match(/([+-]\d+)/);
+                        const magnitude = pts ? Math.abs(parseInt(pts[1])) : 0;
+                        const label = isNeg
+                          ? `AI overestimates — score ${magnitude > 30 ? "much" : "slightly"} lower`
+                          : isPos
+                          ? `AI underestimates — score ${magnitude > 10 ? "higher" : "slightly higher"}`
+                          : "AI is well-calibrated";
+                        return (
+                          <div key={i} className={cn(
+                            "flex items-start justify-between gap-3 rounded px-3 py-2",
+                            isNeg && magnitude > 30 ? "bg-red-500/10 border border-red-500/20" :
+                            isNeg ? "bg-amber-500/10 border border-amber-500/20" :
+                            isPos ? "bg-emerald-500/10 border border-emerald-500/20" :
+                            "bg-muted/30"
+                          )}>
+                            <span className="text-xs text-foreground/80 font-mono flex-1">{entry}</span>
+                            <span className={cn(
+                              "text-xs shrink-0 font-medium",
+                              isNeg && magnitude > 30 ? "text-red-400" :
+                              isNeg ? "text-amber-400" :
+                              isPos ? "text-emerald-400" :
+                              "text-muted-foreground"
+                            )}>{label}</span>
+                          </div>
+                        );
+                      })}
                     </div>
                   </section>
                 )}

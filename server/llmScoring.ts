@@ -568,9 +568,9 @@ export async function learnFromOverrides(): Promise<{ success: boolean; summary:
   const previousInsights = config["learned_editor_insights"] ?? null;
   const lastLearnedAt = config["last_learned_at"] ?? null;
 
-  // On first run: fetch all overrides.
-  // On subsequent runs: only fetch overrides that are NEW since the last learning run.
-  // This keeps the prompt focused and avoids re-analysing the same examples every day.
+  // Fetch new overrides since last run PLUS always include the last 20 as context.
+  // This ensures the LLM always has enough examples to refine rules meaningfully,
+  // even if no new overrides were made since the last run.
   const sinceDate = lastLearnedAt && previousRules ? new Date(lastLearnedAt) : undefined;
   const newExamples = await getOverrideExamplesFromDb(undefined, sinceDate);
 
@@ -582,17 +582,28 @@ export async function learnFromOverrides(): Promise<{ success: boolean; summary:
     };
   }
 
-  // If this is a subsequent run and there are no new overrides since last time, skip the LLM call
-  if (sinceDate && newExamples.length === 0) {
-    console.log("[LLMScoring] No new overrides since last learning run — skipping LLM call");
+  // Always include at least the last 20 overrides as context (even on subsequent runs).
+  // This prevents the LLM from running on 0 examples when no new overrides were made.
+  let filteredExamples = newExamples;
+  if (sinceDate && newExamples.length < 20 && previousRules) {
+    const recentContext = await getOverrideExamplesFromDb(20);
+    // Merge: new examples first, then recent context (deduped by id)
+    const seenIds = new Set(newExamples.map(e => e.id));
+    const contextOnly = recentContext.filter(e => !seenIds.has(e.id));
+    filteredExamples = [...newExamples, ...contextOnly];
+    if (filteredExamples.length > 0) {
+      console.log(`[LLMScoring] ${newExamples.length} new overrides + ${contextOnly.length} context examples = ${filteredExamples.length} total`);
+    }
+  }
+
+  if (filteredExamples.length === 0) {
+    console.log("[LLMScoring] No override examples available — skipping LLM call");
     return {
       success: true,
-      summary: "No new overrides since last learning run — existing rules unchanged.",
+      summary: "No override examples available — existing rules unchanged.",
       examplesUsed: 0,
     };
   }
-
-  const filteredExamples = newExamples;
 
   // Also pull Instagram performance data to ground the learning in reality
   const { getHistoricalPosts } = await import("./db");

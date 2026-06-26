@@ -11,7 +11,7 @@
 
 import { getDb, getAllScoringConfig } from "./db";
 import { stories, historicalPosts, weeklyDigests } from "../drizzle/schema";
-import { and, gte, lte, eq, desc } from "drizzle-orm";
+import { and, gte, lte, eq, desc, sql } from "drizzle-orm";
 import { ENV } from "./_core/env";
 import { invokeLLM } from "./_core/llm";
 
@@ -73,6 +73,27 @@ export async function generateWeeklyDigest(referenceDate?: Date): Promise<{
       )
     )
     .orderBy(desc(stories.viralScore));
+
+  // ── 1b. Skip LLM call if nothing to digest ──────────────────────────────────────
+  // If no stories were approved this week and no historical posts exist,
+  // there's nothing meaningful to digest. Store a placeholder and return early.
+  const totalHistoricalPosts = await db.select({ count: sql<number>`COUNT(*)` }).from(historicalPosts);
+  const hasHistoricalData = (totalHistoricalPosts[0]?.count ?? 0) > 0;
+  if (approvedStories.length === 0 && !hasHistoricalData) {
+    console.log("[WeeklyDigest] No approved stories and no performance data — skipping LLM call");
+    const emptyDigest = await db.insert(weeklyDigests).values({
+      weekStart,
+      weekEnd,
+      storiesApproved: 0,
+      topCategory: null,
+      topStoryTitle: null,
+      topStoryScore: null,
+      summary: "No stories were approved this week and no performance data is available yet.",
+      recommendations: "• Keep ingesting and approving stories to build up data for the digest.\n• Log your Instagram posts after posting to start building performance history.",
+    });
+    const insertedId = (emptyDigest as any)?.insertId ?? 0;
+    return { id: insertedId, summary: "No data this week.", recommendations: "", storiesApproved: 0, topCategory: null, weekStart, weekEnd };
+  }
 
   // ── 2. Pull recent historical posts for engagement context ───────────────
   const recentPosts = await db

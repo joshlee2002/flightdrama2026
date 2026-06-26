@@ -298,6 +298,10 @@ export async function analyseArticleStyle(): Promise<ArticleStyleInsights | null
     allTexts.push({ text: ex.articleText, score: 9999 });
   }
 
+  // Need at least 10 texts to generate meaningful avoid_words and power_words.
+  // Below this threshold, the high/low split is too small to be statistically reliable
+  // and will flag core aviation words (boeing, aircraft) as words to avoid.
+  const MIN_STYLE_TEXTS = 10;
   if (allTexts.length < 1) {
     console.log("[ArticleStyle] No article texts available yet — upload articles to enable style learning");
     return null;
@@ -371,17 +375,23 @@ export async function analyseArticleStyle(): Promise<ArticleStyleInsights | null
   const highFreq = countWordFreq(highGroup);
   const lowFreq = countWordFreq(lowGroup);
 
-  const powerWords = Object.entries(highFreq)
-    .filter(([w, c]) => c >= 2 && (lowFreq[w] ?? 0) < c)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 25)
-    .map(([w]) => w);
+  // Only generate power/avoid word lists when we have enough data to be meaningful.
+  // With fewer than MIN_STYLE_TEXTS articles, the high/low split is noise.
+  const powerWords = allTexts.length >= MIN_STYLE_TEXTS
+    ? Object.entries(highFreq)
+        .filter(([w, c]) => c >= 2 && (lowFreq[w] ?? 0) < c)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 25)
+        .map(([w]) => w)
+    : [];
 
-  const avoidWords = Object.entries(lowFreq)
-    .filter(([w, c]) => c >= 2 && (highFreq[w] ?? 0) < c)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 15)
-    .map(([w]) => w);
+  const avoidWords = allTexts.length >= MIN_STYLE_TEXTS
+    ? Object.entries(lowFreq)
+        .filter(([w, c]) => c >= 2 && (highFreq[w] ?? 0) < c)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 15)
+        .map(([w]) => w)
+    : [];
 
   // ── 4. Top 2-3 word phrases ───────────────────────────────────────────────
   const phraseCounts: Record<string, number> = {};
