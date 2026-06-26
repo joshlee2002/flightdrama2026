@@ -563,6 +563,18 @@ export const appRouter = router({
         return { success: true };
       }),
 
+    /**
+     * Dismiss a story as a duplicate — hides it without affecting the
+     * learning system. Does NOT mark the URL as seen so the canonical
+     * version of the story can still be ingested from a different source.
+     */
+    dismissAsDuplicate: protectedProcedure
+      .input(z.object({ id: z.number() }))
+      .mutation(async ({ input }) => {
+        await updateStoryApproval(input.id, "duplicate");
+        return { success: true };
+      }),
+
     updateArticle: protectedProcedure
       .input(z.object({ storyId: z.number(), article: z.string() }))
       .mutation(async ({ input }) => {

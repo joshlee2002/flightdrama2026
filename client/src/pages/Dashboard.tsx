@@ -30,6 +30,7 @@ import {
   ChevronRight,
   Search,
   FlaskConical,
+  GitMerge,
 } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
@@ -143,6 +144,7 @@ interface StoryCardProps {
   onApprove: (variant?: string) => void;
   onReject: () => void;
   onDismiss: () => void;
+  onDismissAsDuplicate: () => void;
   onProcess: () => void;
   onOverrideScore: (score: number | null, label: string | null) => void;
   isProcessing: boolean;
@@ -156,6 +158,7 @@ function StoryCard({
   onApprove,
   onReject,
   onDismiss,
+  onDismissAsDuplicate,
   onProcess,
   onOverrideScore,
   isProcessing,
@@ -439,6 +442,16 @@ function StoryCard({
               <Button
                 size="sm"
                 variant="ghost"
+                className="gap-1.5 text-xs text-muted-foreground hover:text-amber-400 hover:bg-amber-500/10"
+                onClick={onDismissAsDuplicate}
+                title="Dismiss as duplicate — clears this story without affecting learning or blocking the URL"
+              >
+                <GitMerge className="w-3.5 h-3.5" />
+                Duplicate
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
                 className="gap-1.5 text-xs text-muted-foreground hover:text-destructive hover:bg-destructive/10"
                 onClick={onDismiss}
                 title="Dismiss permanently — hides this story and prevents it from returning"
@@ -631,6 +644,14 @@ export default function Dashboard() {
   const dismiss = trpc.stories.dismiss.useMutation({
     onSuccess: () => {
       toast.success("Story dismissed permanently");
+      utils.stories.list.invalidate();
+      utils.stories.pendingCount.invalidate();
+    },
+  });
+
+  const dismissAsDuplicate = trpc.stories.dismissAsDuplicate.useMutation({
+    onSuccess: () => {
+      toast.success("Dismissed as duplicate");
       utils.stories.list.invalidate();
       utils.stories.pendingCount.invalidate();
     },
@@ -1013,6 +1034,7 @@ export default function Dashboard() {
                           onApprove={(variant) => approve.mutate({ id: story.id, usedHeadlineVariant: variant })}
                           onReject={() => reject.mutate({ id: story.id })}
                           onDismiss={() => dismiss.mutate({ id: story.id })}
+                          onDismissAsDuplicate={() => dismissAsDuplicate.mutate({ id: story.id })}
                           onProcess={() => handleProcess(story.id)}
                           onOverrideScore={(score, label) => handleOverrideScore(story.id, score, label)}
                         />
