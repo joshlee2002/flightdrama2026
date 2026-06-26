@@ -168,31 +168,38 @@ export const appRouter = router({
         await updateStoryPackage(input.id, { processingStatus: "processing", processingError: null });
         // Fire-and-forget: run research package extraction in background after approval
         setImmediate(async () => {
+          const storyId = input.id;
+          // Hard 90-second timeout — pipeline must complete or we save partial data
+          const timeoutPromise = new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error("Research pipeline timeout after 90s")), 90000)
+          );
           try {
-            const story = await getStoryById(input.id);
+            const story = await getStoryById(storyId);
             if (!story) return;
-            // New direction: extract research package + images (no article writing)
-            const [rp, imagesResult] = await Promise.all([
-              extractResearchPackage(
-                story.title,
-                story.content ?? "",
-                story.sourceUrl ?? "",
-                story.viralReason ?? "",
-                story.category ?? "Aviation"
-              ),
-              (async () => {
-                const { researchImages } = await import("./soyunci");
-                return researchImages(story.title, "", story.viralReason ?? "");
-              })(),
+            // Race the pipeline against the timeout
+            const [rp, imagesResult] = await Promise.race([
+              Promise.all([
+                extractResearchPackage(
+                  story.title,
+                  story.content ?? "",
+                  story.sourceUrl ?? "",
+                  story.viralReason ?? "",
+                  story.category ?? "Aviation"
+                ),
+                (async () => {
+                  const { researchImages } = await import("./soyunci");
+                  return researchImages(story.title, "", story.viralReason ?? "");
+                })(),
+              ]),
+              timeoutPromise,
             ]);
             const { recs: imageRecommendations, candidates: imageCandidates } = imagesResult;
-            await updateStoryPackage(input.id, {
+            await updateStoryPackage(storyId, {
               processingStatus: "complete",
               viralAngle: rp.viralAngle,
               extractedFacts: JSON.stringify(rp.extractedInfo),
               sourcesResearched: rp.sourcesResearched,
               sourceConfirmation: rp.sourceConfirmation,
-              // Research package fields
               storySummary: rp.storySummary,
               researchExtracted: rp.extractedInfo,
               researchTimeline: rp.timeline,
@@ -200,29 +207,29 @@ export const appRouter = router({
               researchSources: rp.sources,
               researchContradictions: rp.contradictions,
               researchMissingInfo: rp.missingInfo,
-              // Images
               imageRecommendations,
               imageCandidates,
             });
-
-            // Auto-log to historical_posts so performance data feeds the model.
             try {
               await createHistoricalPost({
                 headline: story.title,
                 category: story.category ?? null,
                 viralAngle: rp.viralAngle ?? null,
-                storyId: input.id,
+                storyId,
                 sourceType: "approved_story",
                 usedHeadlineVariant: input.usedHeadlineVariant ?? "selected",
               });
-              console.log(`[Research] Auto-logged historical post for story ${input.id}`);
-            } catch (logErr) {
-              console.warn(`[Research] Failed to log historical post for story ${input.id}:`, logErr);
-            }
-
-            console.log(`[Research] Package extraction complete for story ${input.id}`);
+            } catch { /* non-critical */ }
+            console.log(`[Research] Package extraction complete for story ${storyId}`);
           } catch (err) {
-            console.error(`[Research] Extraction failed for story ${input.id}:`, err);
+            const msg = err instanceof Error ? err.message : String(err);
+            console.error(`[Research] Extraction failed/timed out for story ${storyId}:`, msg);
+            // Mark as complete with error note so the UI doesn't spin forever
+            await updateStoryPackage(storyId, {
+              processingStatus: "complete",
+              storySummary: `Research could not be fully extracted (${msg.includes("timeout") ? "sources took too long to load" : "fetch error"}). Try Re-Research.`,
+              sourceConfirmation: "⚠️ Pipeline did not complete — click Re-Research to retry.",
+            }).catch(() => {});
           }
         });
         return { success: true };
