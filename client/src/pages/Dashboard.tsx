@@ -617,7 +617,9 @@ export default function Dashboard() {
   });
 
   const queryInput = {
-    ...(filterStatus !== "all" ? { statusLabel: filterStatus } : {}),
+    // Never send statusLabel to the backend — it only knows the AI-assigned label,
+    // not the override. We filter by effectiveLabel (overrideLabel || statusLabel)
+    // on the frontend after all stories are loaded.
     ...(completedOnly ? { completedOnly: true } : {}),
     // When not showing history, only fetch pending/edited stories
     ...(!showHistory ? { approvalStatus: "pending" } : {}),
@@ -784,16 +786,21 @@ export default function Dashboard() {
     retryStory.mutate({ storyId });
   };
 
-  const stories = data || [];
+  const allStories = data || [];
 
   // Use override label when set, otherwise statusLabel
   const effectiveLabel = (s: any) => s.overrideLabel || s.statusLabel;
 
+  // Apply section filter on the frontend using effectiveLabel (not the backend statusLabel)
+  const stories = filterStatus === "all"
+    ? allStories
+    : allStories.filter((s) => effectiveLabel(s.story) === filterStatus);
+
   const counts = {
-    must_post: stories.filter((s) => effectiveLabel(s.story) === "must_post").length,
-    strong_candidate: stories.filter((s) => effectiveLabel(s.story) === "strong_candidate").length,
-    maybe: stories.filter((s) => effectiveLabel(s.story) === "maybe").length,
-    reject: stories.filter((s) => effectiveLabel(s.story) === "reject").length,
+    must_post: allStories.filter((s) => effectiveLabel(s.story) === "must_post").length,
+    strong_candidate: allStories.filter((s) => effectiveLabel(s.story) === "strong_candidate").length,
+    maybe: allStories.filter((s) => effectiveLabel(s.story) === "maybe").length,
+    reject: allStories.filter((s) => effectiveLabel(s.story) === "reject").length,
   };
 
   // Group stories into sections by effective label
