@@ -169,29 +169,33 @@ export const appRouter = router({
         // Fire-and-forget: run research package extraction in background after approval
         setImmediate(async () => {
           const storyId = input.id;
-          // Hard 90-second timeout — pipeline must complete or we save partial data
+          // Hard 120-second timeout — pipeline must complete or we save partial data
           const timeoutPromise = new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error("Research pipeline timeout after 90s")), 90000)
+            setTimeout(() => reject(new Error("Research pipeline timeout after 120s")), 120000)
           );
           try {
             const story = await getStoryById(storyId);
             if (!story) return;
-            // Race the pipeline against the timeout
-            const [rp, imagesResult] = await Promise.race([
-              Promise.all([
-                extractResearchPackage(
-                  story.title,
-                  story.content ?? "",
-                  story.sourceUrl ?? "",
-                  story.viralReason ?? "",
-                  story.category ?? "Aviation"
-                ),
-                (async () => {
-                  const { researchImages } = await import("./soyunci");
-                  return researchImages(story.title, "", story.viralReason ?? "");
-                })(),
-              ]),
+            // Start image research in parallel but don't let it block the research package
+            const { researchImages } = await import("./soyunci");
+            const imagesPromise = researchImages(story.title, "", story.viralReason ?? "").catch(() => ({ recs: [], candidates: {} }));
+            // Race the research pipeline against the timeout
+            const rp = await Promise.race([
+              extractResearchPackage(
+                story.title,
+                story.content ?? "",
+                story.sourceUrl ?? "",
+                story.viralReason ?? "",
+                story.category ?? "Aviation"
+              ),
               timeoutPromise,
+            ]);
+            // Get images (may already be done, or wait a bit longer)
+            const imagesResult = await Promise.race([
+              imagesPromise,
+              new Promise<{ recs: any[]; candidates: Record<string, any[]> }>((resolve) =>
+                setTimeout(() => resolve({ recs: [], candidates: {} }), 15000)
+              ),
             ]);
             const { recs: imageRecommendations, candidates: imageCandidates } = imagesResult;
             await updateStoryPackage(storyId, {
