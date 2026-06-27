@@ -357,8 +357,6 @@ export async function scoreStoryWithLLM(
 
   try {
     const { systemPrompt } = await buildScoringContext();
-    // DEBUG: log the tail of the system prompt so we can verify calibration rules are last
-    console.log(`[LLMScoring] Prompt tail (last 400 chars): ...${systemPrompt.slice(-400).replace(/\n/g, " | ")}`);
     const truncatedContent = content?.slice(0, 1200) ?? "";
     const userMessage = `Score this aviation story:\n\nTitle: "${title}"\n\nContent excerpt: "${truncatedContent}"`;
 

@@ -828,6 +828,7 @@ export async function getStoryByEventFingerprint(
         eq(stories.eventFingerprint, fingerprint),
         ne(stories.approvalStatus, "duplicate" as any),
         ne(stories.approvalStatus, "dismissed" as any),
+        ne(stories.approvalStatus, "rejected" as any),
       )
     )
     .orderBy(desc(stories.createdAt))
@@ -854,6 +855,7 @@ export async function getStoryByContentHash(
         eq(stories.contentHash, hash),
         ne(stories.approvalStatus, "duplicate" as any),
         ne(stories.approvalStatus, "dismissed" as any),
+        ne(stories.approvalStatus, "rejected" as any),
       )
     )
     .orderBy(desc(stories.createdAt))
