@@ -1496,6 +1496,70 @@ export const appRouter = router({
         recentMatches: matches.slice(0, 10)
       };
     }),
+
+    /**
+     * Score distribution diagnostic — shows the real distribution of AI scores
+     * vs editor override scores so you can verify the learning is working.
+     * Also shows what the stat learner has learned (category weights, keywords).
+     */
+    scoreDistribution: protectedProcedure.query(async () => {
+      const db = await getDb();
+      if (!db) return null;
+      const allStories = await db.select({
+        viralScore: stories.viralScore,
+        overrideScore: stories.overrideScore,
+        category: stories.category,
+        statusLabel: stories.statusLabel,
+        overrideLabel: stories.overrideLabel,
+      }).from(stories)
+        .where(sql`${stories.viralScore} IS NOT NULL`)
+        .limit(500);
+
+      const aiScores = allStories.map(s => s.viralScore).filter(s => s !== null) as number[];
+      const overrideScores = allStories.filter(s => s.overrideScore !== null).map(s => s.overrideScore as number);
+
+      const bucket = (scores: number[]) => ({
+        "0-20":   scores.filter(s => s <= 20).length,
+        "21-40":  scores.filter(s => s > 20 && s <= 40).length,
+        "41-60":  scores.filter(s => s > 40 && s <= 60).length,
+        "61-80":  scores.filter(s => s > 60 && s <= 80).length,
+        "81-95":  scores.filter(s => s > 80 && s <= 95).length,
+        "96-100": scores.filter(s => s > 95).length,
+      });
+
+      const avg = (arr: number[]) => arr.length ? Math.round(arr.reduce((a, b) => a + b, 0) / arr.length) : 0;
+      const max = (arr: number[]) => arr.length ? Math.max(...arr) : 0;
+
+      // Load what the stat learner has actually learned
+      const config = await getAllScoringConfig();
+
+      return {
+        aiScores: {
+          count: aiScores.length,
+          avg: avg(aiScores),
+          max: max(aiScores),
+          distribution: bucket(aiScores),
+          hundredsCount: aiScores.filter(s => s >= 96).length,
+        },
+        overrideScores: {
+          count: overrideScores.length,
+          avg: avg(overrideScores),
+          max: max(overrideScores),
+          distribution: bucket(overrideScores),
+        },
+        learningStatus: {
+          statExamplesCount: config["stat_examples_count"] ? parseInt(config["stat_examples_count"]) : 0,
+          statLastLearnedAt: config["stat_last_learned_at"] ?? "never",
+          statCategoryWeights: config["stat_category_weights"] ?? "none yet",
+          statKeywordBoosts: config["stat_keyword_boosts"] ?? "none yet",
+          statKeywordPenalties: config["stat_keyword_penalties"] ?? "none yet",
+          deepLearnLastAt: config["last_learned_at"] ?? "never",
+          deepLearnExamplesCount: config["last_learned_examples_count"] ? parseInt(config["last_learned_examples_count"]) : 0,
+          autoDeepLearnEnabled: config["auto_deep_learn_enabled"] !== "false",
+          overrideCountSinceLastDeepLearn: config["override_count_since_last_deep_learn"] ? parseInt(config["override_count_since_last_deep_learn"]) : 0,
+        },
+      };
+    }),
   }),
 
   // ── Historical Posts ───────────────────────────────────────────────────

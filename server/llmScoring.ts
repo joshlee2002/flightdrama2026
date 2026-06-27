@@ -342,6 +342,12 @@ export async function scoreStoryWithLLM(
         parsed.score > 100 ||
         !validLabels.includes(parsed.statusLabel)
       ) return null;
+      // Hard structural cap: the LLM can never produce a score above 95.
+      // A score of 96-100 can only come from a manual editor override.
+      // This is enforced in code, not in the prompt, so no prompt instruction
+      // can bypass it. The post-processing layer (applyStatAdjustments) can
+      // push a 95 higher if the editor's learned weights genuinely justify it.
+      parsed.score = Math.min(95, parsed.score);
       return parsed;
     } catch {
       return null;

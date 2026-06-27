@@ -166,9 +166,11 @@ export async function applyStatAdjustments(
   try {
     const adj = await loadStatAdjustments();
     let delta = 0;
-
-    // ── Category boost/penalty ────────────────────────────────────────────
     const catKey = category.toLowerCase();
+
+    // ── 1. Instagram performance category signal ──────────────────────────
+    // catBoosts already merges Instagram perf + override signals in loadStatAdjustments.
+    // We apply it here as the combined category signal.
     for (const [cat, boost] of Object.entries(adj.catBoosts)) {
       if (catKey.includes(cat) || cat.includes(catKey)) {
         delta += boost;
@@ -176,7 +178,21 @@ export async function applyStatAdjustments(
       }
     }
 
-    // ── Keyword boost/penalty from headline (weighted by signal strength) ─
+    // ── 2. Editor override category signal (was missing — now applied) ─────
+    // overrideCatBoosts is the editor-specific signal from learnFromOverridesStatistical.
+    // If you consistently push Boeing Safety from 60 to 90, this adds +15 to that
+    // category. Previously this was loaded but never applied — fixed here.
+    // We apply it as an ADDITIONAL delta (not merged with catBoosts) so the
+    // editor's direct signal is always visible and not diluted by Instagram data.
+    for (const [cat, boost] of Object.entries(adj.overrideCatBoosts)) {
+      if (catKey.includes(cat) || cat.includes(catKey)) {
+        // Override signal is authoritative — weight it 1.5× relative to Instagram signal
+        delta += Math.round(boost * 1.5);
+        break;
+      }
+    }
+
+    // ── 3. Keyword boost/penalty from headline ────────────────────────────
     const titleLower = title.toLowerCase();
     const words = titleLower.match(/\b[a-z][a-z-]{2,}\b/g) ?? [];
     // Also check bigrams (2-word phrases) since override learner extracts them
@@ -190,10 +206,13 @@ export async function applyStatAdjustments(
       if (adj.lowKws.has(token)) delta -= adj.lowKws.get(token)!;
     }
 
-    // ── Cap: ±35 so overrides can move stories across tier boundaries ─────
-    // (was ±20, which was too tight to move a story from 'maybe' to 'must_post')
-    delta = Math.max(-35, Math.min(35, delta));
-    return Math.max(0, Math.min(100, score + delta));
+    // ── Cap: ±40 so strong override signals can move stories across tiers ───
+    delta = Math.max(-40, Math.min(40, delta));
+    const finalScore = Math.max(0, Math.min(100, score + delta));
+    if (Math.abs(delta) >= 5) {
+      console.log(`[StatAdj] "${title.slice(0, 55)}" base=${score} delta=${delta > 0 ? '+' : ''}${delta} final=${finalScore} cat=${category}`);
+    }
+    return finalScore;
   } catch {
     return score; // safe fallback
   }
