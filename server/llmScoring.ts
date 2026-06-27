@@ -852,7 +852,9 @@ export async function learnFromOverrides(): Promise<{ success: boolean; summary:
     .filter(p => p._perf > 0)
     .sort((a, b) => b._perf - a._perf);
 
-  const validExamples = filteredExamples.filter(e => e.overrideScore !== null && e.overrideLabel !== null);
+  // Cap LLM examples at 50 most recent — the free statistical learner already processes all 200.
+  // The LLM doesn't improve its rules meaningfully beyond ~50 examples; it just costs more tokens.
+  const validExamples = filteredExamples.filter(e => e.overrideScore !== null && e.overrideLabel !== null).slice(0, 50);
 
   // Recency-weight examples: last 30 days count double in the analysis
   const now = Date.now();

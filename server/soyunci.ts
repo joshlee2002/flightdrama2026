@@ -31,6 +31,35 @@ import { getPerformanceInsights, getArticleStyleInsights, type PerformanceInsigh
 import { getScoringConfig, getExampleArticles } from "./db";
 import { searchImages, buildImageQueries, generateTextImageRec, type FoundImage } from "./imageSearch";
 
+
+// ── Shared pipeline context cache ─────────────────────────────────────────────
+// loadFeedbackExamples, loadVoiceExamples, buildStyleContext, and getPerformanceInsights
+// return the same data for every story in a batch. Caching them for 5 minutes avoids
+// redundant DB queries on every story processed in the same ingest run.
+interface _PipelineContextCache {
+  feedbackExamples: string;
+  voiceExamples: string;
+  styleContext: string;
+  perfInsights: PerformanceInsights | null;
+  ts: number;
+}
+let _pipelineCtxCache: _PipelineContextCache | null = null;
+const PIPELINE_CTX_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+async function _loadPipelineContext(): Promise<_PipelineContextCache> {
+  if (_pipelineCtxCache && Date.now() - _pipelineCtxCache.ts < PIPELINE_CTX_TTL_MS) {
+    return _pipelineCtxCache;
+  }
+  const [feedbackExamples, voiceExamples, styleContext, perfInsights] = await Promise.all([
+    loadFeedbackExamples(),
+    loadVoiceExamples(),
+    buildStyleContext(),
+    getPerformanceInsights(),
+  ]);
+  _pipelineCtxCache = { feedbackExamples, voiceExamples, styleContext, perfInsights, ts: Date.now() };
+  return _pipelineCtxCache;
+}
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export interface SoyunciOutput {
@@ -414,8 +443,9 @@ async function deepResearch(title: string, sourceUrl: string, rssContent = ""): 
 
     // ── No LLM synthesis step — raw sources passed directly to researchAndWrite ──
     // Eliminates one full LLM call per story. The article writer handles raw text fine.
-    // Cap at 40,000 chars — Groq llama-3.3-70b has 128k context; use more of it for multi-source stories.
-    const context = combinedSources.slice(0, 40000) || `Story: ${title}\nSource: ${sourceUrl}`;
+    // Cap at 20,000 chars — the research-package extractor reads at most 20k, article writer reads 6-8k.
+    // Storing 40k chars when nothing downstream reads past 20k wastes memory and inflates token counts.
+    const context = combinedSources.slice(0, 20000) || `Story: ${title}\nSource: ${sourceUrl}`;
     const result: DeepResearchResult = { context, sourcesResearched, primarySourceText };
     _deepResearchCache.set(cacheKey, { result, ts: Date.now() });
     return result;
@@ -1958,14 +1988,13 @@ export async function runFullSoyunciPipeline(
 ): Promise<SoyunciOutput> {
   console.log(`[Soyunci] Starting 2-call pipeline for: "${title}"`);
 
-  // Fetch sources + load context in parallel (all free, no LLM tokens)
-  const [researchResult, perfInsights, feedbackExamples, voiceExamples, styleContext] = await Promise.all([
+  // Fetch sources + load context in parallel
+  // Context helpers (feedback/voice/style/perf) are served from a 5-min cache — same data for every story in a batch.
+  const [researchResult, ctx] = await Promise.all([
     deepResearch(title, sourceUrl, content),
-    getPerformanceInsights(),
-    loadFeedbackExamples(),
-    loadVoiceExamples(),
-    buildStyleContext(),
+    _loadPipelineContext(),
   ]);
+  const { feedbackExamples, voiceExamples, styleContext, perfInsights } = ctx;
 
   const { context: researchContext, sourcesResearched, primarySourceText } = researchResult;
   const perfContext = [buildPerformanceContext(perfInsights), styleContext].filter(Boolean).join("\n");
@@ -2062,13 +2091,11 @@ export async function runResearchAndWrite(
   editorReview: EditorReview;
 }> {
     console.log(`[Soyunci] Re-research + write for: "${title}"`);
-  const [researchResult, perfInsights, feedbackExamples, voiceExamples, styleContext] = await Promise.all([
+  const [researchResult, ctx] = await Promise.all([
     deepResearch(title, sourceUrl, content),
-    getPerformanceInsights(),
-    loadFeedbackExamples(),
-    loadVoiceExamples(),
-    buildStyleContext(),
+    _loadPipelineContext(),
   ]);
+  const { feedbackExamples, voiceExamples, styleContext, perfInsights } = ctx;
   const { context: researchContext, sourcesResearched, primarySourceText } = researchResult;
   const perfContext = [buildPerformanceContext(perfInsights), styleContext].filter(Boolean).join("\n");
 
@@ -2107,11 +2134,8 @@ export async function runSoyunci(
   viralReason: string,
   _category: string
 ) {
-  const [feedbackExamples, voiceExamples] = await Promise.all([
-    loadFeedbackExamples(),
-    loadVoiceExamples(),
-  ]);
-  const combinedExamples = [voiceExamples, feedbackExamples].filter(Boolean).join("\n\n");
+  const ctx = await _loadPipelineContext();
+  const combinedExamples = [ctx.voiceExamples, ctx.feedbackExamples].filter(Boolean).join("\n\n");
   const result = await writeSoyunciArticle(title, content, "", viralReason, [], combinedExamples);
   return { article: result.article, hashtags: result.hashtags, imageRecommendations: [] };
 }
@@ -2127,11 +2151,8 @@ export async function rewriteArticleOnly(
   viralAngle: string,
   extractedFacts: string[]
 ): Promise<{ article: string; hashtags: string[] }> {
-  const [feedbackExamples, voiceExamples] = await Promise.all([
-    loadFeedbackExamples(),
-    loadVoiceExamples(),
-  ]);
-  const combinedExamples = [voiceExamples, feedbackExamples].filter(Boolean).join("\n\n");
+  const ctx = await _loadPipelineContext();
+  const combinedExamples = [ctx.voiceExamples, ctx.feedbackExamples].filter(Boolean).join("\n\n");
   return writeSoyunciArticle(title, content, researchContext, viralAngle, extractedFacts, combinedExamples);
 }
 
