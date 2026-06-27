@@ -42,6 +42,7 @@ import {
   getPendingStoriesByCategory,
   recordDuplicatePair,
   getRecentDuplicatePairs,
+  atomicIncrementScoringCounter,
 } from "./db";
 import { eq, sql } from "drizzle-orm";
 import { stories } from "../drizzle/schema";
@@ -617,27 +618,42 @@ export const appRouter = router({
         if (story?.title) {
           setImmediate(async () => {
             try {
-              const recentTitles = await getRecentStoryTitles(200);
-              // Exclude the dismissed story itself
+              // Search 1000 recent titles for the best canonical match
+              const recentTitles = await getRecentStoryTitles(1000);
               const candidates = recentTitles.filter(t => t !== story.title);
-              // Find the most similar title using simple word overlap (Jaccard)
-              const normalise = (t: string) =>
-                t.toLowerCase().replace(/[^a-z0-9 ]/g, "").split(/\s+/).filter(w => w.length > 3);
-              const dismissedWords = new Set(normalise(story.title));
+
+              // Tokenise: keep ALL tokens including short ones (FAA, 737, MAX, A320).
+              // Stop-words are filtered instead of length, so aviation identifiers
+              // and acronyms are never silently dropped.
+              const STOP_WORDS = new Set(["the","a","an","and","or","but","in","on","at","to","for","of","with","is","was","are","were","has","have","had","be","been","by","as","it","its","this","that","from","after","over","into","up","out","about","than","more","not","no","new"]);
+              const tokenise = (t: string): string[] =>
+                t.toLowerCase()
+                  .replace(/[^a-z0-9\s]/g, " ")
+                  .split(/\s+/)
+                  .filter(w => w.length > 0 && !STOP_WORDS.has(w));
+
+              const dismissedTokens = tokenise(story.title);
+              const dismissedSet = new Set(dismissedTokens);
+
               let bestMatch: string | null = null;
               let bestSim = 0;
-              for (const candidate of candidates.slice(0, 500)) {
-                const candWords = normalise(candidate);
-                const intersection = candWords.filter(w => dismissedWords.has(w)).length;
-                const unionSize = new Set([...Array.from(dismissedWords), ...candWords]).size;
-                const sim = unionSize > 0 ? intersection / unionSize : 0;
+
+              for (const candidate of candidates) {
+                const candTokens = tokenise(candidate);
+                const candSet = new Set(candTokens);
+                // Jaccard on token sets
+                let intersectionSize = 0;
+                Array.from(candSet).forEach(w => { if (dismissedSet.has(w)) intersectionSize++; });
+                const unionSize = new Set(Array.from(dismissedSet).concat(Array.from(candSet))).size;
+                const sim = unionSize > 0 ? intersectionSize / unionSize : 0;
                 if (sim > bestSim) { bestSim = sim; bestMatch = candidate; }
               }
-              // Only record if there's a reasonably similar match (sim > 0.15)
-              // to avoid recording pairs where we have no idea what the canonical is
-              if (bestMatch && bestSim > 0.15) {
+
+              // Record if similarity exceeds 0.12 (lower than before because the
+              // better tokeniser produces more meaningful overlap signals)
+              if (bestMatch && bestSim > 0.12) {
                 await recordDuplicatePair(story.title, bestMatch);
-                console.log(`[DuplicateLearning] Recorded pair: "${story.title.slice(0, 60)}" → "${bestMatch.slice(0, 60)}" (sim: ${bestSim.toFixed(2)})`);
+                console.log(`[DuplicateLearning] Recorded pair (sim ${bestSim.toFixed(2)}): "${story.title.slice(0, 60)}" → "${bestMatch.slice(0, 60)}"`);
               } else {
                 console.log(`[DuplicateLearning] No similar canonical found for "${story.title.slice(0, 60)}" (best sim: ${bestSim.toFixed(2)})`);
               }
@@ -733,7 +749,7 @@ export const appRouter = router({
             }
 
             // ── 4. Duplicate title check ─────────────────────────────────
-            if (isSimilarTitle(title, recentTitles)) {
+            if (isSimilarTitle(title, recentTitles, learnedDuplicatePairs)) {
               results.push({ url, status: "duplicate_title", title });
               continue;
             }
@@ -994,7 +1010,7 @@ export const appRouter = router({
             const candidateItems: typeof items = [];
             for (const item of items) {
               if (await hasSeenUrl(item.sourceUrl)) { skippedCount++; continue; }
-              if (isSimilarTitle(item.title, recentTitles)) {
+              if (isSimilarTitle(item.title, recentTitles, learnedDuplicatePairs)) {
                 await markUrlAsSeen(item.sourceUrl, "similar_title");
                 skippedCount++;
                 continue;
@@ -1141,18 +1157,17 @@ export const appRouter = router({
 
         // ── Targeted real-time rerank: after every 5 overrides, re-score ─────
         // pending stories in the same category as the overridden story.
-        // Uses 8B model only (cheap). Debounced: only fires when the counter
-        // reaches 5, then resets. This keeps the queue fresh without a full
-        // rerank on every single override.
+        // Uses batch scoring (8B first pass; 70B safety net for scores ≥75).
+        // Debounced: counter is incremented atomically in the DB so concurrent
+        // override clicks never race. Fires once per 5 overrides, then resets.
         setImmediate(async () => {
           try {
-            const pendingCountRaw = await getScoringConfig("targeted_rerank_pending_count");
-            const pendingCount = parseInt(pendingCountRaw ?? "0", 10) + 1;
             const TARGETED_RERANK_THRESHOLD = 5;
+            // Atomic DB increment — no read/modify/write race condition
+            const pendingCount = await atomicIncrementScoringCounter("targeted_rerank_pending_count");
 
             if (pendingCount < TARGETED_RERANK_THRESHOLD) {
-              await setScoringConfig("targeted_rerank_pending_count", String(pendingCount));
-              return;
+              return; // not yet — counter already saved atomically
             }
 
             // Threshold reached — reset counter and fire targeted rerank

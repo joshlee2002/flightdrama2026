@@ -63,33 +63,59 @@ async function buildScoringContext(): Promise<{ systemPrompt: string; hasExample
     const bucket81_100 = scores.filter(s => s > 80).length;
     const pct = (n: number) => Math.round((n / scores.length) * 100);
 
-    // Find 3 anchor examples: one high (≥88), one mid (75-87), one low (≤40)
-    const highEx = [...scored].filter(e => (e.overrideScore ?? 0) >= 88).sort((a, b) => (b.overrideScore ?? 0) - (a.overrideScore ?? 0))[0];
-    const midEx = [...scored].filter(e => (e.overrideScore ?? 0) >= 75 && (e.overrideScore ?? 0) < 88).sort((a, b) => (b.overrideScore ?? 0) - (a.overrideScore ?? 0))[0];
-    const lowEx = [...scored].filter(e => (e.overrideScore ?? 0) <= 40).sort((a, b) => (a.overrideScore ?? 0) - (b.overrideScore ?? 0))[0];
+    // Find 3 anchor examples using RECENCY as the primary sort (most recent first),
+    // then score as tiebreaker. This means the anchor reflects the editor's current
+    // taste, not just the highest score they've ever given (which could be an outlier).
+    const byRecencyThenScore = (a: typeof scored[0], b: typeof scored[0]) => {
+      const aTime = a.updatedAt ? new Date(a.updatedAt).getTime() : 0;
+      const bTime = b.updatedAt ? new Date(b.updatedAt).getTime() : 0;
+      if (bTime !== aTime) return bTime - aTime; // most recent first
+      return (b.overrideScore ?? 0) - (a.overrideScore ?? 0); // then highest score
+    };
+    // High anchor: score ≥ p75 of all scores (adapts to the editor's actual scale)
+    const sortedScores = [...scores].sort((a, b) => a - b);
+    const p75 = sortedScores[Math.floor(sortedScores.length * 0.75)] ?? maxScore;
+    const p90 = sortedScores[Math.min(Math.floor(sortedScores.length * 0.9), sortedScores.length - 1)] ?? maxScore;
+    const highThreshold = Math.max(p75, 75); // at least 75 to qualify as "high"
+    const highEx = [...scored].filter(e => (e.overrideScore ?? 0) >= highThreshold).sort(byRecencyThenScore)[0];
+    const midEx = [...scored].filter(e => (e.overrideScore ?? 0) >= 55 && (e.overrideScore ?? 0) < highThreshold).sort(byRecencyThenScore)[0];
+    const lowEx = [...scored].filter(e => (e.overrideScore ?? 0) <= 35).sort((a, b) => {
+      // For low anchors: most recent first, then lowest score
+      const aTime = a.updatedAt ? new Date(a.updatedAt).getTime() : 0;
+      const bTime = b.updatedAt ? new Date(b.updatedAt).getTime() : 0;
+      if (bTime !== aTime) return bTime - aTime;
+      return (a.overrideScore ?? 0) - (b.overrideScore ?? 0);
+    })[0];
 
     const anchors = [highEx, midEx, lowEx]
       .filter(Boolean)
       .map(e => `  Score ${e!.overrideScore}: "${(e!.title ?? "").slice(0, 70)}"`);
 
-    // Derive dynamic score range labels from editor's actual distribution
-    // "must_post" threshold = 90th percentile of editor scores (but never above maxScore)
-    const sortedScores = [...scores].sort((a, b) => a - b);
-    const p90 = sortedScores[Math.floor(sortedScores.length * 0.9)] ?? maxScore;
-    const mustPostThreshold = Math.min(p90, maxScore - 2); // always ≤ maxScore - 2
-    const strongThreshold = Math.min(mustPostThreshold - 15, 75);
+    // Derive dynamic score range labels from editor's actual distribution.
+    // mustPostThreshold = p90 of editor scores. We do NOT hard-cap at maxScore
+    // because that would prevent the model from ever suggesting a story is
+    // exceptional — instead we use maxScore as a soft nudge in the prompt text.
+    const mustPostThreshold = Math.max(p90, 80); // never lower than 80
+    const strongThreshold = Math.max(Math.min(mustPostThreshold - 12, 75), 55); // 55–75 range
+
+    // Soft ceiling: tell the model the editor's highest score, but frame it as
+    // "rarely" rather than "never" — this preserves the ability to score truly
+    // exceptional stories above the historical max.
+    const softCeilingNote = scores.length >= 20
+      ? `- Scores above ${maxScore} are very rare for this editor — only use them for genuinely exceptional, once-in-a-year stories`
+      : `- This editor's highest score so far is ${maxScore} — calibrate accordingly, but don't be afraid to go higher for a truly exceptional story`;
 
     return [
       `## CALIBRATION — You MUST match this editor's exact scoring scale`,
       `This editor has scored ${scores.length} stories. Their real distribution is:`,
-      `- Score range: ${minScore}–${maxScore} (they have NEVER given above ${maxScore})`,
-      `- Average score for stories they keep: ${avgScore}`,
+      `- Score range seen so far: ${minScore}–${maxScore} | Average: ${avgScore}`,
       `- Distribution: ${pct(bucket0_30)}% score 0–30 | ${pct(bucket31_60)}% score 31–60 | ${pct(bucket61_80)}% score 61–80 | ${pct(bucket81_100)}% score 81–100`,
-      `- DO NOT give scores above ${maxScore}. Most strong stories score ${strongThreshold}–${mustPostThreshold}.`,
-      ...(anchors.length > 0 ? [`- Real score anchors from this editor:`, ...anchors] : []),
+      softCeilingNote,
+      `- Most strong stories score ${strongThreshold}–${mustPostThreshold - 1}. Reserve ${mustPostThreshold}+ for genuinely shocking events.`,
+      ...(anchors.length > 0 ? [`- Recent real score anchors from this editor (use these to calibrate):`, ...anchors] : []),
       ``,
       `Score thresholds (calibrated to this editor's scale):`,
-      `- ${mustPostThreshold}–${maxScore} = must_post (exceptional — matches top performer pattern, shocking or deeply surprising)`,
+      `- ${mustPostThreshold}–100 = must_post (exceptional — matches top performer pattern, shocking or deeply surprising)`,
       `- ${strongThreshold}–${mustPostThreshold - 1} = strong_candidate (clear aviation drama, strong hook)`,
       `- 50–${strongThreshold - 1} = maybe (some potential but weaker hook)`,
       `- 0–49 = reject (routine news, no emotional hook)`,

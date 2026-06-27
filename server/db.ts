@@ -704,11 +704,13 @@ export async function getPendingStoriesByCategory(
 }
 
 // ── Duplicate learning helpers ────────────────────────────────────────────────
-// Stores editor-confirmed duplicate title pairs in scoring_config as a compact
-// JSON array. No new table needed — the key-value store is sufficient for the
-// small number of pairs we need (10-20 recent examples).
-//
-// Format: [{ dismissed: "title A", canonical: "title B", at: "ISO date" }, ...]
+// Stores editor-confirmed duplicate title pairs in scoring_config.
+// The JSON payload is Base64-encoded before storage so that:
+//   1. The setScoringConfig sanitiser (which collapses newlines and double spaces)
+//      never corrupts the payload — Base64 is pure ASCII with no whitespace.
+//   2. Titles with embedded quotes, commas, or special characters are safe.
+// Storage key: "duplicate_pairs_b64"
+// Format (before encoding): [{ dismissed: "title A", canonical: "title B", at: "ISO" }, ...]
 
 export interface DuplicatePair {
   dismissed: string;
@@ -716,30 +718,51 @@ export interface DuplicatePair {
   at: string;
 }
 
+const DUPLICATE_PAIRS_KEY = "duplicate_pairs_b64";
+const MAX_DUPLICATE_PAIRS = 30;
+
+/** Safely read and Base64-decode the stored pairs array. Returns [] on any error. */
+async function readStoredDuplicatePairs(): Promise<DuplicatePair[]> {
+  try {
+    const raw = await getScoringConfig(DUPLICATE_PAIRS_KEY);
+    if (!raw) return [];
+    const json = Buffer.from(raw.trim(), "base64").toString("utf8");
+    const parsed = JSON.parse(json);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Safely Base64-encode and write the pairs array. */
+async function writeStoredDuplicatePairs(pairs: DuplicatePair[]): Promise<void> {
+  const encoded = Buffer.from(JSON.stringify(pairs), "utf8").toString("base64");
+  await setScoringConfig(DUPLICATE_PAIRS_KEY, encoded);
+}
+
 /**
  * Record a duplicate pair when the editor clicks "Duplicate" on a story.
- * Keeps only the most recent 30 pairs to avoid unbounded growth.
+ *
+ * Deduplication: if a pair with the same dismissed title already exists it is
+ * removed first, then the fresh pair is prepended (effectively "refreshed").
+ * This prevents the store from filling with near-identical entries when the
+ * editor dismisses the same story pattern multiple times.
  *
  * @param dismissedTitle  - Title of the story the editor marked as duplicate
- * @param canonicalTitle  - Title of the existing story it duplicates (best guess
- *                          from recent titles, or null if unknown)
+ * @param canonicalTitle  - Title of the existing story it duplicates
  */
 export async function recordDuplicatePair(
   dismissedTitle: string,
   canonicalTitle: string | null
 ): Promise<void> {
-  if (!canonicalTitle) return; // nothing to learn from without a canonical title
+  if (!canonicalTitle) return;
   try {
-    const existing = await getScoringConfig("duplicate_pairs");
-    let pairs: DuplicatePair[] = [];
-    if (existing) {
-      try { pairs = JSON.parse(existing); } catch { pairs = []; }
-    }
-    // Prepend new pair, keep most recent 30
-    pairs.unshift({ dismissed: dismissedTitle, canonical: canonicalTitle, at: new Date().toISOString() });
-    pairs = pairs.slice(0, 30);
-    // Store as compact JSON (setScoringConfig collapses newlines, so use single-line JSON)
-    await setScoringConfig("duplicate_pairs", JSON.stringify(pairs));
+    const pairs = await readStoredDuplicatePairs();
+    // Remove any existing entry with the same dismissed title (dedup)
+    const filtered = pairs.filter(p => p.dismissed !== dismissedTitle);
+    // Prepend the fresh pair and cap at MAX_DUPLICATE_PAIRS
+    filtered.unshift({ dismissed: dismissedTitle, canonical: canonicalTitle, at: new Date().toISOString() });
+    await writeStoredDuplicatePairs(filtered.slice(0, MAX_DUPLICATE_PAIRS));
   } catch (err) {
     console.warn("[DuplicateLearning] Failed to record pair:", err);
   }
@@ -749,12 +772,33 @@ export async function recordDuplicatePair(
  * Retrieve the most recent N duplicate pairs for injection into dedup prompts.
  */
 export async function getRecentDuplicatePairs(limit = 10): Promise<DuplicatePair[]> {
-  try {
-    const raw = await getScoringConfig("duplicate_pairs");
-    if (!raw) return [];
-    const pairs: DuplicatePair[] = JSON.parse(raw);
-    return Array.isArray(pairs) ? pairs.slice(0, limit) : [];
-  } catch {
-    return [];
-  }
+  const pairs = await readStoredDuplicatePairs();
+  return pairs.slice(0, limit);
+}
+
+// ── Atomic counter helper ─────────────────────────────────────────────────────
+
+/**
+ * Atomically increment a numeric counter stored in scoring_config.
+ * Uses a single SQL statement (INSERT … ON DUPLICATE KEY UPDATE col = col + 1)
+ * so concurrent calls never race — the DB serialises the increment itself.
+ *
+ * Returns the NEW value after the increment.
+ * If the key doesn't exist yet it is created with an initial value of 1.
+ */
+export async function atomicIncrementScoringCounter(key: string): Promise<number> {
+  const db = await getDb();
+  if (!db) return 0;
+  // MySQL: INSERT … ON DUPLICATE KEY UPDATE performs an atomic read-modify-write
+  await db.execute(
+    sql`INSERT INTO scoring_config (configKey, configValue)
+        VALUES (${key}, '1')
+        ON DUPLICATE KEY UPDATE configValue = CAST(CAST(configValue AS UNSIGNED) + 1 AS CHAR)`
+  );
+  const result = await db
+    .select({ v: scoringConfig.configValue })
+    .from(scoringConfig)
+    .where(eq(scoringConfig.configKey, key))
+    .limit(1);
+  return parseInt(result[0]?.v ?? "0", 10);
 }

@@ -479,12 +479,20 @@ const AIRLINE_KEYWORDS = [
  * 1. Word-overlap Jaccard similarity (threshold 0.35, stop-words stripped)
  * 2. Same aircraft/airline entity + same incident keyword
  * 3. Same airline + same incident keyword
+ * 4. (Optional) Learned pairs: if the new title is highly similar to a
+ *    previously dismissed title, treat it as a duplicate immediately without
+ *    waiting for the LLM. This short-circuits the LLM call entirely for
+ *    patterns the editor has already confirmed as duplicates.
  *
  * NOTE: Location+incident matching (same city + same event type) is intentionally
  * NOT handled here because it cannot distinguish a same-story repost from a
  * genuine follow-up angle. That case is handled by llmDedupCheck() below.
  */
-export function isSimilarTitle(newTitle: string, existingTitles: string[]): boolean {
+export function isSimilarTitle(
+  newTitle: string,
+  existingTitles: string[],
+  learnedPairs?: Array<{ dismissed: string; canonical: string }>
+): boolean {
   const normalise = (t: string) =>
     t
       .toLowerCase()
@@ -495,6 +503,22 @@ export function isSimilarTitle(newTitle: string, existingTitles: string[]): bool
   const newWordsArr = normalise(newTitle);
   const newWords = new Set(newWordsArr);
   if (newWords.size === 0) return false;
+
+  // Strategy 4: learned pairs fast-check (runs before the Jaccard loop)
+  // If the new title is highly similar (Jaccard > 0.55) to a previously
+  // dismissed title, it is almost certainly the same story pattern.
+  // Threshold is higher than the main Jaccard (0.35) to avoid false positives
+  // from the smaller learned sample.
+  if (learnedPairs && learnedPairs.length > 0) {
+    for (const pair of learnedPairs) {
+      const dismissedWords = normalise(pair.dismissed);
+      const dismissedSet = new Set(dismissedWords);
+      const intersection = newWordsArr.filter(w => dismissedSet.has(w));
+      const unionSize = new Set(newWordsArr.concat(dismissedWords)).size;
+      const sim = unionSize > 0 ? intersection.length / unionSize : 0;
+      if (sim > 0.55) return true; // very high overlap with a known-duplicate pattern
+    }
+  }
 
   const newLc = newTitle.toLowerCase();
   const newAircraft = AIRCRAFT_ENTITY_KEYWORDS.filter(k => newLc.includes(k));

@@ -183,7 +183,7 @@ export async function scheduledIngestHandler(req: Request, res: Response) {
           continue;
         }
 
-        if (isSimilarTitle(item.title || "", recentTitles)) {
+        if (isSimilarTitle(item.title || "", recentTitles, learnedDuplicatePairs)) {
           markSeenBatch.push({ url: item.sourceUrl, reason: "duplicate_title" });
           skippedCount++;
           continue;
