@@ -513,32 +513,48 @@ export async function learnFromOverridesStatistical(): Promise<{
   }
 
   // ── 1. Category bias analysis ─────────────────────────────────────────────
-  // For each category, compute average (overrideScore - viralScore)
-  const categoryDrifts: Record<string, { totalDrift: number; count: number }> = {};
-  let totalDrift = 0;
+  // Track the editor's ABSOLUTE preferred score per category, then compare to
+  // the overall average preferred score. This correctly identifies which categories
+  // the editor genuinely prefers vs dislikes — NOT how much they differ from the AI.
+  //
+  // Example: if editor gives Celebrity stories avg 70 and overall avg is 55,
+  // Celebrity gets +15 (editor likes it). This is correct.
+  // Old approach: if AI scored Celebrity 90 and editor said 70, it recorded -20
+  // ("editor dislikes Celebrity") — WRONG.
+  const categoryScores: Record<string, { totalScore: number; count: number }> = {};
+  let totalEditorScore = 0;
+  let totalEditorCount = 0;
 
   for (const ex of examples) {
-    if (ex.overrideScore === null || ex.viralScore === null) continue;
-    const drift = ex.overrideScore - ex.viralScore;
-    totalDrift += drift;
+    if (ex.overrideScore === null) continue;
+    totalEditorScore += ex.overrideScore;
+    totalEditorCount++;
     const cat = ex.category ?? "General Aviation";
-    if (!categoryDrifts[cat]) categoryDrifts[cat] = { totalDrift: 0, count: 0 };
-    categoryDrifts[cat].totalDrift += drift;
-    categoryDrifts[cat].count++;
+    if (!categoryScores[cat]) categoryScores[cat] = { totalScore: 0, count: 0 };
+    categoryScores[cat].totalScore += ex.overrideScore;
+    categoryScores[cat].count++;
   }
 
-  const avgOverallDrift = totalDrift / examples.length;
+  const avgEditorScore = totalEditorCount > 0 ? totalEditorScore / totalEditorCount : 60;
+  // Also compute overall drift for the summary line
+  let totalDrift = 0;
+  for (const ex of examples) {
+    if (ex.overrideScore !== null && ex.viralScore !== null) totalDrift += ex.overrideScore - ex.viralScore;
+  }
+  const avgOverallDrift = examples.length > 0 ? totalDrift / examples.length : 0;
 
   // Build category weight string — only include categories with ≥2 examples
-  const catEntries = Object.entries(categoryDrifts)
+  // Adjustment = (category avg editor score) - (overall avg editor score)
+  // This tells the scoring system: "for this category, add/subtract X from the base score"
+  const catEntries = Object.entries(categoryScores)
     .filter(([, v]) => v.count >= 2)
     .map(([cat, v]) => {
-      const avg = Math.round(v.totalDrift / v.count);
-      const direction = avg > 0 ? `+${avg}` : `${avg}`;
-      return `${cat}: ${direction} pts avg (${v.count} overrides)`;
+      const catAvg = v.totalScore / v.count;
+      const adjustment = Math.round(catAvg - avgEditorScore);
+      const direction = adjustment > 0 ? `+${adjustment}` : `${adjustment}`;
+      return `${cat}: ${direction} pts avg (${v.count} overrides, editor avg: ${Math.round(catAvg)})`;
     })
     .sort((a, b) => {
-      // Sort by magnitude of drift descending
       const aVal = Math.abs(parseInt(a.match(/([+-]\d+)/)?.[1] ?? "0"));
       const bVal = Math.abs(parseInt(b.match(/([+-]\d+)/)?.[1] ?? "0"));
       return bVal - aVal;
@@ -549,20 +565,20 @@ export async function learnFromOverridesStatistical(): Promise<{
     : "Not enough data per category yet.";
 
   // ── 2. Keyword frequency analysis ────────────────────────────────────────
-  // Split examples into "editor scored higher" vs "editor scored lower"
-  // Threshold is 20 pts (not 10). A small nudge like 100→90 is a minor correction
-  // and should NOT teach the system to avoid those words. Only deliberate large moves
-  // (e.g. 100→70 or 100→30) represent a genuine signal about topic quality.
-  // This prevents core aviation words like 'boeing' and 'aircraft' from being
-  // incorrectly penalised just because they appear in slightly-downgraded stories.
-  const SIGNIFICANT_DRIFT = 20; // only count overrides with ≥20 point drift
+  // Split examples into "editor prefers" vs "editor avoids" based on ABSOLUTE score
+  // vs the overall editor average. This avoids penalising words that appear in stories
+  // the AI over-scored but the editor still rated reasonably.
+  //
+  // "Boosted" = editor scored this story significantly ABOVE their own average
+  // "Penalised" = editor scored this story significantly BELOW their own average
+  const ABSOLUTE_THRESHOLD = 15; // stories ≥15 pts above/below editor's own average
 
   const boostedTitles = examples
-    .filter(e => e.overrideScore !== null && e.viralScore !== null && (e.overrideScore - e.viralScore) >= SIGNIFICANT_DRIFT)
+    .filter(e => e.overrideScore !== null && (e.overrideScore - avgEditorScore) >= ABSOLUTE_THRESHOLD)
     .map(e => `${e.title ?? ""} ${e.content?.slice(0, 300) ?? ""}`.toLowerCase());
 
   const penalisedTitles = examples
-    .filter(e => e.overrideScore !== null && e.viralScore !== null && (e.viralScore - e.overrideScore) >= SIGNIFICANT_DRIFT)
+    .filter(e => e.overrideScore !== null && (avgEditorScore - e.overrideScore) >= ABSOLUTE_THRESHOLD)
     .map(e => `${e.title ?? ""} ${e.content?.slice(0, 300) ?? ""}`.toLowerCase());
 
   function extractKeywords(texts: string[]): Record<string, number> {

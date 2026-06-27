@@ -630,7 +630,7 @@ export interface CostControlConfig {
 export async function getCostControlConfig(): Promise<CostControlConfig> {
   const db = await getDb();
   if (!db) {
-    return { llmScoringEnabled: false, autoPerfAnalysisEnabled: false, autoKeywordRegenEnabled: false, autoDeepLearnEnabled: false };
+    return { llmScoringEnabled: false, autoPerfAnalysisEnabled: false, autoKeywordRegenEnabled: false, autoDeepLearnEnabled: true };
   }
   const rows = await db.select().from(scoringConfig).where(
     sql`configKey IN ('llm_scoring_enabled','auto_perf_analysis_enabled','auto_keyword_regen_enabled','auto_deep_learn_enabled')`
