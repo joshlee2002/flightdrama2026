@@ -657,3 +657,104 @@ export async function setCostControlConfig(config: Partial<CostControlConfig>): 
     }
   }
 }
+
+// ── Targeted rerank helpers ───────────────────────────────────────────────────
+
+/**
+ * Fetch pending stories in a given category (or all pending stories if no
+ * category is provided) that have NOT been manually overridden.
+ * Used by the targeted rerank trigger to re-score only the stories most likely
+ * to benefit from the editor's latest override signal.
+ *
+ * @param category  - Category string to filter by (e.g. "Boeing Safety"). If null,
+ *                    returns all pending non-overridden stories up to the limit.
+ * @param limit     - Max stories to return (default 50)
+ */
+export async function getPendingStoriesByCategory(
+  category: string | null,
+  limit = 50
+): Promise<Array<{ id: number; title: string; content: string | null; viralScore: number; statusLabel: string; category: string | null; viralReason: string | null }>> {
+  const db = await getDb();
+  if (!db) return [];
+
+  const conditions: any[] = [
+    eq(stories.approvalStatus, "pending" as any),
+    sql`${stories.overrideScore} IS NULL`,
+  ];
+
+  if (category) {
+    // Fuzzy match: same category string (case-insensitive LIKE)
+    conditions.push(sql`LOWER(${stories.category}) LIKE LOWER(${`%${category}%`})`);
+  }
+
+  return db
+    .select({
+      id: stories.id,
+      title: stories.title,
+      content: stories.content,
+      viralScore: stories.viralScore,
+      statusLabel: stories.statusLabel,
+      category: stories.category,
+      viralReason: stories.viralReason,
+    })
+    .from(stories)
+    .where(and(...conditions))
+    .orderBy(desc(stories.createdAt))
+    .limit(limit);
+}
+
+// ── Duplicate learning helpers ────────────────────────────────────────────────
+// Stores editor-confirmed duplicate title pairs in scoring_config as a compact
+// JSON array. No new table needed — the key-value store is sufficient for the
+// small number of pairs we need (10-20 recent examples).
+//
+// Format: [{ dismissed: "title A", canonical: "title B", at: "ISO date" }, ...]
+
+export interface DuplicatePair {
+  dismissed: string;
+  canonical: string;
+  at: string;
+}
+
+/**
+ * Record a duplicate pair when the editor clicks "Duplicate" on a story.
+ * Keeps only the most recent 30 pairs to avoid unbounded growth.
+ *
+ * @param dismissedTitle  - Title of the story the editor marked as duplicate
+ * @param canonicalTitle  - Title of the existing story it duplicates (best guess
+ *                          from recent titles, or null if unknown)
+ */
+export async function recordDuplicatePair(
+  dismissedTitle: string,
+  canonicalTitle: string | null
+): Promise<void> {
+  if (!canonicalTitle) return; // nothing to learn from without a canonical title
+  try {
+    const existing = await getScoringConfig("duplicate_pairs");
+    let pairs: DuplicatePair[] = [];
+    if (existing) {
+      try { pairs = JSON.parse(existing); } catch { pairs = []; }
+    }
+    // Prepend new pair, keep most recent 30
+    pairs.unshift({ dismissed: dismissedTitle, canonical: canonicalTitle, at: new Date().toISOString() });
+    pairs = pairs.slice(0, 30);
+    // Store as compact JSON (setScoringConfig collapses newlines, so use single-line JSON)
+    await setScoringConfig("duplicate_pairs", JSON.stringify(pairs));
+  } catch (err) {
+    console.warn("[DuplicateLearning] Failed to record pair:", err);
+  }
+}
+
+/**
+ * Retrieve the most recent N duplicate pairs for injection into dedup prompts.
+ */
+export async function getRecentDuplicatePairs(limit = 10): Promise<DuplicatePair[]> {
+  try {
+    const raw = await getScoringConfig("duplicate_pairs");
+    if (!raw) return [];
+    const pairs: DuplicatePair[] = JSON.parse(raw);
+    return Array.isArray(pairs) ? pairs.slice(0, limit) : [];
+  } catch {
+    return [];
+  }
+}

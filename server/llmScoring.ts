@@ -43,6 +43,60 @@ async function buildScoringContext(): Promise<{ systemPrompt: string; hasExample
     getHistoricalPosts(100), // fetch real Instagram performance data
   ]);
 
+  // ── Score calibration: compute editor's actual distribution ──────────────
+  // The LLM tends to give 100s freely unless we anchor it to the editor's real scale.
+  // We compute the actual distribution from override history and inject it as a
+  // hard calibration constraint BEFORE the score range definitions.
+  const calibrationBlock = (() => {
+    const scored = examples.filter(e => e.overrideScore !== null);
+    if (scored.length < 5) return null; // not enough data yet
+
+    const scores = scored.map(e => e.overrideScore as number);
+    const maxScore = Math.max(...scores);
+    const minScore = Math.min(...scores);
+    const avgScore = Math.round(scores.reduce((a, b) => a + b, 0) / scores.length);
+
+    // Distribution buckets
+    const bucket0_30 = scores.filter(s => s <= 30).length;
+    const bucket31_60 = scores.filter(s => s > 30 && s <= 60).length;
+    const bucket61_80 = scores.filter(s => s > 60 && s <= 80).length;
+    const bucket81_100 = scores.filter(s => s > 80).length;
+    const pct = (n: number) => Math.round((n / scores.length) * 100);
+
+    // Find 3 anchor examples: one high (≥88), one mid (75-87), one low (≤40)
+    const highEx = [...scored].filter(e => (e.overrideScore ?? 0) >= 88).sort((a, b) => (b.overrideScore ?? 0) - (a.overrideScore ?? 0))[0];
+    const midEx = [...scored].filter(e => (e.overrideScore ?? 0) >= 75 && (e.overrideScore ?? 0) < 88).sort((a, b) => (b.overrideScore ?? 0) - (a.overrideScore ?? 0))[0];
+    const lowEx = [...scored].filter(e => (e.overrideScore ?? 0) <= 40).sort((a, b) => (a.overrideScore ?? 0) - (b.overrideScore ?? 0))[0];
+
+    const anchors = [highEx, midEx, lowEx]
+      .filter(Boolean)
+      .map(e => `  Score ${e!.overrideScore}: "${(e!.title ?? "").slice(0, 70)}"`);
+
+    // Derive dynamic score range labels from editor's actual distribution
+    // "must_post" threshold = 90th percentile of editor scores (but never above maxScore)
+    const sortedScores = [...scores].sort((a, b) => a - b);
+    const p90 = sortedScores[Math.floor(sortedScores.length * 0.9)] ?? maxScore;
+    const mustPostThreshold = Math.min(p90, maxScore - 2); // always ≤ maxScore - 2
+    const strongThreshold = Math.min(mustPostThreshold - 15, 75);
+
+    return [
+      `## CALIBRATION — You MUST match this editor's exact scoring scale`,
+      `This editor has scored ${scores.length} stories. Their real distribution is:`,
+      `- Score range: ${minScore}–${maxScore} (they have NEVER given above ${maxScore})`,
+      `- Average score for stories they keep: ${avgScore}`,
+      `- Distribution: ${pct(bucket0_30)}% score 0–30 | ${pct(bucket31_60)}% score 31–60 | ${pct(bucket61_80)}% score 61–80 | ${pct(bucket81_100)}% score 81–100`,
+      `- DO NOT give scores above ${maxScore}. Most strong stories score ${strongThreshold}–${mustPostThreshold}.`,
+      ...(anchors.length > 0 ? [`- Real score anchors from this editor:`, ...anchors] : []),
+      ``,
+      `Score thresholds (calibrated to this editor's scale):`,
+      `- ${mustPostThreshold}–${maxScore} = must_post (exceptional — matches top performer pattern, shocking or deeply surprising)`,
+      `- ${strongThreshold}–${mustPostThreshold - 1} = strong_candidate (clear aviation drama, strong hook)`,
+      `- 50–${strongThreshold - 1} = maybe (some potential but weaker hook)`,
+      `- 0–49 = reject (routine news, no emotional hook)`,
+      `- AUTOMATIC REJECT (score 0–15): listicles, travel guides, product reviews, opinion columns with no news event, sponsored content, award announcements, any headline starting with a number followed by a noun ("16 Hotels...", "5 Reasons...").`,
+    ].join("\n");
+  })();
+
   const learnedRules = config["learned_scoring_rules"] ?? null;
   const learnedWeights = config["learned_category_weights"] ?? null;
   const learnedInsights = config["learned_editor_insights"] ?? null;
@@ -130,16 +184,20 @@ async function buildScoringContext(): Promise<{ systemPrompt: string; hasExample
     : null;
 
   // ── Build the full system prompt ──────────────────────────────────────────
+  // If we have calibration data, use it as the primary score range definition.
+  // Otherwise fall back to the static defaults.
+  const staticScoreRanges = `Score from 0–100:
+- 88–98 = must_post (matches top performer pattern — shocking, emotional, or deeply surprising; DO NOT score above 98)
+- 70–87 = strong_candidate (similar to strong performers — clear hook, aviation drama)
+- 50–69 = maybe (some potential but weaker hook than typical performers)
+- 0–49 = reject (routine news, no emotional hook, not similar to any top performer)
+- AUTOMATIC REJECT (score 0–15): listicles, travel guides, product reviews, opinion columns with no news event, sponsored content, award announcements, any headline starting with a number followed by a noun ("16 Hotels...", "5 Reasons...").`;
+
   let systemPrompt = `You are a viral content scoring engine for FlightDrama, an aviation Instagram/TikTok/YouTube account.
 
 Your PRIMARY job is to predict which stories will perform like the TOP PERFORMERS shown below — stories that got real views, likes, and shares from FlightDrama's audience. Use the Instagram performance data as your main reference, not generic virality theory.
 
-Score from 0–100:
-- 88–100 = must_post (matches top performer pattern — shocking, emotional, or deeply surprising)
-- 70–87 = strong_candidate (similar to strong performers — clear hook, aviation drama)
-- 55–69 = maybe (some potential but weaker hook than typical performers)
-- 0–54 = reject (routine news, no emotional hook, not similar to any top performer)
-- AUTOMATIC REJECT (score 0-15): listicles, travel guides, product reviews, opinion columns with no news event, sponsored content, award announcements, any headline starting with a number followed by a noun ("16 Hotels...", "5 Reasons...").`;
+${calibrationBlock ?? staticScoreRanges}`;
 
   // Instagram performance data goes FIRST — it's the primary signal
   if (instagramBlock) {

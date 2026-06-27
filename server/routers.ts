@@ -39,6 +39,9 @@ import {
   deleteExampleArticle,
   getCostControlConfig,
   setCostControlConfig,
+  getPendingStoriesByCategory,
+  recordDuplicatePair,
+  getRecentDuplicatePairs,
 } from "./db";
 import { eq, sql } from "drizzle-orm";
 import { stories } from "../drizzle/schema";
@@ -607,6 +610,43 @@ export const appRouter = router({
         await updateStoryApproval(input.id, "duplicate");
         // Block the URL permanently — duplicate = never show this again
         if (story?.sourceUrl) await markUrlAsSeen(story.sourceUrl, "duplicate");
+
+        // ── Duplicate learning: record the dismissed title + best-guess canonical ──
+        // Find the most similar recent story title to use as the canonical pair.
+        // This teaches the dedup LLM what patterns the editor considers duplicates.
+        if (story?.title) {
+          setImmediate(async () => {
+            try {
+              const recentTitles = await getRecentStoryTitles(200);
+              // Exclude the dismissed story itself
+              const candidates = recentTitles.filter(t => t !== story.title);
+              // Find the most similar title using simple word overlap (Jaccard)
+              const normalise = (t: string) =>
+                t.toLowerCase().replace(/[^a-z0-9 ]/g, "").split(/\s+/).filter(w => w.length > 3);
+              const dismissedWords = new Set(normalise(story.title));
+              let bestMatch: string | null = null;
+              let bestSim = 0;
+              for (const candidate of candidates.slice(0, 500)) {
+                const candWords = normalise(candidate);
+                const intersection = candWords.filter(w => dismissedWords.has(w)).length;
+                const unionSize = new Set([...Array.from(dismissedWords), ...candWords]).size;
+                const sim = unionSize > 0 ? intersection / unionSize : 0;
+                if (sim > bestSim) { bestSim = sim; bestMatch = candidate; }
+              }
+              // Only record if there's a reasonably similar match (sim > 0.15)
+              // to avoid recording pairs where we have no idea what the canonical is
+              if (bestMatch && bestSim > 0.15) {
+                await recordDuplicatePair(story.title, bestMatch);
+                console.log(`[DuplicateLearning] Recorded pair: "${story.title.slice(0, 60)}" → "${bestMatch.slice(0, 60)}" (sim: ${bestSim.toFixed(2)})`);
+              } else {
+                console.log(`[DuplicateLearning] No similar canonical found for "${story.title.slice(0, 60)}" (best sim: ${bestSim.toFixed(2)})`);
+              }
+            } catch (err) {
+              console.warn("[DuplicateLearning] Failed to record pair:", err);
+            }
+          });
+        }
+
         return { success: true };
       }),
 
@@ -657,7 +697,10 @@ export const appRouter = router({
     processUrls: protectedProcedure
       .input(z.object({ urls: z.array(z.string()) }))
       .mutation(async ({ input }) => {
-        const recentTitles = await getRecentStoryTitles(300);
+        const [recentTitles, learnedDuplicatePairs] = await Promise.all([
+          getRecentStoryTitles(300),
+          getRecentDuplicatePairs(10),
+        ]);
         const results: {
           url: string;
           status: "complete" | "duplicate_url" | "duplicate_title" | "not_aviation" | "error";
@@ -696,12 +739,12 @@ export const appRouter = router({
             }
             // LLM dedup for location+incident matches
             const locMatches = getLocationIncidentMatches(title, recentTitles);
-            if (locMatches.length > 0 && await llmDedupCheck(title, locMatches, invokeLLM)) {
+            if (locMatches.length > 0 && await llmDedupCheck(title, locMatches, invokeLLM, learnedDuplicatePairs)) {
               results.push({ url, status: "duplicate_title", title });
               continue;
             }
 
-            // ── 5. Viral scoring ─────────────────────────────────────────
+            // ── 5. Viral scoring ────────────────────────────────────────────
             const scoring = scoreStory(title, content);
 
             // ── 6. Save story to DB ──────────────────────────────────────
@@ -927,7 +970,10 @@ export const appRouter = router({
       // immediately so the client never hits a request timeout.
       setImmediate(async () => {
         const sources = await getActiveRssSources();
-        const recentTitles = await getRecentStoryTitles(5000);
+        const [recentTitles, learnedDuplicatePairs] = await Promise.all([
+          getRecentStoryTitles(5000),
+          getRecentDuplicatePairs(10),
+        ]);
         let newCount = 0;
         let skippedCount = 0;
 
@@ -955,7 +1001,7 @@ export const appRouter = router({
               }
               // LLM dedup for location+incident matches
               const locMatches = getLocationIncidentMatches(item.title, recentTitles);
-              if (locMatches.length > 0 && await llmDedupCheck(item.title, locMatches, invokeLLM)) {
+              if (locMatches.length > 0 && await llmDedupCheck(item.title, locMatches, invokeLLM, learnedDuplicatePairs)) {
                 await markUrlAsSeen(item.sourceUrl, "similar_title");
                 skippedCount++;
                 continue;
@@ -1092,6 +1138,82 @@ export const appRouter = router({
         learnFromOverridesStatistical().catch(err =>
           console.warn("[StatLearn] Background stat learn failed:", err)
         );
+
+        // ── Targeted real-time rerank: after every 5 overrides, re-score ─────
+        // pending stories in the same category as the overridden story.
+        // Uses 8B model only (cheap). Debounced: only fires when the counter
+        // reaches 5, then resets. This keeps the queue fresh without a full
+        // rerank on every single override.
+        setImmediate(async () => {
+          try {
+            const pendingCountRaw = await getScoringConfig("targeted_rerank_pending_count");
+            const pendingCount = parseInt(pendingCountRaw ?? "0", 10) + 1;
+            const TARGETED_RERANK_THRESHOLD = 5;
+
+            if (pendingCount < TARGETED_RERANK_THRESHOLD) {
+              await setScoringConfig("targeted_rerank_pending_count", String(pendingCount));
+              return;
+            }
+
+            // Threshold reached — reset counter and fire targeted rerank
+            await setScoringConfig("targeted_rerank_pending_count", "0");
+            await setScoringConfig("targeted_rerank_last_at", new Date().toISOString());
+
+            // Get the category of the story that was just overridden
+            const overriddenStory = await getStoryById(input.id);
+            const targetCategory = overriddenStory?.category ?? null;
+
+            console.log(`[TargetedRerank] Triggered after ${TARGETED_RERANK_THRESHOLD} overrides — re-scoring pending stories in category: ${targetCategory ?? "all"}`);  
+
+            // Fetch up to 50 pending stories in that category (or all if no category)
+            const toRerank = await getPendingStoriesByCategory(targetCategory, 50);
+
+            if (toRerank.length === 0) {
+              console.log("[TargetedRerank] No pending stories to re-score in this category");
+              return;
+            }
+
+            // Batch score in groups of 10 using 8B model only
+            const BATCH_SIZE = 10;
+            let completed = 0;
+            for (let i = 0; i < toRerank.length; i += BATCH_SIZE) {
+              const batch = toRerank.slice(i, i + BATCH_SIZE);
+              try {
+                const batchInputs: BatchScoringInput[] = batch.map(s => ({
+                  title: s.title,
+                  content: s.content || "",
+                  ruleScore: {
+                    score: s.viralScore,
+                    statusLabel: s.statusLabel as any,
+                    category: s.category ?? "General Aviation",
+                    viralReason: s.viralReason ?? "",
+                    triggers: [],
+                    viralExplanation: "",
+                  },
+                }));
+                const results = await batchScoreStoriesWithLLM(batchInputs);
+                for (let j = 0; j < batch.length; j++) {
+                  const story = batch[j];
+                  const scoring = results[j];
+                  if (!scoring) continue;
+                  try {
+                    await updateStoryScores(story.id, scoring.score, scoring.statusLabel, scoring.viralReason, scoring.category, scoring.scoringMethod);
+                    await updateStoryTriggers(story.id, scoring.triggers);
+                    completed++;
+                  } catch (err) {
+                    console.error(`[TargetedRerank] Failed to update story ${story.id}:`, err);
+                  }
+                }
+              } catch (err) {
+                console.error(`[TargetedRerank] Batch ${i}-${i + BATCH_SIZE} failed:`, err);
+              }
+            }
+            console.log(`[TargetedRerank] Completed re-scoring ${completed}/${toRerank.length} stories in category: ${targetCategory ?? "all"}`);
+          } catch (err) {
+            console.warn("[TargetedRerank] Failed:", err);
+          }
+        });
+
         // ── Override-driven feed regeneration ─────────────────────────────────
         // If the editor significantly boosts (≥70) or rejects (≤30) a story,
         // count it as a feed learning signal — same auto-regen threshold as ratings.

@@ -31,6 +31,7 @@ import {
   updateRssSourceLastFetched,
   createStoryPackage,
   getDb,
+  getRecentDuplicatePairs,
 } from "./db";
 import {
   fetchRssFeed,
@@ -98,7 +99,10 @@ export async function scheduledIngestHandler(req: Request, res: Response) {
     }
 
     const sources = await getActiveRssSources();
-    const recentTitles = await getRecentStoryTitles(5000);
+    const [recentTitles, learnedDuplicatePairs] = await Promise.all([
+      getRecentStoryTitles(5000),
+      getRecentDuplicatePairs(10), // inject editor-confirmed duplicate pairs into dedup LLM
+    ]);
     let newCount = 0;
     let skippedCount = 0;
 
@@ -188,7 +192,7 @@ export async function scheduledIngestHandler(req: Request, res: Response) {
         // LLM dedup: check location+incident matches that fast checks can't resolve
         const locationMatches = getLocationIncidentMatches(item.title || "", recentTitles);
         if (locationMatches.length > 0) {
-          const isDup = await llmDedupCheck(item.title || "", locationMatches, invokeLLM);
+          const isDup = await llmDedupCheck(item.title || "", locationMatches, invokeLLM, learnedDuplicatePairs);
           if (isDup) {
             markSeenBatch.push({ url: item.sourceUrl, reason: "duplicate_title" });
             skippedCount++;

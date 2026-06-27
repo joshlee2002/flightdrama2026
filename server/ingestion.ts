@@ -580,7 +580,8 @@ export async function llmDedupCheck(
     model?: string;
     messages: Array<{ role: "system" | "user"; content: string }>;
     maxTokens?: number;
-  }) => Promise<{ choices: Array<{ message: { content: string } }> }>
+  }) => Promise<{ choices: Array<{ message: { content: string } }> }>,
+  learnedPairs?: Array<{ dismissed: string; canonical: string }>
 ): Promise<boolean> {
   if (matches.length === 0) return false;
 
@@ -591,13 +592,22 @@ export async function llmDedupCheck(
     .map((existing, i) => `Pair ${i + 1}:\n  EXISTING: "${existing}"\n  NEW: "${newTitle}"`)
     .join("\n\n");
 
+  // Inject learned duplicate pairs from editor history as few-shot examples
+  const learnedExamplesBlock = learnedPairs && learnedPairs.length > 0
+    ? `\n\n## LEARNED EXAMPLES (editor-confirmed duplicates):\n` +
+      `These title pairs were marked as duplicates by the editor. Use them to calibrate your judgment:\n` +
+      learnedPairs.slice(0, 10).map((p, i) =>
+        `${i + 1}. DUPLICATE pair:\n   EXISTING: "${p.canonical}"\n   DISMISSED: "${p.dismissed}"`
+      ).join("\n\n")
+    : "";
+
   const prompt = `You are a duplicate-detection engine for an aviation news Instagram account.
 
 A story is a DUPLICATE if it describes the SAME physical event (same crash, same incident, same emergency) as the existing story, even if the wording is completely different. Different outlets often report the same event with different headlines.
 
 A story is a NEW_ANGLE only if it contains genuinely NEW information that was not available at the time of the original report — for example: an investigation being launched, charges filed, victims identified by name, cause of the incident revealed, survivors speaking out, or a safety review ordered.
 
-Breaking news follow-ups that just add a death toll or injury count to the same event are still DUPLICATES.
+Breaking news follow-ups that just add a death toll or injury count to the same event are still DUPLICATES.${learnedExamplesBlock}
 
 For each pair, respond with DUPLICATE or NEW_ANGLE.
 
