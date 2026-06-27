@@ -37,7 +37,7 @@ export type LLMScoringResult = ScoringResult & {
 
 async function buildScoringContext(): Promise<{ systemPrompt: string; hasExamples: boolean }> {
   const [examples, config] = await Promise.all([
-    getOverrideExamplesFromDb(20),
+    getOverrideExamplesFromDb(50), // increased from 20 — more examples = better pattern matching
     getAllScoringConfig(),
   ]);
 
@@ -49,14 +49,23 @@ async function buildScoringContext(): Promise<{ systemPrompt: string; hasExample
   const statKeywordBoosts = config["stat_keyword_boosts"] ?? null;
   const statKeywordPenalties = config["stat_keyword_penalties"] ?? null;
 
+  const validExamples = examples.filter(e => e.overrideScore !== null && e.overrideLabel !== null);
+
+  // Sort: show the most instructive examples first — large drift examples teach the most
+  const sortedExamples = [...validExamples].sort((a, b) => {
+    const driftA = Math.abs((a.overrideScore ?? 0) - (a.viralScore ?? 0));
+    const driftB = Math.abs((b.overrideScore ?? 0) - (b.viralScore ?? 0));
+    return driftB - driftA; // largest drift first
+  });
+
   const examplesBlock =
-    examples.length > 0
-      ? examples
-          .filter(e => e.overrideScore !== null && e.overrideLabel !== null)
-          .map(
-            (e, i) =>
-              `Example ${i + 1}:\n  Title: "${e.title}"\n  Rule-based score: ${e.viralScore}\n  Editor override: ${e.overrideScore} (${e.overrideLabel})\n  Category: ${e.category ?? "unknown"}`
-          )
+    sortedExamples.length > 0
+      ? sortedExamples
+          .map((e, i) => {
+            const drift = (e.overrideScore ?? 0) - (e.viralScore ?? 0);
+            const driftStr = drift > 0 ? `+${drift} (editor scored HIGHER)` : drift < 0 ? `${drift} (editor scored LOWER)` : `0 (agreed)`;
+            return `Example ${i + 1}:\n  Title: "${e.title}"\n  AI score: ${e.viralScore} → Editor score: ${e.overrideScore} (${e.overrideLabel}) | Drift: ${driftStr}\n  Category: ${e.category ?? "unknown"}${e.viralReason ? `\n  AI reason: ${e.viralReason}` : ""}`;
+          })
           .join("\n\n")
       : null;
 

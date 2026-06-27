@@ -41,7 +41,7 @@ import {
   isAviationRelevant,
 } from "./ingestion";
 import { invokeLLM } from "./_core/llm";
-import { scoreStory } from "./viralScoring";
+import { scoreStory, applyStatAdjustments } from "./viralScoring";
 import { batchScoreStoriesWithLLM, type BatchScoringInput } from "./llmScoring";
 import { rssSources } from "../drizzle/schema";
 import { and, eq, isNotNull, lt } from "drizzle-orm";
@@ -232,6 +232,8 @@ export async function scheduledIngestHandler(req: Request, res: Response) {
     console.log(`[ScheduledIngest] Phase 1c: Fetched content for ${thinItems.length} thin items in ${Date.now() - t2}ms`);
 
     // ── Phase 1d: Rule-score every candidate; split into winners / borderline ──
+    // applyStatAdjustments is applied to ALL stories here (not just borderline ones)
+    // so that editor override learning affects clear winners too.
     type PendingStory = CandidateItem & { ruleScore: ReturnType<typeof scoreStory> };
 
     const clearWinners: PendingStory[] = [];
@@ -239,11 +241,16 @@ export async function scheduledIngestHandler(req: Request, res: Response) {
 
     for (const item of candidates) {
       const ruleScore = scoreStory(item.title, item.content);
-      const pending: PendingStory = { ...item, ruleScore };
+      // Apply learned stat adjustments to the rule score before thresholding
+      // This ensures override learning can promote stories the rules undervalue
+      const statAdjustedRuleScore = await applyStatAdjustments(ruleScore.score, ruleScore.category, item.title);
+      const adjustedRuleScore = { ...ruleScore, score: statAdjustedRuleScore };
+      const pending: PendingStory = { ...item, ruleScore: adjustedRuleScore };
 
-      if (ruleScore.score >= 70) {
+      if (adjustedRuleScore.score >= 70) {
         clearWinners.push(pending);
-      } else if (ruleScore.score >= 40) {
+      } else if (adjustedRuleScore.score >= 35) {
+        // Lowered borderline floor from 40 → 35 so stat-adjusted near-misses get LLM review
         borderlineStories.push(pending);
       } else {
         markUrlAsSeen(item.sourceUrl, "score_below_threshold").catch(() => {});

@@ -32,13 +32,51 @@ export interface ScoringResult {
 // Loaded once per process and refreshed every 10 minutes to avoid DB hammering.
 
 let _statAdjustCache: {
-  catBoosts: Record<string, number>;   // category name → score delta
-  highKws: Set<string>;                // words in high-engagement headlines
-  lowKws: Set<string>;                 // words in low-engagement headlines
+  catBoosts: Record<string, number>;        // category name → score delta (from perf + overrides)
+  highKws: Map<string, number>;             // word → boost weight (from perf + override learner)
+  lowKws: Map<string, number>;              // word → penalty weight (from perf + override learner)
+  overrideCatBoosts: Record<string, number>; // category boosts from editor overrides specifically
   loadedAt: number;
 } | null = null;
 
-const STAT_CACHE_TTL_MS = 10 * 60 * 1000; // refresh every 10 minutes
+const STAT_CACHE_TTL_MS = 5 * 60 * 1000; // refresh every 5 minutes (was 10)
+
+/**
+ * Parses the stat_category_weights string produced by learnFromOverridesStatistical.
+ * Format: "Aviation Accident: +8 pts avg (12 overrides); Boeing Safety: -5 pts avg (3 overrides)"
+ */
+function parseOverrideCatWeights(raw: string): Record<string, number> {
+  const result: Record<string, number> = {};
+  if (!raw || raw === "Not enough data per category yet.") return result;
+  for (const entry of raw.split(";")) {
+    const m = entry.match(/^([^:]+):\s*([+-]?\d+)\s*pts/);
+    if (m) {
+      const cat = m[1].trim().toLowerCase();
+      const pts = parseInt(m[2], 10);
+      if (!isNaN(pts)) result[cat] = pts;
+    }
+  }
+  return result;
+}
+
+/**
+ * Parses the stat_keyword_boosts/penalties string produced by learnFromOverridesStatistical.
+ * Format: "\"boeing\" (×5), \"crash\" (×4), \"fatal\" (×3)"
+ * Returns a Map of word → weight (higher count = stronger signal).
+ */
+function parseOverrideKeywords(raw: string): Map<string, number> {
+  const result = new Map<string, number>();
+  if (!raw || raw === "none yet") return result;
+  for (const entry of raw.split(",")) {
+    const m = entry.match(/"([^"]+)"\s*\(×(\d+)\)/);
+    if (m) {
+      const word = m[1].trim().toLowerCase();
+      const count = parseInt(m[2], 10);
+      if (word && !isNaN(count)) result.set(word, count);
+    }
+  }
+  return result;
+}
 
 async function loadStatAdjustments() {
   if (_statAdjustCache && Date.now() - _statAdjustCache.loadedAt < STAT_CACHE_TTL_MS) {
@@ -48,41 +86,77 @@ async function loadStatAdjustments() {
     const { getAllScoringConfig } = await import("./db");
     const config = await getAllScoringConfig();
 
-    // Parse category boosts from stat_perf_top_categories
+    // ── 1. Category boosts from Instagram performance data ────────────────
     const catBoosts: Record<string, number> = {};
     const catRaw = config["stat_perf_top_categories"];
     if (catRaw) {
-      const cats: Array<{ category: string; avgEngagement: number }> = JSON.parse(catRaw);
-      const avgEng = parseInt(config["stat_perf_avg_engagement"] ?? "0", 10);
-      if (avgEng > 0) {
-        for (const c of cats) {
-          const ratio = c.avgEngagement / avgEng;
-          // Scale: 2× avg → +10 pts, 0.5× avg → -8 pts, capped at ±15
-          const delta = Math.max(-15, Math.min(15, Math.round((ratio - 1) * 12)));
-          if (Math.abs(delta) >= 2) catBoosts[c.category.toLowerCase()] = delta;
+      try {
+        const cats: Array<{ category: string; avgEngagement: number }> = JSON.parse(catRaw);
+        const avgEng = parseInt(config["stat_perf_avg_engagement"] ?? "0", 10);
+        if (avgEng > 0) {
+          for (const c of cats) {
+            const ratio = c.avgEngagement / avgEng;
+            // Scale: 2× avg → +12 pts, 0.5× avg → -10 pts
+            const delta = Math.max(-15, Math.min(15, Math.round((ratio - 1) * 14)));
+            if (Math.abs(delta) >= 2) catBoosts[c.category.toLowerCase()] = delta;
+          }
         }
-      }
+      } catch { /* ignore parse errors */ }
     }
 
-    // Parse high/low engagement keywords
-    const highKws = new Set<string>(
-      (config["stat_perf_high_keywords"] ?? "").split(", ").filter(Boolean)
-    );
-    const lowKws = new Set<string>(
-      (config["stat_perf_low_keywords"] ?? "").split(", ").filter(Boolean)
-    );
+    // ── 2. Category boosts from editor overrides (the critical missing piece) ─
+    const overrideCatBoosts = parseOverrideCatWeights(config["stat_category_weights"] ?? "");
+    // Merge: override signal adds on top of performance signal
+    for (const [cat, pts] of Object.entries(overrideCatBoosts)) {
+      catBoosts[cat] = (catBoosts[cat] ?? 0) + pts;
+    }
 
-    _statAdjustCache = { catBoosts, highKws, lowKws, loadedAt: Date.now() };
+    // ── 3. Keyword signals from Instagram performance ─────────────────────
+    const highKws = new Map<string, number>();
+    const lowKws = new Map<string, number>();
+    for (const kw of (config["stat_perf_high_keywords"] ?? "").split(", ").filter(Boolean)) {
+      highKws.set(kw, 3); // performance signal: weight 3
+    }
+    for (const kw of (config["stat_perf_low_keywords"] ?? "").split(", ").filter(Boolean)) {
+      lowKws.set(kw, 3);
+    }
+
+    // ── 4. Keyword signals from editor overrides (the critical missing piece) ─
+    const overrideBoostKws = parseOverrideKeywords(config["stat_keyword_boosts"] ?? "");
+    const overridePenaltyKws = parseOverrideKeywords(config["stat_keyword_penalties"] ?? "");
+    for (const [kw, cnt] of overrideBoostKws) {
+      // Override signal weight scales with how many times you've boosted it
+      // cnt=2 → weight 2, cnt=5 → weight 4, cnt=10 → weight 6 (log-scaled)
+      const weight = Math.min(6, Math.max(2, Math.round(Math.log2(cnt) * 2)));
+      highKws.set(kw, Math.max(highKws.get(kw) ?? 0, weight));
+    }
+    for (const [kw, cnt] of overridePenaltyKws) {
+      const weight = Math.min(6, Math.max(2, Math.round(Math.log2(cnt) * 2)));
+      lowKws.set(kw, Math.max(lowKws.get(kw) ?? 0, weight));
+    }
+
+    _statAdjustCache = { catBoosts, highKws, lowKws, overrideCatBoosts, loadedAt: Date.now() };
     return _statAdjustCache;
   } catch {
-    return { catBoosts: {}, highKws: new Set<string>(), lowKws: new Set<string>(), loadedAt: Date.now() };
+    return {
+      catBoosts: {},
+      highKws: new Map<string, number>(),
+      lowKws: new Map<string, number>(),
+      overrideCatBoosts: {},
+      loadedAt: Date.now(),
+    };
   }
 }
 
 /**
  * Applies learned statistical adjustments to a rule-based score.
- * Async because it reads from the DB (cached, refreshed every 10 min).
- * Returns the adjusted score clamped to 0–100.
+ *
+ * Sources of adjustment (all free, no LLM):
+ * - Instagram performance data: which categories/keywords drive real engagement
+ * - Editor override history: which categories/keywords you consistently score higher/lower
+ *
+ * Cap raised to ±35 so override signals can actually move stories across tier boundaries
+ * (e.g. a rule-scored 50 that you always push to 90 can now reach 85).
  */
 export async function applyStatAdjustments(
   score: number,
@@ -93,7 +167,7 @@ export async function applyStatAdjustments(
     const adj = await loadStatAdjustments();
     let delta = 0;
 
-    // Category boost/penalty
+    // ── Category boost/penalty ────────────────────────────────────────────
     const catKey = category.toLowerCase();
     for (const [cat, boost] of Object.entries(adj.catBoosts)) {
       if (catKey.includes(cat) || cat.includes(catKey)) {
@@ -102,15 +176,23 @@ export async function applyStatAdjustments(
       }
     }
 
-    // Keyword boost/penalty from headline
-    const words = title.toLowerCase().match(/\b[a-z][a-z-]{2,}\b/g) ?? [];
-    for (const w of words) {
-      if (adj.highKws.has(w)) delta += 2;
-      if (adj.lowKws.has(w)) delta -= 2;
+    // ── Keyword boost/penalty from headline (weighted by signal strength) ─
+    const titleLower = title.toLowerCase();
+    const words = titleLower.match(/\b[a-z][a-z-]{2,}\b/g) ?? [];
+    // Also check bigrams (2-word phrases) since override learner extracts them
+    const bigrams: string[] = [];
+    for (let i = 0; i < words.length - 1; i++) {
+      bigrams.push(`${words[i]} ${words[i + 1]}`);
+    }
+    const allTokens = [...words, ...bigrams];
+    for (const token of allTokens) {
+      if (adj.highKws.has(token)) delta += adj.highKws.get(token)!;
+      if (adj.lowKws.has(token)) delta -= adj.lowKws.get(token)!;
     }
 
-    // Cap total delta at ±20 to avoid overriding the rule-based system entirely
-    delta = Math.max(-20, Math.min(20, delta));
+    // ── Cap: ±35 so overrides can move stories across tier boundaries ─────
+    // (was ±20, which was too tight to move a story from 'maybe' to 'must_post')
+    delta = Math.max(-35, Math.min(35, delta));
     return Math.max(0, Math.min(100, score + delta));
   } catch {
     return score; // safe fallback

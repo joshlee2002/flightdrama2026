@@ -1117,19 +1117,36 @@ export const appRouter = router({
         // ── LLM deep learner: only runs if auto_deep_learn_enabled flag is on (default: off) ──
         (async () => {
           try {
-            const { getScoringConfig, getCostControlConfig: getCCC } = await import("./db");
+            const { getScoringConfig, setScoringConfig, getCostControlConfig: getCCC } = await import("./db");
+            // Auto deep learn is now ON by default — it uses the 70B model once per
+            // 10 overrides (max), so cost is negligible (~1 LLM call per session).
+            // It can still be disabled via the cost control panel.
             const { autoDeepLearnEnabled } = await getCCC();
-            if (!autoDeepLearnEnabled) {
-              console.log("[AutoLearn] LLM learn skipped — auto_deep_learn_enabled is off");
+            if (autoDeepLearnEnabled === false) {
+              // Only skip if explicitly disabled (false), not if undefined/null (default = on)
+              console.log("[AutoLearn] LLM learn skipped — auto_deep_learn_enabled is explicitly off");
               return;
             }
+
+            // Throttle: only run if ≥10 new overrides since last run OR ≥2 hours have passed.
+            // This prevents a single override session from triggering multiple LLM calls.
             const lastLearnedAt = await getScoringConfig("last_learned_at");
-            const thirtyMinutesAgo = Date.now() - 30 * 60 * 1000;
-            if (lastLearnedAt && new Date(lastLearnedAt).getTime() > thirtyMinutesAgo) {
-              console.log("[AutoLearn] LLM learn skipped — ran less than 30 minutes ago");
+            const lastLearnedCount = parseInt(await getScoringConfig("last_learned_examples_count") ?? "0", 10);
+            const pendingOverridesRaw = await getScoringConfig("pending_learn_overrides");
+            const pendingCount = parseInt(pendingOverridesRaw ?? "0", 10) + 1;
+            await setScoringConfig("pending_learn_overrides", String(pendingCount));
+
+            const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1000;
+            const ranRecently = lastLearnedAt && new Date(lastLearnedAt).getTime() > twoHoursAgo;
+            const hasEnoughNewOverrides = pendingCount >= 10;
+
+            if (ranRecently && !hasEnoughNewOverrides) {
+              console.log(`[AutoLearn] LLM learn deferred — only ${pendingCount} new overrides since last run (need 10 or 2h gap)`);
               return;
             }
-            console.log("[AutoLearn] Override saved — triggering LLM deep learn cycle...");
+
+            console.log(`[AutoLearn] Triggering LLM deep learn — ${pendingCount} new overrides since last run...`);
+            await setScoringConfig("pending_learn_overrides", "0"); // reset counter
             const result = await learnFromOverrides();
             if (result.success) {
               console.log(`[AutoLearn] Done — learned from ${result.examplesUsed} overrides. ${result.summary}`);
