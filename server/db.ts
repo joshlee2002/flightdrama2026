@@ -640,7 +640,9 @@ export async function getCostControlConfig(): Promise<CostControlConfig> {
     llmScoringEnabled: map["llm_scoring_enabled"] === "true",
     autoPerfAnalysisEnabled: map["auto_perf_analysis_enabled"] === "true",
     autoKeywordRegenEnabled: map["auto_keyword_regen_enabled"] === "true",
-    autoDeepLearnEnabled: map["auto_deep_learn_enabled"] === "true",
+    // Default TRUE — auto deep learn should be on unless the user explicitly turns it off.
+    // The key is absent from the DB on first run, so we must not default to false here.
+    autoDeepLearnEnabled: map["auto_deep_learn_enabled"] !== "false",
   };
 }
 

@@ -582,6 +582,16 @@ export const appRouter = router({
         await updateStoryApproval(input.id, "rejected");
         // Block the URL from ever being re-ingested
         if (story?.sourceUrl) await markUrlAsSeen(story.sourceUrl, "manually_rejected");
+        // ── Learning signal: every rejection = overrideScore 0, label "reject" ─────────────
+        // Previously rejections were invisible to the stat learner because
+        // overrideScore/overrideLabel were never written. Now every rejection
+        // feeds into the keyword penalty and category weight calculations.
+        await updateStoryOverride(input.id, 0, "reject");
+        setImmediate(() => {
+          learnFromOverridesStatistical().catch(err =>
+            console.warn("[StatLearn] Post-reject learn failed:", err)
+          );
+        });
         return { success: true };
       }),
 
@@ -596,6 +606,13 @@ export const appRouter = router({
         await updateStoryApproval(input.id, "dismissed");
         // Permanently block this URL — dismissed stories must never reappear
         if (story?.sourceUrl) await markUrlAsSeen(story.sourceUrl, "manually_dismissed");
+        // ── Learning signal: dismissals also count as score 0 ──────────────────────
+        await updateStoryOverride(input.id, 0, "reject");
+        setImmediate(() => {
+          learnFromOverridesStatistical().catch(err =>
+            console.warn("[StatLearn] Post-dismiss learn failed:", err)
+          );
+        });
         return { success: true };
       }),
 
