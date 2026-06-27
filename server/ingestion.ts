@@ -591,22 +591,25 @@ export async function llmDedupCheck(
     .map((existing, i) => `Pair ${i + 1}:\n  EXISTING: "${existing}"\n  NEW: "${newTitle}"`)
     .join("\n\n");
 
-  const prompt = `You are a duplicate-detection engine for an aviation news editorial system.
+  const prompt = `You are a duplicate-detection engine for an aviation news Instagram account.
 
-For each pair below, decide if the NEW title is:
-- DUPLICATE: the same event reported by a different outlet (same facts, same angle, just reworded)
-- NEW_ANGLE: the same event but with genuinely new information (investigation launched, charges filed, victims named, cause revealed, survivors speak, safety review ordered, etc.)
+A story is a DUPLICATE if it describes the SAME physical event (same crash, same incident, same emergency) as the existing story, even if the wording is completely different. Different outlets often report the same event with different headlines.
 
-Respond with a JSON array, one entry per pair, in order:
-[{"pair": 1, "verdict": "DUPLICATE"}, {"pair": 2, "verdict": "NEW_ANGLE"}, ...]
+A story is a NEW_ANGLE only if it contains genuinely NEW information that was not available at the time of the original report — for example: an investigation being launched, charges filed, victims identified by name, cause of the incident revealed, survivors speaking out, or a safety review ordered.
 
-Only output the JSON array, nothing else.
+Breaking news follow-ups that just add a death toll or injury count to the same event are still DUPLICATES.
+
+For each pair, respond with DUPLICATE or NEW_ANGLE.
+
+Output a JSON array only:
+[{"pair": 1, "verdict": "DUPLICATE"}, ...]
 
 ${comparisons}`;
 
   try {
     const response = await invokeLLMFn({
-      model: "llama-3.1-8b-instant",
+      // Use the scoring model (8B on Groq, or the default model on other providers).
+      // The model is injected via invokeLLMFn which reads ENV internally.
       messages: [{ role: "user", content: prompt }],
       maxTokens: 200,
     });
