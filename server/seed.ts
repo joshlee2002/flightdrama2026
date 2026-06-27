@@ -29,20 +29,90 @@ export async function runSchemaMigrations(): Promise<void> {
   const db = await getDb();
   if (!db) return;
 
+  // ── Migration 1: approvalStatus enum (completed) ────────────────────────
   try {
-    // Migration: add 'completed' to the approvalStatus enum on the stories table.
-    // MySQL ALTER TABLE MODIFY is idempotent — re-running it with the same definition
-    // is a no-op. We wrap in try/catch so a DB permission issue never blocks startup.
     await db.execute(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       "ALTER TABLE `stories` MODIFY COLUMN `approvalStatus` enum('pending','approved','rejected','edited','dismissed','duplicate','completed') NOT NULL DEFAULT 'pending'" as any
     );
     console.log("[Migration] approvalStatus enum updated (completed added)");
   } catch (err: unknown) {
-    // Ignore "nothing to change" errors from MySQL (errno 1060 / 1061 etc.)
     const msg = err instanceof Error ? err.message : String(err);
     if (!msg.includes("Duplicate column") && !msg.includes("already exists")) {
       console.warn("[Migration] approvalStatus enum migration warning:", msg);
+    }
+  }
+
+  // ── Migration 2: event-fingerprint dedup columns ──────────────────────────
+  // Adds eventFingerprint, contentHash, canonicalUrl to stories.
+  // Uses IF NOT EXISTS pattern via INFORMATION_SCHEMA check — fully idempotent.
+  const colMigrations: Array<{ col: string; ddl: string }> = [
+    {
+      col: "eventFingerprint",
+      ddl: "ALTER TABLE `stories` ADD COLUMN `eventFingerprint` varchar(512) NULL",
+    },
+    {
+      col: "contentHash",
+      ddl: "ALTER TABLE `stories` ADD COLUMN `contentHash` varchar(64) NULL",
+    },
+    {
+      col: "canonicalUrl",
+      ddl: "ALTER TABLE `stories` ADD COLUMN `canonicalUrl` varchar(768) NULL",
+    },
+  ];
+  for (const { col, ddl } of colMigrations) {
+    try {
+      await db.execute(ddl as any);
+      console.log(`[Migration] stories.${col} column added`);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // errno 1060 = Duplicate column name — column already exists, that's fine
+      if (!msg.includes("Duplicate column") && !msg.includes("already exists")) {
+        console.warn(`[Migration] stories.${col} migration warning:`, msg);
+      }
+    }
+  }
+
+  // ── Migration 3: indexes for fingerprint lookups ──────────────────────────
+  const idxMigrations: Array<{ name: string; ddl: string }> = [
+    {
+      name: "stories_eventFingerprint_idx",
+      ddl: "CREATE INDEX `stories_eventFingerprint_idx` ON `stories` (`eventFingerprint`)",
+    },
+    {
+      name: "stories_contentHash_idx",
+      ddl: "CREATE INDEX `stories_contentHash_idx` ON `stories` (`contentHash`)",
+    },
+  ];
+  for (const { name, ddl } of idxMigrations) {
+    try {
+      await db.execute(ddl as any);
+      console.log(`[Migration] Index ${name} created`);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // errno 1061 = Duplicate key name — index already exists, that's fine
+      if (!msg.includes("Duplicate key") && !msg.includes("already exists")) {
+        console.warn(`[Migration] Index ${name} warning:`, msg);
+      }
+    }
+  }
+
+  // ── Migration 4: seen_urls UNIQUE constraint on url ───────────────────────
+  // Without this, ON DUPLICATE KEY UPDATE in markUrlAsSeen is a no-op and
+  // the same URL can appear multiple times in seen_urls.
+  try {
+    // First deduplicate any existing rows (keep newest per url)
+    await db.execute(
+      "DELETE s1 FROM `seen_urls` s1 INNER JOIN `seen_urls` s2 ON s1.url = s2.url AND s1.id < s2.id" as any
+    );
+    await db.execute(
+      "ALTER TABLE `seen_urls` ADD CONSTRAINT `seen_urls_url_unique` UNIQUE (`url`)" as any
+    );
+    console.log("[Migration] seen_urls.url UNIQUE constraint added");
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!msg.includes("Duplicate key") && !msg.includes("already exists")) {
+      console.warn("[Migration] seen_urls UNIQUE constraint warning:", msg);
     }
   }
 }
