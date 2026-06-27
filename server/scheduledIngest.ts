@@ -216,6 +216,64 @@ export async function scheduledIngestHandler(req: Request, res: Response) {
     // Fire-and-forget batch markUrlAsSeen for filtered items
     Promise.all(markSeenBatch.map(({ url, reason }) => markUrlAsSeen(url, reason))).catch(() => {});
 
+    // ── Phase 1b-extra: Within-batch deduplication ────────────────────────────
+    // The per-item dedup above only checks against the existing DB titles.
+    // If two feeds pick up the same breaking story in the same hourly batch,
+    // the second story never sees the first one (it wasn’t in the DB yet).
+    // This pass compares every candidate against all candidates that came before
+    // it in the batch, using the same isSimilarTitle + llmDedupCheck pipeline.
+    //
+    // Strategy: build an accumulating "seen this batch" title list.
+    // For each candidate (in order), check it against that list.
+    // If it’s a duplicate, drop it and mark its URL as seen.
+    // If it passes, add its title to the list so later candidates can match it.
+    {
+      const batchSeenTitles: string[] = [];
+      const dedupedCandidates: CandidateItem[] = [];
+      const batchDupUrls: string[] = [];
+
+      for (const item of candidates) {
+        if (batchSeenTitles.length === 0) {
+          // First item — nothing to compare against yet
+          batchSeenTitles.push(item.title);
+          dedupedCandidates.push(item);
+          continue;
+        }
+
+        // Fast check: word overlap + entity matching within batch
+        if (isSimilarTitle(item.title, batchSeenTitles, learnedDuplicatePairs)) {
+          console.log(`[ScheduledIngest] Within-batch dup (fast): "${item.title.slice(0, 70)}"`);
+          batchDupUrls.push(item.sourceUrl);
+          skippedCount++;
+          continue;
+        }
+
+        // LLM check: location+incident matches within batch
+        const batchLocationMatches = getLocationIncidentMatches(item.title, batchSeenTitles);
+        if (batchLocationMatches.length > 0) {
+          const isDup = await llmDedupCheck(item.title, batchLocationMatches, invokeLLM, learnedDuplicatePairs);
+          if (isDup) {
+            console.log(`[ScheduledIngest] Within-batch dup (LLM): "${item.title.slice(0, 70)}"`);
+            batchDupUrls.push(item.sourceUrl);
+            skippedCount++;
+            continue;
+          }
+        }
+
+        batchSeenTitles.push(item.title);
+        dedupedCandidates.push(item);
+      }
+
+      if (batchDupUrls.length > 0) {
+        console.log(`[ScheduledIngest] Within-batch dedup removed ${batchDupUrls.length} duplicate(s)`);
+        Promise.all(batchDupUrls.map(url => markUrlAsSeen(url, "duplicate_title"))).catch(() => {});
+      }
+
+      // Replace candidates with the deduplicated list
+      candidates.length = 0;
+      candidates.push(...dedupedCandidates);
+    }
+
     // ── Phase 1c: Parallel article content fetch for thin items ───────────────
     // Items with < 200 chars of RSS content need a full article fetch.
     // Previously sequential within each feed loop; now all fire in parallel
