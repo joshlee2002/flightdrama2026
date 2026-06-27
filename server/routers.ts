@@ -1341,7 +1341,8 @@ export const appRouter = router({
   // ── Historical Posts ───────────────────────────────────────────────────
     historicalPosts: router({
     list: publicProcedure.query(async () => {
-      return getHistoricalPosts(200);
+      // Exclude auto-created entries from the approve flow — only show posts the editor manually logged
+      return getHistoricalPosts(200, ["approved_story"]);
     }),
     create: protectedProcedure
       .input(

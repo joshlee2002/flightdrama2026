@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, inArray, lte, ne, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNull, lte, ne, not, or, sql } from "drizzle-orm";
 import { DEFAULT_RSS_SOURCES } from "./ingestion";
 import { drizzle } from "drizzle-orm/mysql2";
 import {
@@ -440,9 +440,22 @@ export async function createHistoricalPost(post: InsertHistoricalPost) {
   await db.insert(historicalPosts).values(post);
 }
 
-export async function getHistoricalPosts(limit = 100) {
+export async function getHistoricalPosts(limit = 100, excludeSourceTypes?: string[]) {
   const db = await getDb();
   if (!db) return [];
+  if (excludeSourceTypes && excludeSourceTypes.length > 0) {
+    return db
+      .select()
+      .from(historicalPosts)
+      .where(
+        or(
+          isNull(historicalPosts.sourceType),
+          not(inArray(historicalPosts.sourceType, excludeSourceTypes))
+        )
+      )
+      .orderBy(desc(historicalPosts.createdAt))
+      .limit(limit);
+  }
   return db
     .select()
     .from(historicalPosts)
