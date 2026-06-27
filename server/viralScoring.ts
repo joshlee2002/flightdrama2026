@@ -15,7 +15,9 @@
  * 10. Route launches (weak)          avg    12  ← 314x lower than top
  */
 
-export type StatusLabel = "must_post" | "strong_candidate" | "maybe" | "reject";
+export type { StatusLabel } from "../shared/const";
+import { labelFromScore, type StatusLabel } from "../shared/const";
+export { labelFromScore };
 
 export interface ScoringResult {
   score: number;
@@ -1045,11 +1047,7 @@ export function scoreStory(title: string, content: string): ScoringResult {
   // ── Status label ──────────────────────────────────────────────────────────
   // Thresholds: must_post raised to 88 so it requires 2+ strong signals.
   // A single weird/outrage story alone should be strong_candidate, not must_post.
-  let statusLabel: StatusLabel;
-  if (score >= 88) statusLabel = "must_post";
-  else if (score >= 70) statusLabel = "strong_candidate";
-  else if (score >= 55) statusLabel = "maybe";
-  else statusLabel = "reject";
+  const statusLabel: StatusLabel = labelFromScore(score);
 
   // ── Primary category ──────────────────────────────────────────────────────
   let category = "General Aviation";

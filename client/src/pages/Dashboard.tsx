@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { labelFromScore, effectiveLabel as sharedEffectiveLabel } from "@shared/const";
 import FlightLayout from "@/components/FlightLayout";
 import ScoreRing from "@/components/ScoreRing";
 import { trpc } from "@/lib/trpc";
@@ -173,7 +174,7 @@ function StoryCard({
   );
   const hasOverride = story.overrideScore != null;
   const displayScore = hasOverride ? story.overrideScore : story.viralScore;
-  const displayLabel = hasOverride ? story.overrideLabel : story.statusLabel;
+  const displayLabel = sharedEffectiveLabel(story);
   const displayStatus = statusConfig((displayLabel || story.statusLabel) as StatusLabel);
 
   const isFailed = pkg?.processingStatus === "failed";
@@ -342,7 +343,7 @@ function StoryCard({
                 if (e.key === "Enter") {
                   const v = parseInt(overrideInput, 10);
                   if (!isNaN(v) && v >= 0 && v <= 100) {
-                    const label = v >= 88 ? "must_post" : v >= 70 ? "strong_candidate" : v >= 55 ? "maybe" : "reject";
+                    const label = labelFromScore(v);
                     onOverrideScore(v, label);
                   }
                 }
@@ -364,7 +365,7 @@ function StoryCard({
             onClick={() => {
               const v = parseInt(overrideInput, 10);
               if (!isNaN(v) && v >= 0 && v <= 100) {
-                const label = v >= 88 ? "must_post" : v >= 70 ? "strong_candidate" : v >= 55 ? "maybe" : "reject";
+                const label = labelFromScore(v);
                 onOverrideScore(v, label);
               } else if (overrideInput === "") {
                 onOverrideScore(null, null);
@@ -777,7 +778,9 @@ export default function Dashboard() {
   const allStories = data || [];
 
   // Use override label when set, otherwise statusLabel
-  const effectiveLabel = (s: any) => s.overrideLabel || s.statusLabel;
+  // effectiveLabel: derive bucket from effective score, not stored statusLabel
+  // Uses shared labelFromScore so score/label can never drift
+  const effectiveLabel = (s: any) => sharedEffectiveLabel(s);
 
   // Apply section filter on the frontend using effectiveLabel (not the backend statusLabel)
   const stories = filterStatus === "all"

@@ -1,4 +1,4 @@
-import { COOKIE_NAME } from "@shared/const";
+import { COOKIE_NAME, labelFromScore } from "@shared/const";
 import { createPasswordSessionToken } from "./_core/passwordAuth";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
@@ -784,10 +784,7 @@ export const appRouter = router({
             // Now applies stat adjustments so manual URLs benefit from override learning.
             const ruleScoring = scoreStory(title, content);
             const adjustedScore = await applyStatAdjustments(ruleScoring.score, ruleScoring.category, title);
-            const adjustedLabel: string =
-              adjustedScore >= 88 ? "must_post" :
-              adjustedScore >= 70 ? "strong_candidate" :
-              adjustedScore >= 55 ? "maybe" : "reject";
+            const adjustedLabel: string = labelFromScore(adjustedScore);
             const scoring = { ...ruleScoring, score: adjustedScore, statusLabel: adjustedLabel as typeof ruleScoring.statusLabel };
 
             // ── 6. Save story to DB ──────────────────────────────────────
@@ -1143,10 +1140,7 @@ export const appRouter = router({
                 const adjustedScore = await applyStatAdjustments(baseScore, story.category ?? "General Aviation", story.title);
                 if (adjustedScore !== baseScore) {
                   // Derive label from adjusted score
-                  const newLabel: string =
-                    adjustedScore >= 88 ? "must_post" :
-                    adjustedScore >= 70 ? "strong_candidate" :
-                    adjustedScore >= 55 ? "maybe" : "reject";
+                  const newLabel: string = labelFromScore(adjustedScore);
                   await updateStoryScores(
                     story.id,
                     adjustedScore,
