@@ -428,19 +428,58 @@ const STOP_WORDS = new Set([
   "the", "and", "for", "with", "that", "this", "from", "have", "after",
   "over", "into", "onto", "upon", "about", "been", "were", "will", "when",
   "what", "which", "their", "they", "them", "then", "than", "more", "also",
-  "says", "said", "says", "amid", "amid", "amid", "amid",
+  "says", "said", "amid", "small", "least", "local", "govt", "person",
   "flight", "plane", "aircraft", "airline", "airlines", "airport",
   "pilot", "pilots", "aviation", "flying", "flies", "flew",
 ]);
 
+// Location keywords — city/country/region names that appear in aviation incident titles.
+// Used for event-fingerprint dedup: same location + same incident type = same story.
+const LOCATION_KEYWORDS = [
+  // Cities
+  "beijing", "shanghai", "tokyo", "seoul", "dubai", "london", "paris", "berlin",
+  "amsterdam", "frankfurt", "madrid", "rome", "istanbul", "moscow", "delhi",
+  "mumbai", "singapore", "bangkok", "jakarta", "sydney", "melbourne", "auckland",
+  "toronto", "montreal", "vancouver", "new york", "chicago", "los angeles",
+  "miami", "houston", "dallas", "seattle", "denver", "atlanta", "boston",
+  "washington", "san francisco", "las vegas", "phoenix", "orlando",
+  "mexico city", "bogota", "lima", "santiago", "sao paulo", "buenos aires",
+  "cairo", "nairobi", "lagos", "johannesburg", "casablanca", "addis ababa",
+  "karachi", "lahore", "dhaka", "kathmandu", "colombo", "kabul", "tehran",
+  "baghdad", "riyadh", "jeddah", "doha", "abu dhabi", "muscat", "kuwait",
+  "tel aviv", "beirut", "amman", "ankara", "athens", "budapest", "warsaw",
+  "prague", "vienna", "brussels", "zurich", "geneva", "lisbon", "stockholm",
+  "oslo", "copenhagen", "helsinki", "riga", "tallinn", "vilnius",
+  // Countries (short forms used in headlines)
+  "china", "japan", "india", "russia", "ukraine", "iran", "iraq", "pakistan",
+  "nepal", "indonesia", "philippines", "vietnam", "thailand", "malaysia",
+  "australia", "brazil", "colombia", "peru", "chile", "argentina", "mexico",
+  "canada", "france", "germany", "spain", "italy", "turkey", "egypt",
+  "nigeria", "kenya", "ethiopia", "south africa", "israel", "saudi arabia",
+  // Airports (IATA codes and common names)
+  "heathrow", "gatwick", "stansted", "schiphol", "charles de gaulle",
+  "jfk", "lax", "ohare", "dulles", "miami airport", "newark",
+  "changi", "narita", "haneda", "incheon",
+];
+
+// Airline-specific keywords — used for airline+incident dedup
+const AIRLINE_KEYWORDS = [
+  "ryanair", "easyjet", "emirates", "lufthansa", "british airways", "delta", "united",
+  "american", "southwest", "qantas", "singapore", "cathay", "turkish", "air india",
+  "wizz", "jetblue", "alaska airlines", "frontier", "spirit", "indigo", "flydubai",
+  "air france", "klm", "iberia", "finnair", "tap air", "aer lingus", "norwegian",
+  "air canada", "westjet", "air new zealand", "malaysia airlines", "thai airways",
+  "china eastern", "china southern", "air china", "korean air", "japan airlines",
+  "etihad", "qatar airways", "saudia", "ethiopian airlines",
+];
+
 /**
  * Duplicate detection: checks if a new title is too similar to existing titles.
- * Uses three strategies:
- * 1. Word-overlap Jaccard similarity (threshold 0.35 — tightened from 0.45 to catch
- *    same-incident stories from different outlets with different wording)
- * 2. Key-phrase dedup: same aircraft/airline entity + same incident keyword = same story
- * 3. Airline-only dedup: same airline + same incident keyword (no aircraft type needed)
- *    catches "Ryanair passenger arrested" vs "Ryanair flight diverted after arrest"
+ * Uses four strategies:
+ * 1. Word-overlap Jaccard similarity (threshold 0.35)
+ * 2. Aircraft/airline entity + incident keyword = same story
+ * 3. Airline-only + incident keyword = same story
+ * 4. Location + incident keyword = same story (catches "Beijing crash" from 5 outlets)
  */
 export function isSimilarTitle(newTitle: string, existingTitles: string[]): boolean {
   const normalise = (t: string) =>
@@ -454,49 +493,47 @@ export function isSimilarTitle(newTitle: string, existingTitles: string[]): bool
   const newWords = new Set(newWordsArr);
   if (newWords.size === 0) return false;
 
-  // Extract key-phrase fingerprint from this title
+  // Extract fingerprint components from the new title
   const newLc = newTitle.toLowerCase();
   const newAircraft = AIRCRAFT_ENTITY_KEYWORDS.filter(k => newLc.includes(k));
   const newIncident = INCIDENT_KEYWORDS.filter(k => newLc.includes(k));
-
-  // Airline-specific keywords (subset of AIRCRAFT_ENTITY_KEYWORDS that are airlines)
-  const AIRLINE_KEYWORDS = [
-    "ryanair", "easyjet", "emirates", "lufthansa", "british airways", "delta", "united",
-    "american", "southwest", "qantas", "singapore", "cathay", "turkish", "air india",
-    "wizz", "jetblue", "alaska airlines", "frontier", "spirit", "indigo", "flydubai",
-    "air france", "klm", "iberia", "finnair", "tap air", "aer lingus", "norwegian",
-    "air canada", "westjet", "air new zealand", "malaysia airlines", "thai airways",
-    "china eastern", "china southern", "air china", "korean air", "japan airlines",
-    "etihad", "qatar airways", "saudia", "ethiopian airlines",
-  ];
   const newAirlines = AIRLINE_KEYWORDS.filter(k => newLc.includes(k));
+  const newLocations = LOCATION_KEYWORDS.filter(k => newLc.includes(k));
 
   for (const existing of existingTitles) {
     const existingWordsArr = normalise(existing);
     const existingWords = new Set(existingWordsArr);
     const intersection = newWordsArr.filter((w) => existingWords.has(w));
     const unionSize = new Set(newWordsArr.concat(existingWordsArr)).size;
-    // Tightened from 0.45 → 0.35: more aggressive dedup of same-incident stories
-    // from different outlets. Stop-words are stripped so meaningful words dominate.
     const similarity = unionSize > 0 ? intersection.length / unionSize : 0;
     if (similarity > 0.35) return true;
 
     const existingLc = existing.toLowerCase();
 
-    // Key-phrase dedup: same aircraft entity AND same incident type = same story
-    // e.g. "Ryanair 737 diverted" and "Boeing 737 diversion forces Ryanair flight down"
+    // Strategy 2: same aircraft entity + same incident type
     if (newAircraft.length > 0 && newIncident.length > 0) {
       const sharesAircraft = newAircraft.some(k => existingLc.includes(k));
       const sharesIncident = newIncident.some(k => existingLc.includes(k));
       if (sharesAircraft && sharesIncident) return true;
     }
 
-    // Airline-only dedup: same airline + same incident keyword (no aircraft type needed)
-    // catches "Ryanair passenger arrested" vs "Ryanair flight diverted after arrest"
+    // Strategy 3: same airline + same incident keyword
     if (newAirlines.length > 0 && newIncident.length > 0) {
       const sharesAirline = newAirlines.some(k => existingLc.includes(k));
       const sharesIncident = newIncident.some(k => existingLc.includes(k));
       if (sharesAirline && sharesIncident) return true;
+    }
+
+    // Strategy 4: same location + same incident keyword = same event from different outlet
+    // This is the key fix for "Beijing plane crash" appearing from 5 sources.
+    // Guard: only fire when BOTH titles have a location match AND an incident match,
+    // to avoid false positives on e.g. "London Heathrow delays" vs "London Gatwick fire".
+    if (newLocations.length > 0 && newIncident.length > 0) {
+      const existingLocations = LOCATION_KEYWORDS.filter(k => existingLc.includes(k));
+      const existingIncident = INCIDENT_KEYWORDS.filter(k => existingLc.includes(k));
+      const sharesLocation = newLocations.some(k => existingLocations.includes(k));
+      const sharesIncident = newIncident.some(k => existingIncident.includes(k));
+      if (sharesLocation && sharesIncident) return true;
     }
   }
 
