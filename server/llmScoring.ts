@@ -401,12 +401,17 @@ export async function scoreStoryWithLLM(
           // that would permanently lock in any 8B inflation (e.g. 100s).
           // If 70B says 85 and 8B said 100, we trust 70B: the story scores 85.
           const llmCategory = parsed70b.category ?? ruleResult.category;
-          const llmScore = Math.round(parsed70b.score);
+          const llmScore = Math.round(parsed70b.score); // already capped at 95 by parseScoringResponse
           const statAdjustedScore = await applyStatAdjustments(llmScore, llmCategory, title);
-          console.log(`[LLMScoring] 70B override: 8B=${parsed8b.score} → 70B=${llmScore} (final)`);
+          // Derive label from final score — never trust the LLM's label
+          const derivedLabel70b: ScoringResult["statusLabel"] =
+            statAdjustedScore >= 88 ? "must_post" :
+            statAdjustedScore >= 70 ? "strong_candidate" :
+            statAdjustedScore >= 55 ? "maybe" : "reject";
+          console.log(`[LLMScoring] 70B override: 8B=${parsed8b.score} → 70B=${llmScore} stat=${statAdjustedScore} label=${derivedLabel70b}`);
           return {
             score: statAdjustedScore,
-            statusLabel: parsed70b.statusLabel as ScoringResult["statusLabel"],
+            statusLabel: derivedLabel70b,
             category: llmCategory,
             viralReason: parsed70b.viralReason ?? ruleResult.viralReason,
             triggers: Array.isArray(parsed70b.triggers) ? parsed70b.triggers : ruleResult.triggers,
@@ -422,11 +427,16 @@ export async function scoreStoryWithLLM(
 
     // ── Use 8B result (no verification needed or verification skipped) ────────
     const llmCategory = parsed8b.category ?? ruleResult.category;
-    const llmScore = Math.round(parsed8b.score);
+    const llmScore = Math.round(parsed8b.score); // already capped at 95 by parseScoringResponse
     const statAdjustedScore = await applyStatAdjustments(llmScore, llmCategory, title);
+    // Derive label from final score — never trust the LLM's label
+    const derivedLabel8b: ScoringResult["statusLabel"] =
+      statAdjustedScore >= 88 ? "must_post" :
+      statAdjustedScore >= 70 ? "strong_candidate" :
+      statAdjustedScore >= 55 ? "maybe" : "reject";
     return {
       score: statAdjustedScore,
-      statusLabel: parsed8b.statusLabel as ScoringResult["statusLabel"],
+      statusLabel: derivedLabel8b,
       category: llmCategory,
       viralReason: parsed8b.viralReason ?? ruleResult.viralReason,
       triggers: Array.isArray(parsed8b.triggers) ? parsed8b.triggers : ruleResult.triggers,
@@ -548,11 +558,18 @@ Return ONLY the JSON array. No other text.`
       }
 
       const llmCategory = p.category ?? s.ruleScore.category;
-      const llmScore = Math.round(p.score);
+      // Hard cap at 95 — same as single-story path. 96-100 = manual override only.
+      const llmScore = Math.min(95, Math.round(p.score));
       const statAdjustedScore = await applyStatAdjustments(llmScore, llmCategory, s.title);
+      // Derive statusLabel from the final score in code — never trust the LLM's label.
+      // This ensures score and label are always consistent (no 100 in Strong section).
+      const derivedLabel: ScoringResult["statusLabel"] =
+        statAdjustedScore >= 88 ? "must_post" :
+        statAdjustedScore >= 70 ? "strong_candidate" :
+        statAdjustedScore >= 55 ? "maybe" : "reject";
       results.push({
         score: statAdjustedScore,
-        statusLabel: p.statusLabel as ScoringResult["statusLabel"],
+        statusLabel: derivedLabel,
         category: llmCategory,
         viralReason: p.viralReason ?? s.ruleScore.viralReason,
         triggers: Array.isArray(p.triggers) ? p.triggers : s.ruleScore.triggers,
