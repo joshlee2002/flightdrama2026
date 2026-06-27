@@ -148,13 +148,17 @@ async function buildScoringContext(): Promise<{ systemPrompt: string; hasExample
   const topPerformers = rankedPosts.slice(0, 25);
   const bottomPerformers = rankedPosts.slice(-10);
 
+  // IMPORTANT: perf scores are labelled as engagement-rank (1–10 scale), NOT as
+  // story quality scores. This prevents the LLM from anchoring on the perf number
+  // as a target score. A story with engagement-rank 9/10 does NOT mean score it 90.
+  const toEngagementRank = (s: number) => Math.max(1, Math.min(10, Math.round(s / 10)));
   const instagramBlock = topPerformers.length > 0
     ? [
         `## GROUND TRUTH: Real FlightDrama Instagram Performance`,
-        `These are actual posts and their real engagement. This is the most important signal.`,
-        `Score new stories based on similarity to the TOP performers. Avoid patterns from the BOTTOM performers.`,
+        `These are actual posts and their real engagement. Use these to understand what TOPICS and ANGLES work for this account.`,
+        `NOTE: The engagement-rank (e.g. "eng:9/10") is a relative engagement metric — it is NOT your story quality score. Do not copy these numbers into your score.`,
         ``,
-        `### TOP PERFORMERS (what works for FlightDrama):`,
+        `### TOP PERFORMERS (topics/angles that resonate with FlightDrama's audience):`,
         ...topPerformers.map((p, i) => {
           const stats = [
             p.views ? `${(p.views / 1000).toFixed(0)}k views` : null,
@@ -162,16 +166,16 @@ async function buildScoringContext(): Promise<{ systemPrompt: string; hasExample
             p.shares ? `${p.shares} shares` : null,
             p.saves ? `${p.saves} saves` : null,
           ].filter(Boolean).join(" | ");
-          return `#${i + 1} [perf:${p._perfScore}/100] "${p.headline}"\n     Category: ${p.category ?? "unknown"} | ${stats}`;
+          return `#${i + 1} [eng:${toEngagementRank(p._perfScore)}/10] "${p.headline}"\n     Category: ${p.category ?? "unknown"} | ${stats}`;
         }),
         ``,
-        `### BOTTOM PERFORMERS (avoid these patterns):`,
+        `### BOTTOM PERFORMERS (topics/angles that did NOT resonate):`,
         ...bottomPerformers.map(p => {
           const stats = [
             p.views ? `${(p.views / 1000).toFixed(0)}k views` : null,
             p.likes ? `${p.likes.toLocaleString()} likes` : null,
           ].filter(Boolean).join(" | ") || "low engagement";
-          return `[perf:${p._perfScore}/100] "${p.headline}" | ${stats}`;
+          return `[eng:${toEngagementRank(p._perfScore)}/10] "${p.headline}" | ${stats}`;
         }),
       ].join("\n")
     : null;
@@ -219,18 +223,21 @@ async function buildScoringContext(): Promise<{ systemPrompt: string; hasExample
 - 0–49 = reject (routine news, no emotional hook, not similar to any top performer)
 - AUTOMATIC REJECT (score 0–15): listicles, travel guides, product reviews, opinion columns with no news event, sponsored content, award announcements, any headline starting with a number followed by a noun ("16 Hotels...", "5 Reasons...").`;
 
+  // ── Build the system prompt ──────────────────────────────────────────────
+  // STRUCTURE: context first, hard constraints LAST.
+  // The LLM gives more weight to instructions at the end of the system prompt.
+  // Calibration/scoring rules MUST come after all context so they act as a
+  // hard override, not a suggestion that gets buried by Instagram data.
+
   let systemPrompt = `You are a viral content scoring engine for FlightDrama, an aviation Instagram/TikTok/YouTube account.
+Your job: score stories 0–100 for viral potential on aviation Instagram/TikTok/YouTube.`;
 
-Your PRIMARY job is to predict which stories will perform like the TOP PERFORMERS shown below — stories that got real views, likes, and shares from FlightDrama's audience. Use the Instagram performance data as your main reference, not generic virality theory.
-
-${calibrationBlock ?? staticScoreRanges}`;
-
-  // Instagram performance data goes FIRST — it's the primary signal
+  // 1. Instagram performance data — CONTEXT (what topics/angles work)
   if (instagramBlock) {
     systemPrompt += `\n\n${instagramBlock}`;
   }
 
-  // Structured weights from deep learner (hard numeric adjustments)
+  // 2. Structured weights from deep learner
   if (structuredWeightsRaw) {
     try {
       const sw = JSON.parse(structuredWeightsRaw);
@@ -259,13 +266,12 @@ ${calibrationBlock ?? staticScoreRanges}`;
       }
     } catch { /* ignore malformed JSON */ }
   } else {
-    // Fall back to text-based learned rules if structured weights not yet generated
     if (learnedRules) systemPrompt += `\n\n## Learned Scoring Rules\n${learnedRules}`;
     if (learnedWeights) systemPrompt += `\n\n## Learned Category Weights\n${learnedWeights}`;
     if (learnedInsights) systemPrompt += `\n\n## Editor Preferences\n${learnedInsights}`;
   }
 
-  // Statistical learner output (free, always up-to-date)
+  // 3. Statistical learner output
   if (statWeights || statKeywordBoosts || statKeywordPenalties) {
     systemPrompt += `\n\n## Statistical Signals (from override history)`;
     if (statWeights) systemPrompt += `\nCategory score adjustments: ${statWeights}`;
@@ -273,9 +279,14 @@ ${calibrationBlock ?? staticScoreRanges}`;
     if (statKeywordPenalties) systemPrompt += `\nKeywords editor consistently scores LOWER: ${statKeywordPenalties}`;
   }
 
+  // 4. Editor override examples — the most direct learning signal
   if (examplesBlock) {
-    systemPrompt += `\n\n## Editor Override History (most recent and most instructive first)\nThe editor has manually corrected these AI scores. [recent] = last 30 days. Learn from the pattern:\n\n${examplesBlock}`;
+    systemPrompt += `\n\n## Editor Override History (most recent first)\nThe editor has manually corrected these AI scores. This is your most direct calibration signal.\n[recent] = last 30 days. Study the pattern — what did the editor score higher than the AI? Lower?\n\n${examplesBlock}`;
   }
+
+  // 5. HARD SCORING CONSTRAINTS — these come LAST so they override everything above
+  // The LLM must use these exact score ranges regardless of what the context suggests.
+  systemPrompt += `\n\n## SCORING RULES (MANDATORY — apply these AFTER reading all context above)\n${calibrationBlock ?? staticScoreRanges}\n- CRITICAL: The engagement ranks (eng:X/10) in the Instagram data above are engagement metrics, NOT score targets. Do not copy them into your score.\n- CRITICAL: A score of 100 means a once-in-a-year story. Do not give 100 unless the story is genuinely unprecedented.`;
 
   systemPrompt += `\n\nRespond ONLY with a valid JSON object in this exact format:
 {
@@ -339,10 +350,12 @@ export async function scoreStoryWithLLM(
 
   try {
     const { systemPrompt } = await buildScoringContext();
+    // DEBUG: log the tail of the system prompt so we can verify calibration rules are last
+    console.log(`[LLMScoring] Prompt tail (last 400 chars): ...${systemPrompt.slice(-400).replace(/\n/g, " | ")}`);
     const truncatedContent = content?.slice(0, 1200) ?? "";
     const userMessage = `Score this aviation story:\n\nTitle: "${title}"\n\nContent excerpt: "${truncatedContent}"`;
 
-    // ── Pass 1: 8B model (cheap) ──────────────────────────────────────────────
+    // ── Pass 1: 8B model (cheap) ──────────────────────────────────────────────────────────────────────────────
     const response8b = await invokeLLM({
       model: scoringModel,
       messages: [
@@ -376,19 +389,22 @@ export async function scoreStoryWithLLM(
         const raw70b = String(response70b?.choices?.[0]?.message?.content ?? "");
         const parsed70b = parseScoringResponse(raw70b, ruleResult);
         if (parsed70b) {
-          // Use the higher of the two scores — we never want to suppress a viral story
-          const finalRaw = parsed70b.score >= parsed8b.score ? parsed70b : parsed8b;
-          const llmCategory = finalRaw.category ?? ruleResult.category;
-          const llmScore = Math.round(finalRaw.score);
+          // 70B is the authoritative model — its score is the final answer.
+          // The 8B pass was a cheap first filter; the 70B has better calibration
+          // and better instruction-following. We do NOT take max(8B, 70B) because
+          // that would permanently lock in any 8B inflation (e.g. 100s).
+          // If 70B says 85 and 8B said 100, we trust 70B: the story scores 85.
+          const llmCategory = parsed70b.category ?? ruleResult.category;
+          const llmScore = Math.round(parsed70b.score);
           const statAdjustedScore = await applyStatAdjustments(llmScore, llmCategory, title);
-          console.log(`[LLMScoring] 70B verified: ${parsed8b.score} → ${llmScore} (used ${finalRaw === parsed70b ? "70B" : "8B"})`);
+          console.log(`[LLMScoring] 70B override: 8B=${parsed8b.score} → 70B=${llmScore} (final)`);
           return {
             score: statAdjustedScore,
-            statusLabel: finalRaw.statusLabel as ScoringResult["statusLabel"],
+            statusLabel: parsed70b.statusLabel as ScoringResult["statusLabel"],
             category: llmCategory,
-            viralReason: finalRaw.viralReason ?? ruleResult.viralReason,
-            triggers: Array.isArray(finalRaw.triggers) ? finalRaw.triggers : ruleResult.triggers,
-            viralExplanation: finalRaw.viralExplanation ?? ruleResult.viralExplanation,
+            viralReason: parsed70b.viralReason ?? ruleResult.viralReason,
+            triggers: Array.isArray(parsed70b.triggers) ? parsed70b.triggers : ruleResult.triggers,
+            viralExplanation: parsed70b.viralExplanation ?? ruleResult.viralExplanation,
             scoringMethod: "llm_assisted",
           };
         }
@@ -512,14 +528,14 @@ Return ONLY the JSON array. No other text.`
       }
 
       // 70B safety net for high-scoring stories
+      // The 70B result is authoritative — it replaces the 8B batch score entirely.
+      // We do NOT use max(8B, 70B) because that locks in 8B inflation.
       if (p.score >= 75 && scoringModel !== verifyModel) {
         try {
           const verified = await scoreStoryWithLLM(s.title, s.content);
-          // Use the higher score — never suppress a potential viral story
-          if (verified.score >= p.score) {
-            results.push(verified);
-            continue;
-          }
+          // Always use the 70B result (scoreStoryWithLLM uses 70B for ≥75 stories)
+          results.push(verified);
+          continue;
         } catch {
           // Verification failed — use batch result (already ≥ 75, story is kept)
         }
