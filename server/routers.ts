@@ -42,7 +42,8 @@ import {
 } from "./db";
 import { eq, sql } from "drizzle-orm";
 import { stories } from "../drizzle/schema";
-import { fetchArticleContent, fetchRssFeed, isSimilarTitle, isAviationRelevant, DEFAULT_RSS_SOURCES } from "./ingestion";
+import { fetchArticleContent, fetchRssFeed, isSimilarTitle, getLocationIncidentMatches, llmDedupCheck, isAviationRelevant, DEFAULT_RSS_SOURCES } from "./ingestion";
+import { invokeLLM } from "./_core/llm";
 import { scoreStory } from "./viralScoring";
 import { scoreStoryWithLLM, batchScoreStoriesWithLLM, learnFromOverrides, learnFromOverridesStatistical, type BatchScoringInput } from "./llmScoring";
 import { runFullSoyunciPipeline, rewriteArticleOnly, runResearchAndWrite, extractResearchPackage } from "./soyunci";
@@ -687,6 +688,12 @@ export const appRouter = router({
               results.push({ url, status: "duplicate_title", title });
               continue;
             }
+            // LLM dedup for location+incident matches
+            const locMatches = getLocationIncidentMatches(title, recentTitles);
+            if (locMatches.length > 0 && await llmDedupCheck(title, locMatches, invokeLLM)) {
+              results.push({ url, status: "duplicate_title", title });
+              continue;
+            }
 
             // ── 5. Viral scoring ─────────────────────────────────────────
             const scoring = scoreStory(title, content);
@@ -936,6 +943,13 @@ export const appRouter = router({
             for (const item of items) {
               if (await hasSeenUrl(item.sourceUrl)) { skippedCount++; continue; }
               if (isSimilarTitle(item.title, recentTitles)) {
+                await markUrlAsSeen(item.sourceUrl, "similar_title");
+                skippedCount++;
+                continue;
+              }
+              // LLM dedup for location+incident matches
+              const locMatches = getLocationIncidentMatches(item.title, recentTitles);
+              if (locMatches.length > 0 && await llmDedupCheck(item.title, locMatches, invokeLLM)) {
                 await markUrlAsSeen(item.sourceUrl, "similar_title");
                 skippedCount++;
                 continue;

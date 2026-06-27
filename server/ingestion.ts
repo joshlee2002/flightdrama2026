@@ -474,12 +474,15 @@ const AIRLINE_KEYWORDS = [
 ];
 
 /**
- * Duplicate detection: checks if a new title is too similar to existing titles.
- * Uses four strategies:
- * 1. Word-overlap Jaccard similarity (threshold 0.35)
- * 2. Aircraft/airline entity + incident keyword = same story
- * 3. Airline-only + incident keyword = same story
- * 4. Location + incident keyword = same story (catches "Beijing crash" from 5 outlets)
+ * Fast synchronous duplicate detection.
+ * Strategies:
+ * 1. Word-overlap Jaccard similarity (threshold 0.35, stop-words stripped)
+ * 2. Same aircraft/airline entity + same incident keyword
+ * 3. Same airline + same incident keyword
+ *
+ * NOTE: Location+incident matching (same city + same event type) is intentionally
+ * NOT handled here because it cannot distinguish a same-story repost from a
+ * genuine follow-up angle. That case is handled by llmDedupCheck() below.
  */
 export function isSimilarTitle(newTitle: string, existingTitles: string[]): boolean {
   const normalise = (t: string) =>
@@ -493,12 +496,10 @@ export function isSimilarTitle(newTitle: string, existingTitles: string[]): bool
   const newWords = new Set(newWordsArr);
   if (newWords.size === 0) return false;
 
-  // Extract fingerprint components from the new title
   const newLc = newTitle.toLowerCase();
   const newAircraft = AIRCRAFT_ENTITY_KEYWORDS.filter(k => newLc.includes(k));
   const newIncident = INCIDENT_KEYWORDS.filter(k => newLc.includes(k));
   const newAirlines = AIRLINE_KEYWORDS.filter(k => newLc.includes(k));
-  const newLocations = LOCATION_KEYWORDS.filter(k => newLc.includes(k));
 
   for (const existing of existingTitles) {
     const existingWordsArr = normalise(existing);
@@ -523,19 +524,107 @@ export function isSimilarTitle(newTitle: string, existingTitles: string[]): bool
       const sharesIncident = newIncident.some(k => existingLc.includes(k));
       if (sharesAirline && sharesIncident) return true;
     }
-
-    // Strategy 4: same location + same incident keyword = same event from different outlet
-    // This is the key fix for "Beijing plane crash" appearing from 5 sources.
-    // Guard: only fire when BOTH titles have a location match AND an incident match,
-    // to avoid false positives on e.g. "London Heathrow delays" vs "London Gatwick fire".
-    if (newLocations.length > 0 && newIncident.length > 0) {
-      const existingLocations = LOCATION_KEYWORDS.filter(k => existingLc.includes(k));
-      const existingIncident = INCIDENT_KEYWORDS.filter(k => existingLc.includes(k));
-      const sharesLocation = newLocations.some(k => existingLocations.includes(k));
-      const sharesIncident = newIncident.some(k => existingIncident.includes(k));
-      if (sharesLocation && sharesIncident) return true;
-    }
   }
 
   return false;
+}
+
+/**
+ * Returns the subset of existingTitles that share both a location keyword AND
+ * an incident keyword with newTitle. These are "possible same-event" candidates
+ * that need LLM adjudication to determine if they are reposts or new angles.
+ *
+ * Returns an empty array when there is no location+incident overlap, meaning
+ * no LLM call is needed.
+ */
+export function getLocationIncidentMatches(
+  newTitle: string,
+  existingTitles: string[]
+): string[] {
+  const newLc = newTitle.toLowerCase();
+  const newLocations = LOCATION_KEYWORDS.filter(k => newLc.includes(k));
+  const newIncident = INCIDENT_KEYWORDS.filter(k => newLc.includes(k));
+  if (newLocations.length === 0 || newIncident.length === 0) return [];
+
+  const matches: string[] = [];
+  for (const existing of existingTitles) {
+    const existingLc = existing.toLowerCase();
+    const existingLocations = LOCATION_KEYWORDS.filter(k => existingLc.includes(k));
+    const existingIncident = INCIDENT_KEYWORDS.filter(k => existingLc.includes(k));
+    const sharesLocation = newLocations.some(k => existingLocations.includes(k));
+    const sharesIncident = newIncident.some(k => existingIncident.includes(k));
+    if (sharesLocation && sharesIncident) matches.push(existing);
+  }
+  return matches;
+}
+
+/**
+ * LLM-assisted duplicate adjudication for location+incident matches.
+ *
+ * Called only when getLocationIncidentMatches() returns results — i.e. when
+ * the fast keyword check cannot determine whether a story is a same-event
+ * repost or a genuinely new angle.
+ *
+ * Sends up to 5 matched pairs to the 8B model in a single call.
+ * Returns true if the LLM judges the new story to be a duplicate of any match.
+ * Falls back to false (let the story through) on any LLM error.
+ *
+ * @param newTitle     - The incoming story title
+ * @param matches      - Titles from getLocationIncidentMatches() (max 5 used)
+ * @param invokeLLMFn  - The invokeLLM function (injected to avoid circular imports)
+ */
+export async function llmDedupCheck(
+  newTitle: string,
+  matches: string[],
+  invokeLLMFn: (params: {
+    model?: string;
+    messages: Array<{ role: "system" | "user"; content: string }>;
+    maxTokens?: number;
+  }) => Promise<{ choices: Array<{ message: { content: string } }> }>
+): Promise<boolean> {
+  if (matches.length === 0) return false;
+
+  // Cap at 5 comparisons per call to keep the prompt tight
+  const candidates = matches.slice(0, 5);
+
+  const comparisons = candidates
+    .map((existing, i) => `Pair ${i + 1}:\n  EXISTING: "${existing}"\n  NEW: "${newTitle}"`)
+    .join("\n\n");
+
+  const prompt = `You are a duplicate-detection engine for an aviation news editorial system.
+
+For each pair below, decide if the NEW title is:
+- DUPLICATE: the same event reported by a different outlet (same facts, same angle, just reworded)
+- NEW_ANGLE: the same event but with genuinely new information (investigation launched, charges filed, victims named, cause revealed, survivors speak, safety review ordered, etc.)
+
+Respond with a JSON array, one entry per pair, in order:
+[{"pair": 1, "verdict": "DUPLICATE"}, {"pair": 2, "verdict": "NEW_ANGLE"}, ...]
+
+Only output the JSON array, nothing else.
+
+${comparisons}`;
+
+  try {
+    const response = await invokeLLMFn({
+      model: "llama-3.1-8b-instant",
+      messages: [{ role: "user", content: prompt }],
+      maxTokens: 200,
+    });
+
+    const raw = String(response?.choices?.[0]?.message?.content ?? "");
+    const jsonMatch = raw.match(/\[\s*\{[\s\S]*\}\s*\]/);
+    if (!jsonMatch) {
+      console.warn("[LLMDedup] Could not parse response, letting story through:", raw.slice(0, 200));
+      return false;
+    }
+
+    const results = JSON.parse(jsonMatch[0]) as Array<{ pair: number; verdict: string }>;
+    const isDuplicate = results.some(r => r.verdict === "DUPLICATE");
+    console.log(`[LLMDedup] "${newTitle.slice(0, 60)}" → ${isDuplicate ? "DUPLICATE" : "NEW_ANGLE"}`);
+    return isDuplicate;
+  } catch (err) {
+    // On any error, let the story through — we never want to silently suppress content
+    console.warn("[LLMDedup] LLM call failed, letting story through:", err instanceof Error ? err.message : err);
+    return false;
+  }
 }

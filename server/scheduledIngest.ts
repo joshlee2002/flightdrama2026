@@ -36,8 +36,11 @@ import {
   fetchRssFeed,
   fetchArticleContent,
   isSimilarTitle,
+  getLocationIncidentMatches,
+  llmDedupCheck,
   isAviationRelevant,
 } from "./ingestion";
+import { invokeLLM } from "./_core/llm";
 import { scoreStory } from "./viralScoring";
 import { batchScoreStoriesWithLLM, type BatchScoringInput } from "./llmScoring";
 import { rssSources } from "../drizzle/schema";
@@ -180,6 +183,17 @@ export async function scheduledIngestHandler(req: Request, res: Response) {
           markSeenBatch.push({ url: item.sourceUrl, reason: "duplicate_title" });
           skippedCount++;
           continue;
+        }
+
+        // LLM dedup: check location+incident matches that fast checks can't resolve
+        const locationMatches = getLocationIncidentMatches(item.title || "", recentTitles);
+        if (locationMatches.length > 0) {
+          const isDup = await llmDedupCheck(item.title || "", locationMatches, invokeLLM);
+          if (isDup) {
+            markSeenBatch.push({ url: item.sourceUrl, reason: "duplicate_title" });
+            skippedCount++;
+            continue;
+          }
         }
 
         const content = item.content || "";
