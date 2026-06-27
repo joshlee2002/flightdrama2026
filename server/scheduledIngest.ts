@@ -231,35 +231,34 @@ export async function scheduledIngestHandler(req: Request, res: Response) {
     }
     console.log(`[ScheduledIngest] Phase 1c: Fetched content for ${thinItems.length} thin items in ${Date.now() - t2}ms`);
 
-    // ── Phase 1d: Rule-score every candidate; split into winners / borderline ──
-    // applyStatAdjustments is applied to ALL stories here (not just borderline ones)
-    // so that editor override learning affects clear winners too.
+    // ── Phase 1d: Rule-score every candidate; split into LLM candidates / rejects ──
+    // OPTION C: All stories scoring ≥30 go through LLM scoring.
+    // The rule-based system is only used as a fast pre-filter to eliminate obvious
+    // junk (score <30). This ensures scores reflect real FlightDrama performance
+    // data and editor taste, not just keyword matching.
     type PendingStory = CandidateItem & { ruleScore: ReturnType<typeof scoreStory> };
 
-    const clearWinners: PendingStory[] = [];
-    const borderlineStories: PendingStory[] = [];
+    const llmCandidates: PendingStory[] = []; // ALL stories that pass the reject threshold
 
     for (const item of candidates) {
       const ruleScore = scoreStory(item.title, item.content);
       // Apply learned stat adjustments to the rule score before thresholding
-      // This ensures override learning can promote stories the rules undervalue
       const statAdjustedRuleScore = await applyStatAdjustments(ruleScore.score, ruleScore.category, item.title);
       const adjustedRuleScore = { ...ruleScore, score: statAdjustedRuleScore };
       const pending: PendingStory = { ...item, ruleScore: adjustedRuleScore };
 
-      if (adjustedRuleScore.score >= 70) {
-        clearWinners.push(pending);
-      } else if (adjustedRuleScore.score >= 35) {
-        // Lowered borderline floor from 40 → 35 so stat-adjusted near-misses get LLM review
-        borderlineStories.push(pending);
+      if (adjustedRuleScore.score >= 30) {
+        // Option C: everything above the obvious-reject threshold goes to LLM
+        llmCandidates.push(pending);
       } else {
         markUrlAsSeen(item.sourceUrl, "score_below_threshold").catch(() => {});
         skippedCount++;
       }
     }
 
-    // ── Phase 2: Batch LLM score the borderline stories ───────────────────────
+    // ── Phase 2: Batch LLM score ALL candidates (Option C) ─────────────────────────
     // 10 stories per LLM call. 8B model with 70B safety net for high scorers.
+    // Every story is scored against real Instagram performance data + override history.
     const llmScoredStories: Array<PendingStory & {
       finalScore: number;
       finalLabel: string;
@@ -269,8 +268,8 @@ export async function scheduledIngestHandler(req: Request, res: Response) {
       scoringMethod: "rule_based" | "llm_assisted";
     }> = [];
 
-    for (let i = 0; i < borderlineStories.length; i += LLM_BATCH_SIZE) {
-      const batch = borderlineStories.slice(i, i + LLM_BATCH_SIZE);
+    for (let i = 0; i < llmCandidates.length; i += LLM_BATCH_SIZE) {
+      const batch = llmCandidates.slice(i, i + LLM_BATCH_SIZE);
       const batchInputs: BatchScoringInput[] = batch.map(s => ({
         title: s.title,
         content: s.content,
@@ -281,6 +280,7 @@ export async function scheduledIngestHandler(req: Request, res: Response) {
       try {
         batchResults = await batchScoreStoriesWithLLM(batchInputs);
       } catch {
+        // LLM failed — fall back to rule-based scores so we never lose stories
         batchResults = batch.map(s => ({ ...s.ruleScore, scoringMethod: "rule_based" as const }));
       }
 
@@ -299,22 +299,12 @@ export async function scheduledIngestHandler(req: Request, res: Response) {
       }
     }
 
-    console.log(`[ScheduledIngest] Phase 2: Scored ${clearWinners.length} winners + ${borderlineStories.length} borderline (${Math.ceil(borderlineStories.length / LLM_BATCH_SIZE)} LLM batches)`);
+    console.log(`[ScheduledIngest] Phase 2 (Option C): LLM-scored ${llmCandidates.length} candidates in ${Math.ceil(llmCandidates.length / LLM_BATCH_SIZE)} batches`);
 
-    // ── Phase 3: Persist all stories that meet their feed threshold ───────────
+    // ── Phase 3: Persist all stories that meet their feed threshold ─────────────────
     const allScored = [
-      ...clearWinners.map(s => ({
-        ...s,
-        finalScore: s.ruleScore.score,
-        finalLabel: s.ruleScore.statusLabel,
-        finalCategory: s.ruleScore.category,
-        finalReason: s.ruleScore.viralReason,
-        finalTriggers: s.ruleScore.triggers ?? [],
-        scoringMethod: "rule_based" as const,
-      })),
       ...llmScoredStories,
     ];
-
     for (const s of allScored) {
       await markUrlAsSeen(s.sourceUrl, s.finalScore < s.feedThreshold ? "score_below_threshold" : undefined);
 

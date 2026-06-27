@@ -22,7 +22,8 @@
 
 import { ENV } from "./_core/env";
 import { invokeLLM } from "./_core/llm";
-import { getOverrideExamplesFromDb, getAllScoringConfig, setScoringConfig, getDb } from "./db";
+import { getOverrideExamplesFromDb, getAllScoringConfig, setScoringConfig, getDb, getHistoricalPosts } from "./db";
+import { calculatePerformanceScore } from "./performanceAnalysis";
 import { scoreStory, applyStatAdjustments, type ScoringResult } from "./viralScoring";
 import { stories } from "../drizzle/schema";
 import { and, desc, isNotNull, sql } from "drizzle-orm";
@@ -36,72 +37,160 @@ export type LLMScoringResult = ScoringResult & {
 // ── Build scoring prompt ──────────────────────────────────────────────────────
 
 async function buildScoringContext(): Promise<{ systemPrompt: string; hasExamples: boolean }> {
-  const [examples, config] = await Promise.all([
-    getOverrideExamplesFromDb(50), // increased from 20 — more examples = better pattern matching
+  const [examples, config, historicalPosts] = await Promise.all([
+    getOverrideExamplesFromDb(50),
     getAllScoringConfig(),
+    getHistoricalPosts(100), // fetch real Instagram performance data
   ]);
 
   const learnedRules = config["learned_scoring_rules"] ?? null;
   const learnedWeights = config["learned_category_weights"] ?? null;
   const learnedInsights = config["learned_editor_insights"] ?? null;
+  // Structured scoring weights from deep learner (JSON, applied as hard adjustments)
+  const structuredWeightsRaw = config["learned_structured_weights"] ?? null;
   // Statistical learner output
   const statWeights = config["stat_category_weights"] ?? null;
   const statKeywordBoosts = config["stat_keyword_boosts"] ?? null;
   const statKeywordPenalties = config["stat_keyword_penalties"] ?? null;
 
-  const validExamples = examples.filter(e => e.overrideScore !== null && e.overrideLabel !== null);
+  // ── Instagram performance data — PRIMARY SIGNAL ───────────────────────────
+  // Score every historical post by real engagement and build a ranked reference list.
+  // This is the most important context: the model should score new stories based on
+  // how similar they are to stories that ACTUALLY performed well for FlightDrama.
+  const postsWithMetrics = historicalPosts.filter(
+    p => (p.views ?? 0) > 0 || (p.likes ?? 0) > 0 || (p.shares ?? 0) > 0
+  );
+  const rankedPosts = postsWithMetrics
+    .map(p => ({ ...p, _perfScore: calculatePerformanceScore(p) }))
+    .filter(p => p._perfScore > 0)
+    .sort((a, b) => b._perfScore - a._perfScore);
 
-  // Sort: show the most instructive examples first — large drift examples teach the most
+  const topPerformers = rankedPosts.slice(0, 25);
+  const bottomPerformers = rankedPosts.slice(-10);
+
+  const instagramBlock = topPerformers.length > 0
+    ? [
+        `## GROUND TRUTH: Real FlightDrama Instagram Performance`,
+        `These are actual posts and their real engagement. This is the most important signal.`,
+        `Score new stories based on similarity to the TOP performers. Avoid patterns from the BOTTOM performers.`,
+        ``,
+        `### TOP PERFORMERS (what works for FlightDrama):`,
+        ...topPerformers.map((p, i) => {
+          const stats = [
+            p.views ? `${(p.views / 1000).toFixed(0)}k views` : null,
+            p.likes ? `${p.likes.toLocaleString()} likes` : null,
+            p.shares ? `${p.shares} shares` : null,
+            p.saves ? `${p.saves} saves` : null,
+          ].filter(Boolean).join(" | ");
+          return `#${i + 1} [perf:${p._perfScore}/100] "${p.headline}"\n     Category: ${p.category ?? "unknown"} | ${stats}`;
+        }),
+        ``,
+        `### BOTTOM PERFORMERS (avoid these patterns):`,
+        ...bottomPerformers.map(p => {
+          const stats = [
+            p.views ? `${(p.views / 1000).toFixed(0)}k views` : null,
+            p.likes ? `${p.likes.toLocaleString()} likes` : null,
+          ].filter(Boolean).join(" | ") || "low engagement";
+          return `[perf:${p._perfScore}/100] "${p.headline}" | ${stats}`;
+        }),
+      ].join("\n")
+    : null;
+
+  // ── Editor override examples — SECONDARY SIGNAL ───────────────────────────
+  // Recency-weighted: overrides from the last 30 days count double.
+  const now = Date.now();
+  const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
+  const validExamples = examples
+    .filter(e => e.overrideScore !== null && e.overrideLabel !== null)
+    .map(e => ({
+      ...e,
+      // Recency weight: recent overrides are more representative of current taste
+      _recencyWeight: e.updatedAt && (now - new Date(e.updatedAt).getTime()) < thirtyDaysMs ? 2 : 1,
+      _drift: (e.overrideScore ?? 0) - (e.viralScore ?? 0),
+    }));
+
+  // Sort: recent first, then by drift magnitude (most instructive corrections)
   const sortedExamples = [...validExamples].sort((a, b) => {
-    const driftA = Math.abs((a.overrideScore ?? 0) - (a.viralScore ?? 0));
-    const driftB = Math.abs((b.overrideScore ?? 0) - (b.viralScore ?? 0));
-    return driftB - driftA; // largest drift first
+    if (a._recencyWeight !== b._recencyWeight) return b._recencyWeight - a._recencyWeight;
+    return Math.abs(b._drift) - Math.abs(a._drift);
   });
 
-  const examplesBlock =
-    sortedExamples.length > 0
-      ? sortedExamples
-          .map((e, i) => {
-            const drift = (e.overrideScore ?? 0) - (e.viralScore ?? 0);
-            const driftStr = drift > 0 ? `+${drift} (editor scored HIGHER)` : drift < 0 ? `${drift} (editor scored LOWER)` : `0 (agreed)`;
-            return `Example ${i + 1}:\n  Title: "${e.title}"\n  AI score: ${e.viralScore} → Editor score: ${e.overrideScore} (${e.overrideLabel}) | Drift: ${driftStr}\n  Category: ${e.category ?? "unknown"}${e.viralReason ? `\n  AI reason: ${e.viralReason}` : ""}`;
-          })
-          .join("\n\n")
-      : null;
+  const examplesBlock = sortedExamples.length > 0
+    ? sortedExamples
+        .map((e, i) => {
+          const driftStr = e._drift > 0
+            ? `+${e._drift} (editor scored HIGHER — AI undervalued this)`
+            : e._drift < 0
+            ? `${e._drift} (editor scored LOWER — AI overvalued this)`
+            : `0 (agreed)`;
+          const recency = e._recencyWeight === 2 ? " [recent]" : "";
+          return `${i + 1}.${recency} "${e.title}"\n   AI: ${e.viralScore} → Editor: ${e.overrideScore} (${e.overrideLabel}) | Drift: ${driftStr}\n   Category: ${e.category ?? "unknown"}`;
+        })
+        .join("\n\n")
+    : null;
 
-  let systemPrompt = `You are a viral content scoring engine for FlightDrama, an aviation news social media account.
+  // ── Build the full system prompt ──────────────────────────────────────────
+  let systemPrompt = `You are a viral content scoring engine for FlightDrama, an aviation Instagram/TikTok/YouTube account.
 
-Your job is to score how likely a story is to go viral on social media (Instagram/TikTok/YouTube Shorts) among a general audience interested in aviation drama, safety failures, weird passenger behaviour, and surprising aviation facts.
+Your PRIMARY job is to predict which stories will perform like the TOP PERFORMERS shown below — stories that got real views, likes, and shares from FlightDrama's audience. Use the Instagram performance data as your main reference, not generic virality theory.
 
-Score from 0–100 where:
-- 88–100 = must_post (extremely viral: shocking safety failure, celebrity, major outrage, death toll, record-breaking)
-- 70–87 = strong_candidate (very shareable: Boeing drama, pilot pay, passenger outrage, weird incident)
-- 55–69 = maybe (moderately interesting: route news with a hook, minor controversy)
-- 0–54 = reject (routine: schedule changes, earnings reports, generic fleet updates)
-- AUTOMATIC REJECT (score 0-15): listicles ("best hotels", "top 10", "X things you didn't know"), travel guides, product reviews, opinion columns with no concrete news event, sponsored content, award announcements with no newsworthy context, and any article whose headline starts with a number followed by a noun (e.g. "16 Hotels...", "5 Reasons...", "10 Best...").`;
+Score from 0–100:
+- 88–100 = must_post (matches top performer pattern — shocking, emotional, or deeply surprising)
+- 70–87 = strong_candidate (similar to strong performers — clear hook, aviation drama)
+- 55–69 = maybe (some potential but weaker hook than typical performers)
+- 0–54 = reject (routine news, no emotional hook, not similar to any top performer)
+- AUTOMATIC REJECT (score 0-15): listicles, travel guides, product reviews, opinion columns with no news event, sponsored content, award announcements, any headline starting with a number followed by a noun ("16 Hotels...", "5 Reasons...").`;
 
-  if (learnedRules) {
-    systemPrompt += `\n\n## Learned Scoring Rules (from editor override analysis)\n${learnedRules}`;
+  // Instagram performance data goes FIRST — it's the primary signal
+  if (instagramBlock) {
+    systemPrompt += `\n\n${instagramBlock}`;
   }
 
-  if (learnedWeights) {
-    systemPrompt += `\n\n## Learned Category Weights\n${learnedWeights}`;
+  // Structured weights from deep learner (hard numeric adjustments)
+  if (structuredWeightsRaw) {
+    try {
+      const sw = JSON.parse(structuredWeightsRaw);
+      const lines: string[] = [];
+      if (sw.category_boosts) {
+        const boosts = Object.entries(sw.category_boosts as Record<string, number>)
+          .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
+          .map(([cat, adj]) => `  ${cat}: ${adj > 0 ? "+" : ""}${adj}`);
+        if (boosts.length) lines.push(`Category adjustments (from ${sw.examples_used ?? "?"} overrides):\n${boosts.join("\n")}`);
+      }
+      if (sw.keyword_boosts) {
+        const boosts = Object.entries(sw.keyword_boosts as Record<string, number>)
+          .sort((a, b) => b[1] - a[1]).slice(0, 15)
+          .map(([kw, adj]) => `${kw}(+${adj})`);
+        if (boosts.length) lines.push(`Keywords to score HIGHER: ${boosts.join(", ")}`);
+      }
+      if (sw.keyword_penalties) {
+        const penalties = Object.entries(sw.keyword_penalties as Record<string, number>)
+          .sort((a, b) => a[1] - b[1]).slice(0, 10)
+          .map(([kw, adj]) => `${kw}(${adj})`);
+        if (penalties.length) lines.push(`Keywords to score LOWER: ${penalties.join(", ")}`);
+      }
+      if (sw.editor_notes) lines.push(`Editor taste notes: ${sw.editor_notes}`);
+      if (lines.length) {
+        systemPrompt += `\n\n## Learned Editor Preferences (from ${sw.examples_used ?? "?"} override corrections)\n${lines.join("\n")}`;
+      }
+    } catch { /* ignore malformed JSON */ }
+  } else {
+    // Fall back to text-based learned rules if structured weights not yet generated
+    if (learnedRules) systemPrompt += `\n\n## Learned Scoring Rules\n${learnedRules}`;
+    if (learnedWeights) systemPrompt += `\n\n## Learned Category Weights\n${learnedWeights}`;
+    if (learnedInsights) systemPrompt += `\n\n## Editor Preferences\n${learnedInsights}`;
   }
 
-  if (learnedInsights) {
-    systemPrompt += `\n\n## Editor Preferences\n${learnedInsights}`;
-  }
-
-  // Inject statistical learner output if available (free, always up-to-date)
+  // Statistical learner output (free, always up-to-date)
   if (statWeights || statKeywordBoosts || statKeywordPenalties) {
-    systemPrompt += `\n\n## Statistical Learning (auto-updated from override history, no LLM cost)`;
+    systemPrompt += `\n\n## Statistical Signals (from override history)`;
     if (statWeights) systemPrompt += `\nCategory score adjustments: ${statWeights}`;
     if (statKeywordBoosts) systemPrompt += `\nKeywords editor consistently scores HIGHER: ${statKeywordBoosts}`;
     if (statKeywordPenalties) systemPrompt += `\nKeywords editor consistently scores LOWER: ${statKeywordPenalties}`;
   }
 
   if (examplesBlock) {
-    systemPrompt += `\n\n## Recent Editor Overrides (few-shot examples)\nThe editor has manually corrected these scores — learn from the pattern:\n\n${examplesBlock}`;
+    systemPrompt += `\n\n## Editor Override History (most recent and most instructive first)\nThe editor has manually corrected these AI scores. [recent] = last 30 days. Learn from the pattern:\n\n${examplesBlock}`;
   }
 
   systemPrompt += `\n\nRespond ONLY with a valid JSON object in this exact format:
@@ -114,7 +203,7 @@ Score from 0–100 where:
   "triggers": ["<trigger 1>", "<trigger 2>"]
 }`;
 
-  return { systemPrompt, hasExamples: examples.length > 0 || !!learnedRules || !!statWeights };
+  return { systemPrompt, hasExamples: topPerformers.length > 0 || examples.length > 0 || !!learnedRules };
 }
 
 // ── Score a single story ──────────────────────────────────────────────────────
@@ -614,61 +703,59 @@ export async function learnFromOverrides(): Promise<{ success: boolean; summary:
     };
   }
 
-  // Also pull Instagram performance data to ground the learning in reality
-  const { getHistoricalPosts } = await import("./db");
-  const historicalPosts = await getHistoricalPosts(50);
-  
+  // Pull Instagram performance data — this is the primary learning signal
+  const historicalPosts = await getHistoricalPosts(100);
+  const postsWithMetrics = historicalPosts.filter(p => (p.views ?? 0) > 0 || (p.likes ?? 0) > 0 || (p.shares ?? 0) > 0);
+  const rankedPosts = postsWithMetrics
+    .map(p => ({ ...p, _perf: calculatePerformanceScore(p) }))
+    .filter(p => p._perf > 0)
+    .sort((a, b) => b._perf - a._perf);
+
   const validExamples = filteredExamples.filter(e => e.overrideScore !== null && e.overrideLabel !== null);
 
+  // Recency-weight examples: last 30 days count double in the analysis
+  const now = Date.now();
+  const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
   const examplesText = validExamples
-    .map(
-      (e, i) => {
-        const triggers = e.viralTriggers && e.viralTriggers.length > 0 ? `\n   Detected triggers: ${e.viralTriggers.join(", ")}` : "";
-        const contentSnippet = e.content ? `\n   Article excerpt: "${e.content.slice(0, 150).replace(/\n/g, ' ')}..."` : "";
-        return `${i + 1}. Title: "${e.title}"${contentSnippet}\n   AI Score: ${e.viralScore} | Editor Score: ${e.overrideScore} (${e.overrideLabel})\n   Category: ${e.category ?? "unknown"}\n   AI Reason: ${e.viralReason ?? "none"}${triggers}`;
-      }
-    )
+    .map((e, i) => {
+      const drift = (e.overrideScore ?? 0) - (e.viralScore ?? 0);
+      const driftStr = drift > 0 ? `+${drift} (AI undervalued)` : drift < 0 ? `${drift} (AI overvalued)` : `0 (agreed)`;
+      const recency = e.updatedAt && (now - new Date(e.updatedAt).getTime()) < thirtyDaysMs ? " [RECENT]" : "";
+      const contentSnippet = e.content ? `\n   Excerpt: "${e.content.slice(0, 120).replace(/\n/g, ' ')}..."` : "";
+      return `${i + 1}.${recency} "${e.title}"${contentSnippet}\n   AI: ${e.viralScore} → Editor: ${e.overrideScore} (${e.overrideLabel}) | Drift: ${driftStr} | Category: ${e.category ?? "unknown"}`;
+    })
     .join("\n\n");
-    
-  let instagramText = "";
-  if (historicalPosts && historicalPosts.length > 0) {
-    const validPosts = historicalPosts.filter(p => p.likes != null || p.views != null);
-    if (validPosts.length > 0) {
-      instagramText = `\n\n## Actual Instagram Performance\nHere is how recent stories ACTUALLY performed when posted. Use this to ground your rules in real audience behaviour.\n\n` + 
-        validPosts.slice(0, 20).map(p => {
-          const stats = [
-            p.likes ? `${p.likes} likes` : null,
-            p.views ? `${p.views} views` : null,
-            p.saves ? `${p.saves} saves` : null,
-            p.comments ? `${p.comments} comments` : null
-          ].filter(Boolean).join(", ");
-          return `- "${p.headline}" (${p.category}): ${stats}`;
-        }).join("\n");
-    }
-  }
 
-  // Build the previous rules block — this is the key to cumulative learning
+  const instagramText = rankedPosts.length > 0
+    ? `\n\n## GROUND TRUTH: Real FlightDrama Instagram Performance (ranked by actual engagement)\nUse this as your primary reference. The scoring rules must explain WHY the top posts performed well.\n\nTOP PERFORMERS:\n${rankedPosts.slice(0, 20).map((p, i) => {
+        const stats = [p.views ? `${Math.round(p.views/1000)}k views` : null, p.likes ? `${p.likes} likes` : null, p.shares ? `${p.shares} shares` : null].filter(Boolean).join(" | ");
+        return `#${i+1} [perf:${p._perf}/100] "${p.headline}" | ${p.category ?? "unknown"} | ${stats}`;
+      }).join("\n")}\n\nBOTTOM PERFORMERS (avoid these patterns):\n${rankedPosts.slice(-8).map(p => `[perf:${p._perf}/100] "${p.headline}" | ${p.category ?? "unknown"}`).join("\n")}`
+    : "";
+
+  // Build the previous structured weights block
+  const prevStructuredRaw = config["learned_structured_weights"] ?? null;
   let previousRulesBlock = "";
-  if (previousRules) {
-    previousRulesBlock = `\n\n## Previously Learned Rules (from earlier learning runs — PRESERVE and REFINE these)\n${previousRules}`;
+  if (previousRules || prevStructuredRaw) {
+    previousRulesBlock = `\n\n## Previously Learned Rules (PRESERVE and REFINE — do NOT discard)`;
+    if (previousRules) previousRulesBlock += `\n${previousRules}`;
     if (previousWeights) previousRulesBlock += `\n\nPreviously learned category weights:\n${previousWeights}`;
     if (previousInsights) previousRulesBlock += `\n\nPreviously learned editor insights:\n${previousInsights}`;
-    previousRulesBlock += `\n\nIMPORTANT: Do NOT discard these previous rules. Your job is to REFINE and EXTEND them with the new examples below. Keep everything that still holds true. Update anything the new examples contradict. Add new rules for patterns you see in the new examples.`;
+    previousRulesBlock += `\n\nYour job is to REFINE and EXTEND these rules with the new examples. Keep what holds true. Update what the new examples contradict. Add new rules for new patterns.`;
   }
 
-  const isFirstRun = !previousRules;
-  const systemPrompt = `You are an expert editorial analyst for FlightDrama, an aviation social media account.
+  const isFirstRun = !previousRules && !prevStructuredRaw;
+  const systemPrompt = `You are an expert editorial analyst for FlightDrama, an aviation Instagram/TikTok/YouTube account.${previousRulesBlock}
 
-You will be given ${isFirstRun ? 'a set of' : 'previously learned scoring rules AND new'} editor override examples${isFirstRun ? '' : ' to refine those rules with'}, along with actual Instagram performance data.${previousRulesBlock}
+Your job is to analyse editor override corrections AND real Instagram performance data to produce:
+1. Specific, actionable scoring rules grounded in BOTH editor taste AND real audience engagement
+2. Structured numeric weights (JSON) for categories and keywords — these are applied as hard score adjustments
+3. A plain-text description of the editor's taste
 
-Your job is to produce:
-1. **Improved scoring rules** — specific, actionable rules that match the editor's taste AND actual audience performance. Look at viral triggers and article excerpts for deep patterns.
-2. **Category weights** — which categories the editor consistently scores higher or lower.
-3. **Editor insights** — a paragraph describing the editor's taste and how it aligns with actual engagement.
+The Instagram performance data is the PRIMARY signal. The editor overrides are the SECONDARY signal.
+Be specific and concrete. Avoid vague rules like "Boeing stories do well" — instead say "Boeing safety incidents with a specific failure mechanism score +20 vs generic Boeing earnings stories which score -15".`;
 
-Be specific and concrete. These rules will be used to score future stories.`;
-
-  const userMessage = `${isFirstRun ? `Here are ${validExamples.length} editor override examples:` : `Here are ${validExamples.length} NEW override examples since the last learning run. Refine the existing rules above with these new patterns:`}\n\n${examplesText}${instagramText}\n\nReturn ONLY a JSON object with these four string fields:\n- learned_scoring_rules: complete updated rules (preserve old + add new, plain text, no backticks)\n- learned_category_weights: complete updated category adjustments (plain text list)\n- learned_editor_insights: updated paragraph about editor taste (plain text)\n- summary: one sentence describing what changed or was reinforced\n\nIMPORTANT: All field values must be plain text strings. Do NOT use backticks, code blocks, or special characters inside the JSON values.`;
+  const userMessage = `${isFirstRun ? `Analyse these ${validExamples.length} editor override examples` : `Refine the existing rules with these ${validExamples.length} new override examples`}:\n\n${examplesText}${instagramText}\n\nReturn ONLY a JSON object with these FIVE fields:\n\n1. "learned_scoring_rules" (string): Complete updated scoring rules in plain text. Be specific and concrete. Reference actual story patterns from the examples.\n\n2. "learned_category_weights" (string): Plain text list of category adjustments, e.g. "Boeing Safety Failure: +20, Passenger Incident: +15, Earnings Report: -25"\n\n3. "learned_editor_insights" (string): A paragraph describing the editor's taste and what the Instagram data confirms about the audience.\n\n4. "learned_structured_weights" (object, NOT a string): A JSON object with these numeric fields that will be applied as hard score adjustments:\n   - category_boosts: object mapping category names to integer adjustments (e.g. {"Boeing Safety": 18, "Passenger Incident": 12, "Earnings": -20})\n   - keyword_boosts: object mapping keywords/phrases to integer boosts (e.g. {"fatal": 15, "pilot error": 12, "emergency landing": 10})\n   - keyword_penalties: object mapping keywords to negative integers (e.g. {"earnings": -15, "quarterly": -12})\n   - editor_notes: string with one sentence about the editor's taste\n   - examples_used: integer count of examples analysed\n\n5. "summary" (string): One sentence describing what changed or was reinforced.\n\nIMPORTANT: All string field values must be plain text. Do NOT use backticks or code blocks inside string values. The learned_structured_weights field must be a JSON object (not a string).`;
 
   try {
     const response = await invokeLLM({
@@ -697,19 +784,20 @@ Be specific and concrete. These rules will be used to score future stories.`;
     // that would break JSON.parse (e.g. literal newlines inside strings)
     jsonStr = jsonStr.replace(/(?<=[":,{\[]\s*"[^"]*?)\n(?=[^"]*?")/g, ' ');
 
-    let parsed: { learned_scoring_rules: string; learned_category_weights: string; learned_editor_insights: string; summary: string };
+    let parsed: {
+      learned_scoring_rules: string;
+      learned_category_weights: string;
+      learned_editor_insights: string;
+      learned_structured_weights?: Record<string, unknown>;
+      summary: string;
+    };
     try {
-      parsed = JSON.parse(jsonStr) as {
-        learned_scoring_rules: string;
-        learned_category_weights: string;
-        learned_editor_insights: string;
-        summary: string;
-      };
+      parsed = JSON.parse(jsonStr) as typeof parsed;
     } catch (parseErr) {
-      // Last resort: try to extract each field with regex
+      // Last resort: try to extract each string field with regex
       console.warn("[LLMScoring] JSON.parse failed, trying field extraction:", parseErr);
       const extract = (key: string) => {
-        const m = raw.match(new RegExp(`"${key}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`, 's'));
+        const m = raw.match(new RegExp(`"${key}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`,'s'));
         return m ? m[1].replace(/\\n/g, '\n').replace(/\\t/g, ' ') : '';
       };
       parsed = {
@@ -723,14 +811,32 @@ Be specific and concrete. These rules will be used to score future stories.`;
       }
     }
 
-    // Persist each piece to scoring_config
-    await Promise.all([
+    // Validate and serialise the structured weights object
+    let structuredWeightsStr: string | null = null;
+    if (parsed.learned_structured_weights && typeof parsed.learned_structured_weights === 'object') {
+      try {
+        // Ensure examples_used is set correctly
+        const sw = parsed.learned_structured_weights as Record<string, unknown>;
+        sw.examples_used = validExamples.length;
+        structuredWeightsStr = JSON.stringify(sw);
+        console.log(`[LLMScoring] Structured weights: ${Object.keys((sw.category_boosts as Record<string,number>) ?? {}).length} category boosts, ${Object.keys((sw.keyword_boosts as Record<string,number>) ?? {}).length} keyword boosts`);
+      } catch {
+        console.warn("[LLMScoring] Could not serialise structured weights");
+      }
+    }
+
+    // Persist all pieces to scoring_config
+    const saves: Promise<void>[] = [
       setScoringConfig("learned_scoring_rules", parsed.learned_scoring_rules ?? ""),
       setScoringConfig("learned_category_weights", parsed.learned_category_weights ?? ""),
       setScoringConfig("learned_editor_insights", parsed.learned_editor_insights ?? ""),
       setScoringConfig("last_learned_at", new Date().toISOString()),
       setScoringConfig("last_learned_examples_count", String(validExamples.length)),
-    ]);
+    ];
+    if (structuredWeightsStr) {
+      saves.push(setScoringConfig("learned_structured_weights", structuredWeightsStr));
+    }
+    await Promise.all(saves);
 
     console.log(`[LLMScoring] Learned from ${validExamples.length} overrides. Summary: ${parsed.summary}`);
 
