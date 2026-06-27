@@ -25,6 +25,7 @@ import { invokeLLM } from "./_core/llm";
 import { getOverrideExamplesFromDb, getAllScoringConfig, setScoringConfig, getDb, getHistoricalPosts } from "./db";
 import { calculatePerformanceScore } from "./performanceAnalysis";
 import { scoreStory, applyStatAdjustments, type ScoringResult } from "./viralScoring";
+import { labelFromScore } from "@shared/const";
 import { stories } from "../drizzle/schema";
 import { and, desc, isNotNull, sql } from "drizzle-orm";
 
@@ -405,10 +406,7 @@ export async function scoreStoryWithLLM(
           const statAdjustedRaw = await applyStatAdjustments(llmScore, llmCategory, title);
           const statAdjustedScore = Math.min(95, statAdjustedRaw); // AI_MAX_SCORE: stat adjustments cannot push AI score above 95
           // Derive label from final score — never trust the LLM's label
-          const derivedLabel70b: ScoringResult["statusLabel"] =
-            statAdjustedScore >= 88 ? "must_post" :
-            statAdjustedScore >= 70 ? "strong_candidate" :
-            statAdjustedScore >= 55 ? "maybe" : "reject";
+          const derivedLabel70b = labelFromScore(statAdjustedScore) as ScoringResult["statusLabel"];
           console.log(`[LLMScoring] 70B override: 8B=${parsed8b.score} → 70B=${llmScore} stat=${statAdjustedScore} label=${derivedLabel70b}`);
           return {
             score: statAdjustedScore,
@@ -432,10 +430,7 @@ export async function scoreStoryWithLLM(
     const statAdjustedRaw8b = await applyStatAdjustments(llmScore, llmCategory, title);
     const statAdjustedScore = Math.min(95, statAdjustedRaw8b); // AI_MAX_SCORE: stat adjustments cannot push AI score above 95
     // Derive label from final score — never trust the LLM's label
-    const derivedLabel8b: ScoringResult["statusLabel"] =
-      statAdjustedScore >= 88 ? "must_post" :
-      statAdjustedScore >= 70 ? "strong_candidate" :
-      statAdjustedScore >= 55 ? "maybe" : "reject";
+    const derivedLabel8b = labelFromScore(statAdjustedScore) as ScoringResult["statusLabel"];
     return {
       score: statAdjustedScore,
       statusLabel: derivedLabel8b,
@@ -565,10 +560,7 @@ Return ONLY the JSON array. No other text.`
       const statAdjustedScore = await applyStatAdjustments(llmScore, llmCategory, s.title);
       // Derive statusLabel from the final score in code — never trust the LLM's label.
       // This ensures score and label are always consistent (no 100 in Strong section).
-      const derivedLabel: ScoringResult["statusLabel"] =
-        statAdjustedScore >= 88 ? "must_post" :
-        statAdjustedScore >= 70 ? "strong_candidate" :
-        statAdjustedScore >= 55 ? "maybe" : "reject";
+      const derivedLabel = labelFromScore(statAdjustedScore) as ScoringResult["statusLabel"];
       results.push({
         score: statAdjustedScore,
         statusLabel: derivedLabel,
