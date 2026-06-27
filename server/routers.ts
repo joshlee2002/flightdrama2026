@@ -994,106 +994,24 @@ export const appRouter = router({
 
     /**
      * Refresh all active RSS feeds and ingest new stories.
-     * Aviation gate applied to all viral/mainstream sources.
+     *
+     * Previously this had its own inline ingest loop that bypassed the
+     * event-fingerprint and content-hash dedup added to scheduledIngest.ts.
+     * It is now a thin wrapper that calls the canonical ingest pipeline
+     * directly so the UI button and the cron job use identical dedup logic.
+     *
      * Returns immediately — the ingest runs in the background so the HTTP
      * request never times out regardless of how many feeds are configured.
      */
-    refreshFeeds: protectedProcedure.mutation(async () => {
-      // Fire-and-forget: kick off the ingest in the background and return
-      // immediately so the client never hits a request timeout.
-      setImmediate(async () => {
-        const sources = await getActiveRssSources();
-        const [recentTitles, learnedDuplicatePairs] = await Promise.all([
-          getRecentStoryTitles(5000),
-          getRecentDuplicatePairs(10),
-        ]);
-        let newCount = 0;
-        let skippedCount = 0;
-
-        // Process sources in parallel batches of 10 for speed
-        const BATCH_SIZE = 10;
-        const processSingleSource = async (source: typeof sources[0]) => {
-          const feedThreshold = (source.scoreThreshold && source.scoreThreshold > 0)
-            ? source.scoreThreshold
-            : 40;
-          if (source.sourceType === "ai_keyword" && source.expiresAt && source.expiresAt < new Date()) {
-            console.log(`[Feeds] Skipping expired AI feed: ${source.name}`);
-            return;
-          }
-          try {
-            const items = await fetchRssFeed(source.url, source.name);
-            await updateRssSourceLastFetched(source.id);
-            // Pre-filter items before scoring to avoid wasting LLM calls
-            const candidateItems: typeof items = [];
-            for (const item of items) {
-              if (await hasSeenUrl(item.sourceUrl)) { skippedCount++; continue; }
-              if (isSimilarTitle(item.title, recentTitles, learnedDuplicatePairs)) {
-                await markUrlAsSeen(item.sourceUrl, "similar_title");
-                skippedCount++;
-                continue;
-              }
-              // LLM dedup for location+incident matches
-              const locMatches = getLocationIncidentMatches(item.title, recentTitles);
-              if (locMatches.length > 0 && await llmDedupCheck(item.title, locMatches, invokeLLM, learnedDuplicatePairs)) {
-                await markUrlAsSeen(item.sourceUrl, "similar_title");
-                skippedCount++;
-                continue;
-              }
-              if (!isAviationRelevant(item.title, item.content, source.category)) {
-                await markUrlAsSeen(item.sourceUrl, "not_aviation");
-                skippedCount++;
-                continue;
-              }
-              candidateItems.push(item);
-            }
-            // Batch score all candidates from this source in one LLM call
-            const { llmScoringEnabled } = await getCostControlConfig();
-            const scoringResults = llmScoringEnabled && candidateItems.length > 0
-              ? await batchScoreStoriesWithLLM(candidateItems.map(item => ({
-                  title: item.title,
-                  content: item.content,
-                  ruleScore: scoreStory(item.title, item.content),
-                })))
-              : candidateItems.map(item => ({ ...scoreStory(item.title, item.content), scoringMethod: "rule_based" as const }));
-            for (let idx = 0; idx < candidateItems.length; idx++) {
-              const item = candidateItems[idx];
-              const scoring = scoringResults[idx] ?? { ...scoreStory(item.title, item.content), scoringMethod: "rule_based" as const };
-              await markUrlAsSeen(item.sourceUrl, scoring.score < feedThreshold ? "score_below_threshold" : undefined);
-              if (scoring.score < feedThreshold) { skippedCount++; continue; }
-              const newStoryId = await createStory({
-                sourceUrl: item.sourceUrl,
-                sourceName: source.name,
-                title: item.title,
-                content: item.content,
-                publishedAt: item.publishedAt,
-                viralScore: scoring.score,
-                statusLabel: scoring.statusLabel,
-                category: scoring.category,
-                viralReason: scoring.viralReason,
-                viralTriggers: scoring.triggers,
-                scoringMethod: scoring.scoringMethod,
-                isDuplicate: false,
-                approvalStatus: "pending",
-                processedAt: new Date(),
-              });
-              if (newStoryId) {
-                await createStoryPackage({ storyId: newStoryId, processingStatus: "queued" });
-                recentTitles.push(item.title);
-                newCount++;
-              }
-            }
-          } catch (err) {
-            console.error(`[Feeds] Error fetching ${source.name}:`, err);
-          }
-        };
-        for (let i = 0; i < sources.length; i += BATCH_SIZE) {
-          const batch = sources.slice(i, i + BATCH_SIZE);
-          await Promise.all(batch.map(processSingleSource));
-        }
-        console.log(`[Feeds] Background ingest complete — ${newCount} new, ${skippedCount} skipped`);
+    refreshFeeds: protectedProcedure.mutation(async ({ ctx }) => {
+      // Import the canonical ingest pipeline (avoids circular import at module level)
+      const { runIngestPipeline } = await import("./ingestPipeline");
+      // Fire-and-forget: kick off in background so the UI button returns instantly
+      setImmediate(() => {
+        runIngestPipeline().catch(err =>
+          console.error("[Feeds] Background ingest error:", err)
+        );
       });
-
-      // Return immediately so the UI button never spins forever
       return { started: true, newCount: 0, skippedCount: 0 };
     }),
 

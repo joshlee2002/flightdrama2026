@@ -78,6 +78,15 @@ export const stories = mysqlTable("stories", {
   ]),
   isDuplicate: boolean("isDuplicate").default(false).notNull(),
   duplicateOf: int("duplicateOf"),
+  // Event-fingerprint deduplication — identifies the same real-world aviation event
+  // regardless of headline wording or URL differences across sources.
+  // Format: "<airline>|<flightno>|<aircraft>|<location>|<incidenttype>|<dateYYYYMMDD>"
+  // Null when the story lacks enough structured data to fingerprint.
+  eventFingerprint: varchar("eventFingerprint", { length: 512 }),
+  // SHA-256 of normalised title+content — catches verbatim reposts with different URLs
+  contentHash: varchar("contentHash", { length: 64 }),
+  // Canonical URL after resolving redirects (Google News, AMP, etc.)
+  canonicalUrl: varchar("canonicalUrl", { length: 768 }),
   approvalStatus: mysqlEnum("approvalStatus", [
     "pending",
     "approved",
@@ -247,7 +256,7 @@ export type InsertHistoricalPost = typeof historicalPosts.$inferInsert;
 // Every URL seen during ingestion — including ones rejected by the score gate.
 export const seenUrls = mysqlTable("seen_urls", {
   id: int("id").autoincrement().primaryKey(),
-  url: varchar("url", { length: 768 }).notNull(),
+  url: varchar("url", { length: 768 }).notNull().unique(),
   rejectedReason: varchar("rejectedReason", { length: 128 }),
   seenAt: timestamp("seenAt").defaultNow().notNull(),
 });

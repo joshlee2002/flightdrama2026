@@ -804,3 +804,58 @@ export async function atomicIncrementScoringCounter(key: string): Promise<number
     .limit(1);
   return parseInt(result[0]?.v ?? "0", 10);
 }
+
+// ── Event-fingerprint deduplication helpers ───────────────────────────────────
+
+/**
+ * Look up an existing story by its event fingerprint.
+ * Returns the first matching story (id + title) or null if none found.
+ * Excludes stories that were themselves marked as duplicates — we want the
+ * canonical story, not a chain of duplicates pointing at each other.
+ */
+export async function getStoryByEventFingerprint(
+  fingerprint: string
+): Promise<{ id: number; title: string } | null> {
+  if (!fingerprint) return null;
+  const db = await getDb();
+  if (!db) return null;
+  const result = await db
+    .select({ id: stories.id, title: stories.title })
+    .from(stories)
+    .where(
+      and(
+        eq(stories.eventFingerprint, fingerprint),
+        ne(stories.approvalStatus, "duplicate" as any),
+        ne(stories.approvalStatus, "dismissed" as any),
+      )
+    )
+    .orderBy(desc(stories.createdAt))
+    .limit(1);
+  return result[0] ?? null;
+}
+
+/**
+ * Look up an existing story by its content hash.
+ * Returns the first matching story (id + title) or null if none found.
+ * Used to catch verbatim reposts (wire service syndication) with different URLs.
+ */
+export async function getStoryByContentHash(
+  hash: string
+): Promise<{ id: number; title: string } | null> {
+  if (!hash) return null;
+  const db = await getDb();
+  if (!db) return null;
+  const result = await db
+    .select({ id: stories.id, title: stories.title })
+    .from(stories)
+    .where(
+      and(
+        eq(stories.contentHash, hash),
+        ne(stories.approvalStatus, "duplicate" as any),
+        ne(stories.approvalStatus, "dismissed" as any),
+      )
+    )
+    .orderBy(desc(stories.createdAt))
+    .limit(1);
+  return result[0] ?? null;
+}
