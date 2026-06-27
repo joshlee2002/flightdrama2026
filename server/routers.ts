@@ -583,24 +583,30 @@ export const appRouter = router({
 
     /**
      * Permanently dismiss a story — hides it from all views forever.
-     * The URL stays in seen_urls so it is never re-ingested.
+     * Marks the URL as seen so it can NEVER be re-ingested from any source.
      */
     dismiss: protectedProcedure
       .input(z.object({ id: z.number() }))
       .mutation(async ({ input }) => {
+        const story = await getStoryById(input.id);
         await updateStoryApproval(input.id, "dismissed");
+        // Permanently block this URL — dismissed stories must never reappear
+        if (story?.sourceUrl) await markUrlAsSeen(story.sourceUrl, "manually_dismissed");
         return { success: true };
       }),
 
     /**
-     * Dismiss a story as a duplicate — hides it without affecting the
-     * learning system. Does NOT mark the URL as seen so the canonical
-     * version of the story can still be ingested from a different source.
+     * Dismiss a story as a duplicate — hides it permanently and blocks the URL
+     * from ever being re-ingested. If you've called it a duplicate, you never
+     * want to see it again from any source.
      */
     dismissAsDuplicate: protectedProcedure
       .input(z.object({ id: z.number() }))
       .mutation(async ({ input }) => {
+        const story = await getStoryById(input.id);
         await updateStoryApproval(input.id, "duplicate");
+        // Block the URL permanently — duplicate = never show this again
+        if (story?.sourceUrl) await markUrlAsSeen(story.sourceUrl, "duplicate");
         return { success: true };
       }),
 
