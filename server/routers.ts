@@ -557,6 +557,19 @@ export const appRouter = router({
         return { success: true };
       }),
 
+    /**
+     * Mark a story as completed — removes it from the approved queue without
+     * affecting scoring, learning, or the seen-URL list.
+     * Use this when you have finished working on a story and posted it.
+     * The story is archived and never resurfaces in any active queue.
+     */
+    markComplete: protectedProcedure
+      .input(z.object({ id: z.number() }))
+      .mutation(async ({ input }) => {
+        await updateStoryApproval(input.id, "completed");
+        return { success: true };
+      }),
+
     reject: protectedProcedure
       .input(z.object({ id: z.number() }))
       .mutation(async ({ input }) => {

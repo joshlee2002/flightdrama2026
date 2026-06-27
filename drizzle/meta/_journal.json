@@ -29,6 +29,13 @@
       "when": 1782492135071,
       "tag": "0003_smooth_crystal",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "5",
+      "when": 1751021400000,
+      "tag": "0004_add_completed_status",
+      "breakpoints": true
     }
   ]
 }

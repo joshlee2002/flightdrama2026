@@ -12,7 +12,7 @@ import {
   Newspaper, Image, Palette, ChevronDown, ChevronRight, ChevronLeft,
   Loader2, Inbox, Pencil, Check, X, ThumbsUp, ThumbsDown,
   Sparkles, BookOpen, Star, RefreshCw, ClipboardList, Search,
-  FlaskConical, ImageIcon, ZoomIn, Upload, Grid3X3,
+  FlaskConical, ImageIcon, ZoomIn, Upload, Grid3X3, CheckCircle2,
 } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
@@ -897,9 +897,11 @@ interface ApprovedCardProps {
   pkg: any;
   onUnapprove: () => void;
   isUnapproving: boolean;
+  onMarkComplete: () => void;
+  isMarkingComplete: boolean;
 }
 
-function ApprovedCard({ story, pkg, onUnapprove, isUnapproving }: ApprovedCardProps) {
+function ApprovedCard({ story, pkg, onUnapprove, isUnapproving, onMarkComplete, isMarkingComplete }: ApprovedCardProps) {
   const utils = trpc.useUtils();
   const [, setLocation] = useLocation();
   const [expanded, setExpanded] = useState<Record<string, boolean>>({ article: true, images: true });
@@ -1144,7 +1146,17 @@ function ApprovedCard({ story, pkg, onUnapprove, isUnapproving }: ApprovedCardPr
           <Button variant="ghost" size="sm" className="h-7 text-xs gap-1.5 text-primary/80 hover:text-primary" onClick={handleLogPost} disabled={isProcessing} title="Pre-fill Performance Data form with this story">
             <ClipboardList className="w-3 h-3" />Log Post
           </Button>
-          <Button variant="ghost" size="sm" className="h-7 text-xs gap-1.5 text-muted-foreground hover:text-destructive" onClick={onUnapprove} disabled={isUnapproving}>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 text-xs gap-1.5 text-emerald-500 hover:text-emerald-400 hover:bg-emerald-500/10"
+            onClick={onMarkComplete}
+            disabled={isMarkingComplete || isUnapproving}
+            title="Mark as done — removes from queue without affecting scoring"
+          >
+            {isMarkingComplete ? <Loader2 className="w-3 h-3 animate-spin" /> : <CheckCircle2 className="w-3 h-3" />}Done
+          </Button>
+          <Button variant="ghost" size="sm" className="h-7 text-xs gap-1.5 text-muted-foreground hover:text-destructive" onClick={onUnapprove} disabled={isUnapproving || isMarkingComplete}>
             {isUnapproving ? <Loader2 className="w-3 h-3 animate-spin" /> : <X className="w-3 h-3" />}Un-approve
           </Button>
         </div>
@@ -1675,6 +1687,8 @@ export default function ApprovedQueue() {
   const utils = trpc.useUtils();
   const { data: items = [], isLoading } = trpc.stories.list.useQuery({ approvalStatus: "approved" });
   const [unapprovingId, setUnapprovingId] = useState<number | null>(null);
+  const [completingId, setCompletingId] = useState<number | null>(null);
+
   const unapprove = trpc.stories.unapprove.useMutation({
     onMutate: async ({ id }) => {
       // Optimistically remove the card immediately
@@ -1700,7 +1714,32 @@ export default function ApprovedQueue() {
       setUnapprovingId(null);
     },
   });
+
+  const markComplete = trpc.stories.markComplete.useMutation({
+    onMutate: async ({ id }) => {
+      // Optimistically remove the card immediately
+      await utils.stories.list.cancel();
+      const prev = utils.stories.list.getData({ approvalStatus: "approved" });
+      utils.stories.list.setData(
+        { approvalStatus: "approved" },
+        (old: any) => (old ?? []).filter((item: any) => item.story.id !== id)
+      );
+      return { prev };
+    },
+    onSuccess: () => {
+      toast.success("Story marked as done");
+      utils.stories.list.invalidate();
+      setCompletingId(null);
+    },
+    onError: (e, _vars, ctx: any) => {
+      if (ctx?.prev) utils.stories.list.setData({ approvalStatus: "approved" }, ctx.prev);
+      toast.error(`Failed: ${e.message}`);
+      setCompletingId(null);
+    },
+  });
+
   const handleUnapprove = (id: number) => { setUnapprovingId(id); unapprove.mutate({ id }); };
+  const handleMarkComplete = (id: number) => { setCompletingId(id); markComplete.mutate({ id }); };
 
   return (
     <FlightLayout>
@@ -1727,7 +1766,7 @@ export default function ApprovedQueue() {
         )}
         <div className="space-y-4">
           {(items as any[]).map(({ story, package: pkg }: any) => (
-            <ApprovedCard key={story.id} story={story} pkg={pkg} onUnapprove={() => handleUnapprove(story.id)} isUnapproving={unapprovingId === story.id && unapprove.isPending} />
+            <ApprovedCard key={story.id} story={story} pkg={pkg} onUnapprove={() => handleUnapprove(story.id)} isUnapproving={unapprovingId === story.id && unapprove.isPending} onMarkComplete={() => handleMarkComplete(story.id)} isMarkingComplete={completingId === story.id && markComplete.isPending} />
           ))}
         </div>
       </div>

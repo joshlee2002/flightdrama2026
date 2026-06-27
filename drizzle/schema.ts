@@ -85,6 +85,7 @@ export const stories = mysqlTable("stories", {
     "edited",
     "dismissed",
     "duplicate",
+    "completed",
   ])
     .default("pending")
     .notNull(),

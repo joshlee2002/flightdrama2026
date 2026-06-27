@@ -399,6 +399,10 @@ const INCIDENT_KEYWORDS = [
   "strike", "birdstrike", "delay", "cancel", "grounded", "evacuate", "evacuation",
   "hijack", "bomb", "threat", "arrest", "fight", "brawl",
   "prototype", "maiden", "first flight", "delivery",
+  "dead", "killed", "death", "fatal", "fatality", "injured", "injuries",
+  "missing", "overrun", "excursion", "depressurisation", "decompression",
+  "turbulence", "mayday", "ditching", "ditched", "belly landing", "hard landing",
+  "near miss", "close call", "runway incursion", "mid-air",
 ];
 const AIRCRAFT_ENTITY_KEYWORDS = [
   "737", "747", "757", "767", "777", "787", "a220", "a320", "a321", "a330", "a350", "a380",
@@ -407,13 +411,36 @@ const AIRCRAFT_ENTITY_KEYWORDS = [
   "ryanair", "easyjet", "emirates", "lufthansa", "british airways", "delta", "united",
   "american", "southwest", "qantas", "singapore", "cathay", "turkish", "air india",
   "raider", "raptor", "lightning", "globemaster", "hercules",
+  // Additional airlines frequently in the news
+  "wizz", "jetblue", "alaska airlines", "frontier", "spirit", "indigo", "flydubai",
+  "air france", "klm", "iberia", "finnair", "tap air", "aer lingus", "norwegian",
+  "air canada", "westjet", "air new zealand", "malaysia airlines", "thai airways",
+  "china eastern", "china southern", "air china", "korean air", "japan airlines",
+  "etihad", "qatar airways", "saudia", "ethiopian airlines",
+  // Additional aircraft types
+  "a319", "a318", "a310", "a300", "717", "727", "707", "max 8", "max 9",
+  "dreamliner", "concorde", "superjet", "crj", "atr", "dash 8",
 ];
+
+// Stop-words to strip before Jaccard — these words are so common in aviation
+// headlines that they inflate similarity between unrelated stories.
+const STOP_WORDS = new Set([
+  "the", "and", "for", "with", "that", "this", "from", "have", "after",
+  "over", "into", "onto", "upon", "about", "been", "were", "will", "when",
+  "what", "which", "their", "they", "them", "then", "than", "more", "also",
+  "says", "said", "says", "amid", "amid", "amid", "amid",
+  "flight", "plane", "aircraft", "airline", "airlines", "airport",
+  "pilot", "pilots", "aviation", "flying", "flies", "flew",
+]);
 
 /**
  * Duplicate detection: checks if a new title is too similar to existing titles.
- * Uses two strategies:
- * 1. Word-overlap Jaccard similarity (threshold 0.45 — catches same story from different outlets)
- * 2. Key-phrase dedup: same aircraft entity + same incident keyword = same story
+ * Uses three strategies:
+ * 1. Word-overlap Jaccard similarity (threshold 0.35 — tightened from 0.45 to catch
+ *    same-incident stories from different outlets with different wording)
+ * 2. Key-phrase dedup: same aircraft/airline entity + same incident keyword = same story
+ * 3. Airline-only dedup: same airline + same incident keyword (no aircraft type needed)
+ *    catches "Ryanair passenger arrested" vs "Ryanair flight diverted after arrest"
  */
 export function isSimilarTitle(newTitle: string, existingTitles: string[]): boolean {
   const normalise = (t: string) =>
@@ -421,7 +448,7 @@ export function isSimilarTitle(newTitle: string, existingTitles: string[]): bool
       .toLowerCase()
       .replace(/[^a-z0-9 ]/g, "")
       .split(/\s+/)
-      .filter((w) => w.length > 3);
+      .filter((w) => w.length > 3 && !STOP_WORDS.has(w));
 
   const newWordsArr = normalise(newTitle);
   const newWords = new Set(newWordsArr);
@@ -432,22 +459,44 @@ export function isSimilarTitle(newTitle: string, existingTitles: string[]): bool
   const newAircraft = AIRCRAFT_ENTITY_KEYWORDS.filter(k => newLc.includes(k));
   const newIncident = INCIDENT_KEYWORDS.filter(k => newLc.includes(k));
 
+  // Airline-specific keywords (subset of AIRCRAFT_ENTITY_KEYWORDS that are airlines)
+  const AIRLINE_KEYWORDS = [
+    "ryanair", "easyjet", "emirates", "lufthansa", "british airways", "delta", "united",
+    "american", "southwest", "qantas", "singapore", "cathay", "turkish", "air india",
+    "wizz", "jetblue", "alaska airlines", "frontier", "spirit", "indigo", "flydubai",
+    "air france", "klm", "iberia", "finnair", "tap air", "aer lingus", "norwegian",
+    "air canada", "westjet", "air new zealand", "malaysia airlines", "thai airways",
+    "china eastern", "china southern", "air china", "korean air", "japan airlines",
+    "etihad", "qatar airways", "saudia", "ethiopian airlines",
+  ];
+  const newAirlines = AIRLINE_KEYWORDS.filter(k => newLc.includes(k));
+
   for (const existing of existingTitles) {
     const existingWordsArr = normalise(existing);
     const existingWords = new Set(existingWordsArr);
     const intersection = newWordsArr.filter((w) => existingWords.has(w));
     const unionSize = new Set(newWordsArr.concat(existingWordsArr)).size;
-    // Lowered from 0.65 → 0.45: catches same-incident stories from different outlets
-    const similarity = intersection.length / unionSize;
-    if (similarity > 0.45) return true;
+    // Tightened from 0.45 → 0.35: more aggressive dedup of same-incident stories
+    // from different outlets. Stop-words are stripped so meaningful words dominate.
+    const similarity = unionSize > 0 ? intersection.length / unionSize : 0;
+    if (similarity > 0.35) return true;
+
+    const existingLc = existing.toLowerCase();
 
     // Key-phrase dedup: same aircraft entity AND same incident type = same story
-    // e.g. "Ryanair 737 diverted" and "Boeing 737 diversion forces Ryanair flight down" both match
+    // e.g. "Ryanair 737 diverted" and "Boeing 737 diversion forces Ryanair flight down"
     if (newAircraft.length > 0 && newIncident.length > 0) {
-      const existingLc = existing.toLowerCase();
       const sharesAircraft = newAircraft.some(k => existingLc.includes(k));
       const sharesIncident = newIncident.some(k => existingLc.includes(k));
       if (sharesAircraft && sharesIncident) return true;
+    }
+
+    // Airline-only dedup: same airline + same incident keyword (no aircraft type needed)
+    // catches "Ryanair passenger arrested" vs "Ryanair flight diverted after arrest"
+    if (newAirlines.length > 0 && newIncident.length > 0) {
+      const sharesAirline = newAirlines.some(k => existingLc.includes(k));
+      const sharesIncident = newIncident.some(k => existingLc.includes(k));
+      if (sharesAirline && sharesIncident) return true;
     }
   }
 

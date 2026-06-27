@@ -203,10 +203,11 @@ export async function getStoriesWithPackages(filters?: {
   if (filters?.approvalStatus) {
     conditions.push(eq(stories.approvalStatus, filters.approvalStatus as any));
   } else {
-    // Default: exclude rejected and dismissed stories from the dashboard
+    // Default: exclude rejected, dismissed, duplicate, and completed stories from the dashboard
     conditions.push(ne(stories.approvalStatus, "rejected" as any));
     conditions.push(ne(stories.approvalStatus, "dismissed" as any));
     conditions.push(ne(stories.approvalStatus, "duplicate" as any));
+    conditions.push(ne(stories.approvalStatus, "completed" as any));
   }
   if (filters?.minScore !== undefined) {
     conditions.push(gte(stories.viralScore, filters.minScore));
@@ -268,7 +269,7 @@ export async function getStoryById(id: number) {
 
 export async function updateStoryApproval(
   id: number,
-  status: "approved" | "rejected" | "edited" | "pending" | "dismissed" | "duplicate"
+  status: "approved" | "rejected" | "edited" | "pending" | "dismissed" | "duplicate" | "completed"
 ) {
   const db = await getDb();
   if (!db) return;
