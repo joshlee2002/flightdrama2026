@@ -282,7 +282,7 @@ export async function updateStoryScores(
   statusLabel: string,
   viralReason: string,
   category: string,
-  scoringMethod: "rule_based" | "llm_assisted" = "rule_based"
+  scoringMethod: "rule_based" | "llm_assisted" | "stat_adjusted" = "rule_based"
 ) {
   const db = await getDb();
   if (!db) return;
@@ -675,7 +675,7 @@ export async function setCostControlConfig(config: Partial<CostControlConfig>): 
 export async function getPendingStoriesByCategory(
   category: string | null,
   limit = 50
-): Promise<Array<{ id: number; title: string; content: string | null; viralScore: number; statusLabel: string; category: string | null; viralReason: string | null }>> {
+): Promise<Array<{ id: number; title: string; content: string | null; viralScore: number; statusLabel: string; category: string | null; viralReason: string | null; overrideScore: number | null }>> {
   const db = await getDb();
   if (!db) return [];
 
@@ -698,6 +698,7 @@ export async function getPendingStoriesByCategory(
       statusLabel: stories.statusLabel,
       category: stories.category,
       viralReason: stories.viralReason,
+      overrideScore: stories.overrideScore,
     })
     .from(stories)
     .where(and(...conditions))

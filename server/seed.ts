@@ -97,7 +97,20 @@ export async function runSchemaMigrations(): Promise<void> {
     }
   }
 
-  // ── Migration 4: seen_urls UNIQUE constraint on url ───────────────────────
+  // ── Migration 4a: scoringMethod enum — add stat_adjusted ────────────────
+  try {
+    await db.execute(
+      "ALTER TABLE `stories` MODIFY COLUMN `scoringMethod` ENUM('rule_based','llm_assisted','stat_adjusted') NOT NULL DEFAULT 'rule_based'" as any
+    );
+    console.log("[Migration] scoringMethod enum updated (stat_adjusted added)");
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!msg.includes("Duplicate column") && !msg.includes("already exists")) {
+      console.warn("[Migration] scoringMethod enum migration warning:", msg);
+    }
+  }
+
+  // ── Migration 5: seen_urls UNIQUE constraint on url ───────────────────────
   // Without this, ON DUPLICATE KEY UPDATE in markUrlAsSeen is a no-op and
   // the same URL can appear multiple times in seen_urls.
   try {

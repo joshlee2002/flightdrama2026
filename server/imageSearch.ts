@@ -414,7 +414,7 @@ export async function buildImageQueries(
 
   try {
     const response = await invokeLLM({
-      model: undefined, // use default fast model
+      model: ENV.scoringLlmModel || "llama-3.1-8b-instant", // 8B is sufficient for search query generation — 12x cheaper than 70B
       messages: [
         {
           role: "system",

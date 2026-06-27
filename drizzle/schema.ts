@@ -98,7 +98,7 @@ export const stories = mysqlTable("stories", {
   ])
     .default("pending")
     .notNull(),
-  scoringMethod: mysqlEnum("scoringMethod", ["rule_based", "llm_assisted"])
+  scoringMethod: mysqlEnum("scoringMethod", ["rule_based", "llm_assisted", "stat_adjusted"])
     .default("rule_based")
     .notNull(),
   processedAt: timestamp("processedAt"),

@@ -208,7 +208,7 @@ export async function applyStatAdjustments(
 
     // ── Cap: ±40 so strong override signals can move stories across tiers ───
     delta = Math.max(-40, Math.min(40, delta));
-    const finalScore = Math.max(0, Math.min(100, score + delta));
+    const finalScore = Math.max(0, Math.min(95, score + delta)); // Stat cap: 95 — only manual editor override reaches 96-100
     if (Math.abs(delta) >= 5) {
       console.log(`[StatAdj] "${title.slice(0, 55)}" base=${score} delta=${delta > 0 ? '+' : ''}${delta} final=${finalScore} cat=${category}`);
     }
@@ -216,6 +216,15 @@ export async function applyStatAdjustments(
   } catch {
     return score; // safe fallback
   }
+}
+
+/**
+ * Immediately invalidates the stat-adjustment cache.
+ * Call this after every override so the next scoring call picks up fresh weights
+ * without waiting for the 5-minute TTL to expire.
+ */
+export function clearStatAdjustCache(): void {
+  _statAdjustCache = null;
 }
 
 // ─── Tier 1: Highest-impact triggers (proven 1M+ view potential) ─────────────
@@ -1031,7 +1040,7 @@ export function scoreStory(title: string, content: string): ScoringResult {
   }
 
   // ── Cap ───────────────────────────────────────────────────────────────────
-  score = Math.min(100, Math.max(0, score));
+  score = Math.min(90, Math.max(0, score)); // Rule cap: 90 — LLM/learning lifts to 95, editor-only reaches 96-100
 
   // ── Status label ──────────────────────────────────────────────────────────
   // Thresholds: must_post raised to 88 so it requires 2+ strong signals.
@@ -1155,7 +1164,7 @@ export async function getBlendedScore(
     // If 2x average, score is 100. If 0.5x average, score is 50.
     const ratio = catData.avgEngagement / avgEng;
     let histScore = 75 + ((ratio - 1) * 25);
-    histScore = Math.max(0, Math.min(100, histScore));
+    histScore = Math.max(0, Math.min(95, histScore)); // Historical blend cap: 95
 
     // Blend: 60% base score, 40% historical performance
     const blended = (baseScore * 0.6) + (histScore * 0.4);

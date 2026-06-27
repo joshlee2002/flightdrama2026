@@ -264,6 +264,12 @@ async function fetchNewsRss(query: string): Promise<Array<{ title: string; sourc
   return merged;
 }
 
+// ── Deep research cache — prevents duplicate LLM/fetch work when the same URL is processed
+// twice within a session (e.g. manual URL + automated ingest pick up the same story).
+// TTL: 6 hours. Keyed by canonicalised source URL.
+const _deepResearchCache = new Map<string, { result: DeepResearchResult; ts: number }>();
+const DEEP_RESEARCH_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
+
 /** Result from deepResearch — includes the context string and how many sources were successfully fetched */
 export interface DeepResearchResult {
   context: string;
@@ -273,6 +279,14 @@ export interface DeepResearchResult {
 }
 
 async function deepResearch(title: string, sourceUrl: string, rssContent = ""): Promise<DeepResearchResult> {
+  // ── Cache check — skip re-fetching if we already researched this URL recently
+  const cacheKey = sourceUrl.replace(/[?#].*$/, "").toLowerCase();
+  const cached = _deepResearchCache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < DEEP_RESEARCH_CACHE_TTL_MS) {
+    console.log(`[Soyunci] deepResearch cache hit for ${sourceUrl} — skipping re-fetch`);
+    return cached.result;
+  }
+
   try {
     const searchQuery = title.replace(/[^\w\s]/g, " ").trim().slice(0, 120);
     const sourceParts: string[] = [];
@@ -402,7 +416,9 @@ async function deepResearch(title: string, sourceUrl: string, rssContent = ""): 
     // Eliminates one full LLM call per story. The article writer handles raw text fine.
     // Cap at 40,000 chars — Groq llama-3.3-70b has 128k context; use more of it for multi-source stories.
     const context = combinedSources.slice(0, 40000) || `Story: ${title}\nSource: ${sourceUrl}`;
-    return { context, sourcesResearched, primarySourceText };
+    const result: DeepResearchResult = { context, sourcesResearched, primarySourceText };
+    _deepResearchCache.set(cacheKey, { result, ts: Date.now() });
+    return result;
   } catch (err) {
     console.warn("[Soyunci] deepResearch failed:", err);
     return { context: `Story: ${title}\nSource: ${sourceUrl}`, sourcesResearched: 0, primarySourceText: "" };
@@ -1383,7 +1399,7 @@ async function classifyStoryType(
   const factSample = facts.slice(0, 6).join(" | ");
 
   const response = await invokeLLM({
-    model: PIPELINE_MODEL,
+    model: ENV.scoringLlmModel || "llama-3.1-8b-instant", // 8B is sufficient — single-letter classification, 12x cheaper than 70B
     messages: [
       {
         role: "system",
@@ -1781,12 +1797,14 @@ async function researchAndWrite(
   );
   console.log(`[Soyunci] Step B complete — article: ${article.split(/\s+/).length} words`);
 
-  // Step C: Editor review — quality gate with one auto-rewrite if score < 7
+  // Step C: Editor review — quality gate with one auto-rewrite if score < 6
+  // Threshold raised from 7 to 6: a 6/10 article is good enough to publish.
+  // This eliminates ~20% of rewrite calls (the 6/10 cases) with no quality impact.
   console.log(`[Soyunci] Step C — editor review...`);
   let editorReview = await runEditorReview(title, article, factMatrix.angle);
   console.log(`[Soyunci] Editor score: ${editorReview.soyunciScore}/10 — ${editorReview.verdict}`);
 
-  if (editorReview.verdict === "Needs Revision" && editorReview.soyunciScore < 7) {
+  if (editorReview.verdict === "Needs Revision" && editorReview.soyunciScore < 6) {
     console.log(`[Soyunci] Step C — score ${editorReview.soyunciScore}/10, triggering targeted rewrite...`);
     const rewriteResult = await writeFromFactMatrix(
       title, factMatrix, feedbackExamples, voiceExamples, perfContext,

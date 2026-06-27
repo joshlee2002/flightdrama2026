@@ -421,13 +421,38 @@ export function buildEventFingerprint(
   }
 
   // ── 7. Decide if we have enough to fingerprint ───────────────────────────
-  // We need at minimum: (airline OR flight number) AND incident type
-  // Without those two anchors the fingerprint would be too vague.
-  const hasAnchor = (airline !== "" || flightNo !== "");
-  const hasEvent = incident !== "";
+  //
+  // TIGHTENED RULES — we require HIGH specificity to avoid false positives.
+  //
+  // The core problem with the loose version:
+  //   incident="crash" + airline="" + location="" → fingerprint "|||crash|20260627"
+  //   This matches EVERY crash story on the same day regardless of where/who.
+  //
+  // New rules — a fingerprint is only emitted when we have at least ONE of:
+  //   A) flight number  (most specific — AA123 is unique)
+  //   B) airline + location + incident  (e.g. delta|atl|emergency)
+  //   C) airline + aircraft + incident  (e.g. ryanair|737max|grounded)
+  //   D) airline + flight number (any incident)
+  //
+  // Generic incident-only or location-only matches are REJECTED.
+  // This means some duplicates slip through to the title/LLM layer — that is
+  // intentional. Better to miss a duplicate than to wrongly collapse two
+  // different stories.
 
-  if (!hasAnchor || !hasEvent) {
-    return null; // not enough structured data — fall through to title/LLM dedup
+  const hasFlightNo = flightNo !== "";
+  const hasAirline  = airline  !== "";
+  const hasLocation = location !== "";
+  const hasAircraft = aircraft !== "";
+  const hasIncident = incident !== "";
+
+  const isSpecificEnough =
+    hasFlightNo                                   // A: flight number alone is sufficient
+    || (hasAirline && hasLocation && hasIncident) // B: airline + location + incident
+    || (hasAirline && hasAircraft && hasIncident) // C: airline + aircraft + incident
+    || (hasAirline && hasFlightNo);               // D: airline + flight number (redundant but explicit)
+
+  if (!isSpecificEnough) {
+    return null; // not specific enough — fall through to title/LLM dedup
   }
 
   // Build the fingerprint — use pipe-separated fields, empty string for unknowns

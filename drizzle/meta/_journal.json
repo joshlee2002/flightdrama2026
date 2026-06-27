@@ -43,6 +43,13 @@
       "when": 1751067600000,
       "tag": "0005_event_fingerprint_dedup",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "5",
+      "when": 1751072000000,
+      "tag": "0006_scoring_method_stat_adjusted",
+      "breakpoints": true
     }
   ]
 }

@@ -48,7 +48,7 @@ import { eq, sql } from "drizzle-orm";
 import { stories } from "../drizzle/schema";
 import { fetchArticleContent, fetchRssFeed, isSimilarTitle, getLocationIncidentMatches, llmDedupCheck, isAviationRelevant, DEFAULT_RSS_SOURCES } from "./ingestion";
 import { invokeLLM } from "./_core/llm";
-import { scoreStory } from "./viralScoring";
+import { scoreStory, clearStatAdjustCache, applyStatAdjustments } from "./viralScoring";
 import { scoreStoryWithLLM, batchScoreStoriesWithLLM, learnFromOverrides, learnFromOverridesStatistical, type BatchScoringInput } from "./llmScoring";
 import { runFullSoyunciPipeline, rewriteArticleOnly, runResearchAndWrite, extractResearchPackage } from "./soyunci";
 import { analysePerformance, getPerformanceInsights, analysePerformanceStatistical, getStatPerformanceInsights, analyseArticleStyle, getArticleStyleInsights, calculatePerformanceScore } from "./performanceAnalysis";
@@ -587,6 +587,7 @@ export const appRouter = router({
         // overrideScore/overrideLabel were never written. Now every rejection
         // feeds into the keyword penalty and category weight calculations.
         await updateStoryOverride(input.id, 0, "reject");
+        clearStatAdjustCache();
         setImmediate(() => {
           learnFromOverridesStatistical().catch(err =>
             console.warn("[StatLearn] Post-reject learn failed:", err)
@@ -608,6 +609,7 @@ export const appRouter = router({
         if (story?.sourceUrl) await markUrlAsSeen(story.sourceUrl, "manually_dismissed");
         // ── Learning signal: dismissals also count as score 0 ──────────────────────
         await updateStoryOverride(input.id, 0, "reject");
+        clearStatAdjustCache();
         setImmediate(() => {
           learnFromOverridesStatistical().catch(err =>
             console.warn("[StatLearn] Post-dismiss learn failed:", err)
@@ -777,8 +779,16 @@ export const appRouter = router({
               continue;
             }
 
-            // ── 5. Viral scoring ────────────────────────────────────────────
-            const scoring = scoreStory(title, content);
+            // ── 5. Viral scoring (with learned stat adjustments applied) ──────────
+            // Previously used plain scoreStory() which ignores all learned weights.
+            // Now applies stat adjustments so manual URLs benefit from override learning.
+            const ruleScoring = scoreStory(title, content);
+            const adjustedScore = await applyStatAdjustments(ruleScoring.score, ruleScoring.category, title);
+            const adjustedLabel: string =
+              adjustedScore >= 88 ? "must_post" :
+              adjustedScore >= 70 ? "strong_candidate" :
+              adjustedScore >= 55 ? "maybe" : "reject";
+            const scoring = { ...ruleScoring, score: adjustedScore, statusLabel: adjustedLabel as typeof ruleScoring.statusLabel };
 
             // ── 6. Save story to DB ──────────────────────────────────────
             const storyId = await createStory({
@@ -1083,37 +1093,32 @@ export const appRouter = router({
       )
       .mutation(async ({ input }) => {
         await updateStoryOverride(input.id, input.overrideScore, input.overrideLabel);
-        // ── Free statistical learner: runs on EVERY override, zero cost ──────
-        // Instantly updates category weights and keyword boost/penalty lists
-        // from your override history using pure statistics (no LLM).
-        learnFromOverridesStatistical().catch(err =>
+
+        // ── Step 1: Immediately clear the stat-adjustment cache ──────────────────
+        // Previously the cache had a 5-minute TTL, so overrides felt like they
+        // weren't working. Now the next scoring call always picks up fresh weights.
+        clearStatAdjustCache();
+
+        // ── Step 2: Run statistical learner immediately (free, no LLM) ─────────
+        // Updates category weights and keyword boost/penalty lists from override history.
+        await learnFromOverridesStatistical().catch(err =>
           console.warn("[StatLearn] Background stat learn failed:", err)
         );
+        // Cache is already cleared above; the await ensures fresh weights are in DB
+        // before the rerank below reads them.
 
-        // ── Targeted real-time rerank: after every 5 overrides, re-score ─────
-        // pending stories in the same category as the overridden story.
-        // Uses batch scoring (8B first pass; 70B safety net for scores ≥75).
-        // Debounced: counter is incremented atomically in the DB so concurrent
-        // override clicks never race. Fires once per 5 overrides, then resets.
+        // ── Step 3: Immediately rerank pending stories in the same category ─────
+        // Previously fired only after every 5 overrides. Now fires on EVERY override
+        // using fast stat adjustments (no LLM cost) so the queue re-orders instantly.
         setImmediate(async () => {
           try {
-            const TARGETED_RERANK_THRESHOLD = 5;
-            // Atomic DB increment — no read/modify/write race condition
-            const pendingCount = await atomicIncrementScoringCounter("targeted_rerank_pending_count");
-
-            if (pendingCount < TARGETED_RERANK_THRESHOLD) {
-              return; // not yet — counter already saved atomically
-            }
-
-            // Threshold reached — reset counter and fire targeted rerank
-            await setScoringConfig("targeted_rerank_pending_count", "0");
             await setScoringConfig("targeted_rerank_last_at", new Date().toISOString());
 
             // Get the category of the story that was just overridden
             const overriddenStory = await getStoryById(input.id);
             const targetCategory = overriddenStory?.category ?? null;
 
-            console.log(`[TargetedRerank] Triggered after ${TARGETED_RERANK_THRESHOLD} overrides — re-scoring pending stories in category: ${targetCategory ?? "all"}`);  
+            console.log(`[TargetedRerank] Triggered immediately after override — re-scoring pending stories in category: ${targetCategory ?? "all"}`);
 
             // Fetch up to 50 pending stories in that category (or all if no category)
             const toRerank = await getPendingStoriesByCategory(targetCategory, 50);
@@ -1123,42 +1128,40 @@ export const appRouter = router({
               return;
             }
 
-            // Batch score in groups of 10 using 8B model only
-            const BATCH_SIZE = 10;
+            // ── Fast stat-only rerank (zero LLM cost, instant) ──────────────────
+            // Re-applies learned stat adjustments to the existing rule-based scores.
+            // This is instantaneous — no LLM calls — so the queue re-orders within
+            // milliseconds of the override. The LLM deep-learn still runs in the
+            // background on the 10-override / 2-hour schedule for deeper re-scoring.
             let completed = 0;
-            for (let i = 0; i < toRerank.length; i += BATCH_SIZE) {
-              const batch = toRerank.slice(i, i + BATCH_SIZE);
+            for (const story of toRerank) {
               try {
-                const batchInputs: BatchScoringInput[] = batch.map(s => ({
-                  title: s.title,
-                  content: s.content || "",
-                  ruleScore: {
-                    score: s.viralScore,
-                    statusLabel: s.statusLabel as any,
-                    category: s.category ?? "General Aviation",
-                    viralReason: s.viralReason ?? "",
-                    triggers: [],
-                    viralExplanation: "",
-                  },
-                }));
-                const results = await batchScoreStoriesWithLLM(batchInputs);
-                for (let j = 0; j < batch.length; j++) {
-                  const story = batch[j];
-                  const scoring = results[j];
-                  if (!scoring) continue;
-                  try {
-                    await updateStoryScores(story.id, scoring.score, scoring.statusLabel, scoring.viralReason, scoring.category, scoring.scoringMethod);
-                    await updateStoryTriggers(story.id, scoring.triggers);
-                    completed++;
-                  } catch (err) {
-                    console.error(`[TargetedRerank] Failed to update story ${story.id}:`, err);
-                  }
+                // Skip stories that already have a manual override — preserve editor judgement
+                if (story.overrideScore !== null && story.overrideScore !== undefined) continue;
+                // Re-apply stat adjustments to the original rule-based score
+                const baseScore = story.viralScore ?? 0;
+                const adjustedScore = await applyStatAdjustments(baseScore, story.category ?? "General Aviation", story.title);
+                if (adjustedScore !== baseScore) {
+                  // Derive label from adjusted score
+                  const newLabel: string =
+                    adjustedScore >= 88 ? "must_post" :
+                    adjustedScore >= 70 ? "strong_candidate" :
+                    adjustedScore >= 55 ? "maybe" : "reject";
+                  await updateStoryScores(
+                    story.id,
+                    adjustedScore,
+                    newLabel,
+                    story.viralReason ?? "",
+                    story.category ?? "General Aviation",
+                    "stat_adjusted"
+                  );
+                  completed++;
                 }
               } catch (err) {
-                console.error(`[TargetedRerank] Batch ${i}-${i + BATCH_SIZE} failed:`, err);
+                console.error(`[TargetedRerank] Failed to update story ${story.id}:`, err);
               }
             }
-            console.log(`[TargetedRerank] Completed re-scoring ${completed}/${toRerank.length} stories in category: ${targetCategory ?? "all"}`);
+            console.log(`[TargetedRerank] Stat-adjusted ${completed}/${toRerank.length} stories in category: ${targetCategory ?? "all"} (instant, no LLM)`);
           } catch (err) {
             console.warn("[TargetedRerank] Failed:", err);
           }

@@ -402,7 +402,8 @@ export async function scoreStoryWithLLM(
           // If 70B says 85 and 8B said 100, we trust 70B: the story scores 85.
           const llmCategory = parsed70b.category ?? ruleResult.category;
           const llmScore = Math.round(parsed70b.score); // already capped at 95 by parseScoringResponse
-          const statAdjustedScore = await applyStatAdjustments(llmScore, llmCategory, title);
+          const statAdjustedRaw = await applyStatAdjustments(llmScore, llmCategory, title);
+          const statAdjustedScore = Math.min(95, statAdjustedRaw); // AI_MAX_SCORE: stat adjustments cannot push AI score above 95
           // Derive label from final score — never trust the LLM's label
           const derivedLabel70b: ScoringResult["statusLabel"] =
             statAdjustedScore >= 88 ? "must_post" :
@@ -428,7 +429,8 @@ export async function scoreStoryWithLLM(
     // ── Use 8B result (no verification needed or verification skipped) ────────
     const llmCategory = parsed8b.category ?? ruleResult.category;
     const llmScore = Math.round(parsed8b.score); // already capped at 95 by parseScoringResponse
-    const statAdjustedScore = await applyStatAdjustments(llmScore, llmCategory, title);
+    const statAdjustedRaw8b = await applyStatAdjustments(llmScore, llmCategory, title);
+    const statAdjustedScore = Math.min(95, statAdjustedRaw8b); // AI_MAX_SCORE: stat adjustments cannot push AI score above 95
     // Derive label from final score — never trust the LLM's label
     const derivedLabel8b: ScoringResult["statusLabel"] =
       statAdjustedScore >= 88 ? "must_post" :
@@ -445,8 +447,8 @@ export async function scoreStoryWithLLM(
     };
   } catch (err) {
     console.error("[LLMScoring] Error calling LLM, falling back to rule-based:", err);
-    const statAdjustedScore = await applyStatAdjustments(ruleResult.score, ruleResult.category, title);
-    return { ...ruleResult, score: statAdjustedScore, scoringMethod: "rule_based" };
+    const statAdjustedFallback = await applyStatAdjustments(ruleResult.score, ruleResult.category, title);
+    return { ...ruleResult, score: Math.min(95, statAdjustedFallback), scoringMethod: "rule_based" }; // AI_MAX_SCORE cap
   }
 }
 
