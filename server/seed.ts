@@ -192,6 +192,23 @@ export async function runSchemaMigrations(): Promise<void> {
       console.warn("[Migration] ingest_log table warning:", msg);
     }
   }
+
+  // ── Migration 8: clear stale seen_url blocks ─────────────────────────────────
+  // Stories that were previously rejected by the keyword gate or scored below
+  // threshold are permanently blocked from re-evaluation. This is wrong —
+  // the gate has been improved and scores change as the LLM learns. Clear all
+  // non-manual-rejection blocks so every story gets a fresh look on next ingest.
+  // Manual rejections (approvalStatus=rejected on the stories table) are NOT touched.
+  try {
+    const result = await db.execute(
+      `DELETE FROM \`seen_urls\` WHERE \`rejectedReason\` IN ('score_below_threshold', 'not_aviation', 'score_below_rule', 'score_below_feed')` as any
+    ) as any;
+    const affected = result?.[0]?.affectedRows ?? result?.affectedRows ?? '?';
+    console.log(`[Migration] Cleared ${affected} stale seen_url blocks — stories will be re-evaluated on next ingest`);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn("[Migration] seen_urls stale block clear warning:", msg);
+  }
 }
 
 /**
