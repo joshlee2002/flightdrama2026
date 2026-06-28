@@ -1123,42 +1123,75 @@ function ApprovedCard({ story, pkg, onUnapprove, isUnapproving, onMarkComplete, 
         </div>
         <div className="flex items-center gap-1.5 flex-wrap">
           {story.sourceUrl && (
-            <a href={story.sourceUrl} target="_blank" rel="noopener noreferrer">
-              <Button variant="ghost" size="icon" className="h-7 w-7"><ExternalLink className="w-3.5 h-3.5" /></Button>
-            </a>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <a href={story.sourceUrl} target="_blank" rel="noopener noreferrer">
+                  <Button variant="ghost" size="icon" className="h-7 w-7"><ExternalLink className="w-3.5 h-3.5" /></Button>
+                </a>
+              </TooltipTrigger>
+              <TooltipContent side="top" className="text-xs">Open original source article</TooltipContent>
+            </Tooltip>
           )}
-          <Button variant="ghost" size="sm" className="h-7 text-xs gap-1.5 text-muted-foreground hover:text-foreground" onClick={() => regenImages.mutate({ id: story.id })} disabled={regenImages.isPending || isProcessing} title="Refresh photos only">
-            <Image className={cn("w-3 h-3", regenImages.isPending && "animate-spin")} />{regenImages.isPending ? "Searching…" : "Photos"}
-          </Button>
-          <Button variant="ghost" size="sm" className="h-7 text-xs gap-1.5 text-muted-foreground hover:text-foreground" onClick={() => regenerate.mutate({ id: story.id })} disabled={regenerate.isPending || isProcessing}>
-            <RefreshCw className={cn("w-3 h-3", regenerate.isPending && "animate-spin")} />Regen
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-7 text-xs gap-1.5 text-primary/80 hover:text-primary font-medium"
-            onClick={() => { copyText(buildResearchCopy(story, pkg), "Research package"); }}
-            disabled={isProcessing || !hasResearch}
-            title="Copy complete research package ready to paste into ChatGPT"
-          >
-            <Copy className="w-3 h-3" />Copy Research
-          </Button>
-          <Button variant="ghost" size="sm" className="h-7 text-xs gap-1.5 text-primary/80 hover:text-primary" onClick={handleLogPost} disabled={isProcessing} title="Pre-fill Performance Data form with this story">
-            <ClipboardList className="w-3 h-3" />Log Post
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-7 text-xs gap-1.5 text-emerald-500 hover:text-emerald-400 hover:bg-emerald-500/10"
-            onClick={onMarkComplete}
-            disabled={isMarkingComplete || isUnapproving}
-            title="Mark as done — removes from queue without affecting scoring"
-          >
-            {isMarkingComplete ? <Loader2 className="w-3 h-3 animate-spin" /> : <CheckCircle2 className="w-3 h-3" />}Done
-          </Button>
-          <Button variant="ghost" size="sm" className="h-7 text-xs gap-1.5 text-muted-foreground hover:text-destructive" onClick={onUnapprove} disabled={isUnapproving || isMarkingComplete}>
-            {isUnapproving ? <Loader2 className="w-3 h-3 animate-spin" /> : <X className="w-3 h-3" />}Un-approve
-          </Button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button variant="ghost" size="sm" className="h-7 text-xs gap-1.5 text-muted-foreground hover:text-foreground" onClick={() => regenImages.mutate({ id: story.id })} disabled={regenImages.isPending || isProcessing}>
+                <Image className={cn("w-3 h-3", regenImages.isPending && "animate-spin")} />{regenImages.isPending ? "Searching…" : "Photos"}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="top" className="text-xs max-w-[220px]">Photos — re-search for relevant images only, without regenerating the article</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button variant="ghost" size="sm" className="h-7 text-xs gap-1.5 text-muted-foreground hover:text-foreground" onClick={() => regenerate.mutate({ id: story.id })} disabled={regenerate.isPending || isProcessing}>
+                <RefreshCw className={cn("w-3 h-3", regenerate.isPending && "animate-spin")} />Regen
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="top" className="text-xs max-w-[240px]">Regen — re-run the full Soyunci pipeline: re-fetch sources, re-extract facts, rewrite the article and headlines from scratch</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 text-xs gap-1.5 text-primary/80 hover:text-primary font-medium"
+                onClick={() => { copyText(buildResearchCopy(story, pkg), "Research package"); }}
+                disabled={isProcessing || !hasResearch}
+              >
+                <Copy className="w-3 h-3" />Copy Research
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="top" className="text-xs max-w-[240px]">Copy Research — copies the full research package (facts, quotes, timeline, sources) ready to paste into ChatGPT or your writing tool</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button variant="ghost" size="sm" className="h-7 text-xs gap-1.5 text-primary/80 hover:text-primary" onClick={handleLogPost} disabled={isProcessing}>
+                <ClipboardList className="w-3 h-3" />Log Post
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="top" className="text-xs max-w-[220px]">Log Post — pre-fills the Performance Data form with this story so you can record how it performed after posting</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 text-xs gap-1.5 text-emerald-500 hover:text-emerald-400 hover:bg-emerald-500/10"
+                onClick={onMarkComplete}
+                disabled={isMarkingComplete || isUnapproving}
+              >
+                {isMarkingComplete ? <Loader2 className="w-3 h-3 animate-spin" /> : <CheckCircle2 className="w-3 h-3" />}Done
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="top" className="text-xs max-w-[220px]">Done — marks this story as posted and removes it from the queue. Does not affect scoring.</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button variant="ghost" size="sm" className="h-7 text-xs gap-1.5 text-muted-foreground hover:text-destructive" onClick={onUnapprove} disabled={isUnapproving || isMarkingComplete}>
+                {isUnapproving ? <Loader2 className="w-3 h-3 animate-spin" /> : <X className="w-3 h-3" />}Un-approve
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="top" className="text-xs max-w-[220px]">Un-approve — moves this story back to rejected and removes it from the queue permanently</TooltipContent>
+          </Tooltip>
         </div>
       </div>
 

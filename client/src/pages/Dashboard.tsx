@@ -243,7 +243,7 @@ function StoryCard({
                 <Check className="w-4 h-4" />
               </button>
             </TooltipTrigger>
-            <TooltipContent side="top" className="text-xs">Approve</TooltipContent>
+            <TooltipContent side="top" className="text-xs max-w-[220px]">Approve — runs research extraction and adds to your publishing queue</TooltipContent>
           </Tooltip>
           <Tooltip>
             <TooltipTrigger asChild>
@@ -254,7 +254,7 @@ function StoryCard({
                 <X className="w-4 h-4" />
               </button>
             </TooltipTrigger>
-            <TooltipContent side="top" className="text-xs">Reject</TooltipContent>
+            <TooltipContent side="top" className="text-xs max-w-[240px]">Reject — permanently hides this story and teaches the scorer to rank similar stories lower in future</TooltipContent>
           </Tooltip>
           {/* Expand detail toggle */}
           <Tooltip>
@@ -271,7 +271,7 @@ function StoryCard({
                 {showDetail ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
               </button>
             </TooltipTrigger>
-            <TooltipContent side="top" className="text-xs">{showDetail ? "Hide details" : "Show details"}</TooltipContent>
+            <TooltipContent side="top" className="text-xs max-w-[240px]">{showDetail ? "Hide score breakdown and override controls" : "Show why this story scored this way, and manually override the score"}</TooltipContent>
           </Tooltip>
         </div>
       </div>
@@ -423,7 +423,7 @@ function StoryCard({
                     <X className="w-3 h-3" />Dismiss
                   </button>
                 </TooltipTrigger>
-                <TooltipContent side="top" className="text-xs">Dismiss permanently</TooltipContent>
+                <TooltipContent side="top" className="text-xs max-w-[240px]">Dismiss — hides this story without affecting the scorer. Use when you're just not interested, not because the story is bad</TooltipContent>
               </Tooltip>
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -434,7 +434,7 @@ function StoryCard({
                     <GitMerge className="w-3 h-3" />Duplicate
                   </button>
                 </TooltipTrigger>
-                <TooltipContent side="top" className="text-xs">Dismiss as duplicate</TooltipContent>
+                <TooltipContent side="top" className="text-xs max-w-[240px]">Duplicate — hides this story and teaches the system to filter similar duplicate stories in future</TooltipContent>
               </Tooltip>
               {isQueued && !isFailed && (
                 <Tooltip>
@@ -448,7 +448,7 @@ function StoryCard({
                       Research
                     </button>
                   </TooltipTrigger>
-                  <TooltipContent side="top" className="text-xs">Run Soyunci research pipeline</TooltipContent>
+                  <TooltipContent side="top" className="text-xs max-w-[240px]">Research — manually fetch sources and extract facts, quotes, and timeline for this story before approving</TooltipContent>
                 </Tooltip>
               )}
             </div>
@@ -614,35 +614,55 @@ export default function Dashboard() {
           {/* Filter bar */}
           <div className="flex flex-wrap items-center gap-2">
             <div className="flex items-center rounded-md border border-border overflow-hidden">
-              <button
-                className={cn(
-                  "px-3 h-8 text-xs font-medium transition-colors flex items-center gap-1.5",
-                  sortBy === "top_scored" ? "bg-primary text-primary-foreground" : "bg-transparent text-muted-foreground hover:text-foreground hover:bg-muted/40"
-                )}
-                onClick={() => setSortBy("top_scored")}
-              >
-                <Zap className="w-3 h-3" />Top Scored
-              </button>
-              <button
-                className={cn(
-                  "px-3 h-8 text-xs font-medium transition-colors flex items-center gap-1.5 border-l border-border",
-                  sortBy === "newest" ? "bg-primary text-primary-foreground" : "bg-transparent text-muted-foreground hover:text-foreground hover:bg-muted/40"
-                )}
-                onClick={() => setSortBy("newest")}
-              >
-                <Tag className="w-3 h-3" />Newest
-              </button>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    className={cn(
+                      "px-3 h-8 text-xs font-medium transition-colors flex items-center gap-1.5",
+                      sortBy === "top_scored" ? "bg-primary text-primary-foreground" : "bg-transparent text-muted-foreground hover:text-foreground hover:bg-muted/40"
+                    )}
+                    onClick={() => setSortBy("top_scored")}
+                  >
+                    <Zap className="w-3 h-3" />Top Scored
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom" className="text-xs max-w-[220px]">Sort by viral score — highest scoring stories appear first</TooltipContent>
+              </Tooltip>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    className={cn(
+                      "px-3 h-8 text-xs font-medium transition-colors flex items-center gap-1.5 border-l border-border",
+                      sortBy === "newest" ? "bg-primary text-primary-foreground" : "bg-transparent text-muted-foreground hover:text-foreground hover:bg-muted/40"
+                    )}
+                    onClick={() => setSortBy("newest")}
+                  >
+                    <Tag className="w-3 h-3" />Newest
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom" className="text-xs max-w-[220px]">Sort by ingestion time — most recently fetched stories appear first</TooltipContent>
+              </Tooltip>
             </div>
-            <Button size="sm" variant={showHistory ? "default" : "outline"} className="text-xs h-8 gap-1.5" onClick={() => setShowHistory(!showHistory)}>
-              <HistoryIcon className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">{showHistory ? "Showing All" : "New Only"}</span>
-              <span className="sm:hidden">{showHistory ? "All" : "New"}</span>
-            </Button>
-            <Button size="sm" variant={completedOnly ? "default" : "outline"} className="text-xs h-8 gap-1.5" onClick={() => setCompletedOnly(!completedOnly)}>
-              <Sparkles className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">{completedOnly ? "Completed Only" : "All Stories"}</span>
-              <span className="sm:hidden">{completedOnly ? "Done" : "All"}</span>
-            </Button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button size="sm" variant={showHistory ? "default" : "outline"} className="text-xs h-8 gap-1.5" onClick={() => setShowHistory(!showHistory)}>
+                  <HistoryIcon className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">{showHistory ? "Showing All" : "New Only"}</span>
+                  <span className="sm:hidden">{showHistory ? "All" : "New"}</span>
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom" className="text-xs max-w-[240px]">{showHistory ? "Showing all stories including approved/rejected — click to show only pending" : "Showing only pending stories — click to include approved and rejected history"}</TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button size="sm" variant={completedOnly ? "default" : "outline"} className="text-xs h-8 gap-1.5" onClick={() => setCompletedOnly(!completedOnly)}>
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">{completedOnly ? "Completed Only" : "All Stories"}</span>
+                  <span className="sm:hidden">{completedOnly ? "Done" : "All"}</span>
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom" className="text-xs max-w-[240px]">{completedOnly ? "Showing only stories with completed research packages — click to show all" : "Showing all stories — click to show only those with completed research ready"}</TooltipContent>
+            </Tooltip>
             <Select value={filterStatus} onValueChange={setFilterStatus}>
               <SelectTrigger className="w-36 lg:w-44 text-xs h-8">
                 <SelectValue placeholder="Filter" />
@@ -704,6 +724,7 @@ export default function Dashboard() {
                   className="h-7 text-xs gap-1.5 border-violet-500/30 text-violet-300 hover:bg-violet-500/10"
                   disabled={learnMutation.isPending}
                   onClick={(e) => { e.stopPropagation(); learnMutation.mutate(); }}
+                  title="Re-run the statistical learner now — analyses your recent approvals, rejections, and score overrides to update scoring weights and keyword rules"
                 >
                   {learnMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Brain className="w-3 h-3" />}
                   {learnMutation.isPending ? 'Learning...' : 'Re-learn Now'}
