@@ -774,7 +774,7 @@ export const appRouter = router({
             }
             // LLM dedup for location+incident matches
             const locMatches = getLocationIncidentMatches(title, recentTitles);
-            if (locMatches.length > 0 && await llmDedupCheck(title, locMatches, invokeLLM, learnedDuplicatePairs)) {
+            if (locMatches.length > 0 && await llmDedupCheck(title, locMatches, invokeLLM as any, learnedDuplicatePairs)) {
               results.push({ url, status: "duplicate_title", title });
               continue;
             }
