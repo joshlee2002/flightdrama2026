@@ -161,7 +161,7 @@ export async function runIngestPipeline(label = "Ingest"): Promise<IngestResult>
   const feedTasks = activeSources.map(source => async (): Promise<FeedResult> => {
     const feedThreshold = (source.scoreThreshold && source.scoreThreshold > 0)
       ? source.scoreThreshold
-      : 40;
+      : (source.category === "aviation" || source.category === "regulator") ? 25 : 40;
     try {
       const items = await fetchRssFeed(source.url, source.name);
       return { source, items, feedThreshold };
