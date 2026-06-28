@@ -23,6 +23,8 @@ import {
   getRecentDuplicatePairs,
   getStoryByEventFingerprint,
   getStoryByContentHash,
+  batchInsertIngestLog,
+  pruneIngestLog,
 } from "./db";
 import {
   fetchRssFeed,
@@ -44,6 +46,7 @@ import { scoreStory } from "./viralScoring";
 import { batchScoreStoriesWithLLM, type BatchScoringInput } from "./llmScoring";
 import { rssSources } from "../drizzle/schema";
 import { and, eq, isNotNull, lt } from "drizzle-orm";
+import { randomUUID } from "crypto";
 
 const FEED_CONCURRENCY = 20;
 const ARTICLE_CONCURRENCY = 8;
@@ -68,6 +71,7 @@ export interface IngestResult {
   skippedCount: number;
   sourcesChecked: number;
   durationMs: number;
+  runId: string;
 }
 
 /**
@@ -76,6 +80,10 @@ export interface IngestResult {
  */
 export async function runIngestPipeline(label = "Ingest"): Promise<IngestResult> {
   const t0 = Date.now();
+  const runId = randomUUID();
+
+  // Prune old log entries (keep 7 days) — fire-and-forget
+  pruneIngestLog(7).catch(() => {});
 
   // Auto-disable expired AI keyword feeds
   const db = await getDb();
@@ -104,6 +112,37 @@ export async function runIngestPipeline(label = "Ingest"): Promise<IngestResult>
   ]);
   let newCount = 0;
   let skippedCount = 0;
+
+  // Accumulate all log entries and flush at the end of the run
+  type LogEntry = Parameters<typeof batchInsertIngestLog>[0][number];
+  const logEntries: LogEntry[] = [];
+
+  function logDrop(opts: {
+    title: string;
+    sourceUrl: string;
+    sourceName: string;
+    dropReason: LogEntry["dropReason"];
+    dropDetail?: string;
+    ruleScore?: number;
+    llmScore?: number;
+    feedThreshold?: number;
+    category?: string;
+    publishedAt?: Date | null;
+  }) {
+    logEntries.push({
+      ingestRunId: runId,
+      title: opts.title.slice(0, 500),
+      sourceUrl: opts.sourceUrl.slice(0, 768),
+      sourceName: opts.sourceName.slice(0, 255),
+      dropReason: opts.dropReason,
+      dropDetail: opts.dropDetail?.slice(0, 500) ?? null,
+      ruleScore: opts.ruleScore ?? null,
+      llmScore: opts.llmScore ?? null,
+      feedThreshold: opts.feedThreshold ?? null,
+      category: opts.category?.slice(0, 64) ?? null,
+      publishedAt: opts.publishedAt ?? null,
+    });
+  }
 
   // ── Phase 1a: Fetch ALL feeds in parallel ────────────────────────────────
   const activeSources = sources.filter(source => {
@@ -162,9 +201,23 @@ export async function runIngestPipeline(label = "Ingest"): Promise<IngestResult>
   for (const { source, items, feedThreshold } of feedResults) {
     for (const item of items) {
       if (!item.sourceUrl) continue;
-      if (seenUrlSet.has(item.sourceUrl)) { skippedCount++; continue; }
+
+      if (seenUrlSet.has(item.sourceUrl)) {
+        // already_seen: URL was processed in a previous ingest run — skip silently (no log entry,
+        // this would generate thousands of rows for normal dedup)
+        skippedCount++;
+        continue;
+      }
 
       if (!isAviationRelevant(item.title || "", item.content || "", source.category)) {
+        logDrop({
+          title: item.title || "Untitled",
+          sourceUrl: item.sourceUrl,
+          sourceName: source.name,
+          dropReason: "not_aviation",
+          dropDetail: `Category: ${source.category}. Title: "${(item.title || "").slice(0, 120)}"`,
+          publishedAt: item.publishedAt ?? null,
+        });
         markSeenBatch.push({ url: item.sourceUrl, reason: "not_aviation" });
         skippedCount++;
         continue;
@@ -196,6 +249,14 @@ export async function runIngestPipeline(label = "Ingest"): Promise<IngestResult>
     const hashMatch = await getStoryByContentHash(item.contentHash);
     if (hashMatch) {
       console.log(`[${label}] Content-hash dup: "${item.title.slice(0, 70)}" → "${hashMatch.title.slice(0, 70)}"`);
+      logDrop({
+        title: item.title,
+        sourceUrl: item.sourceUrl,
+        sourceName: item.sourceName,
+        dropReason: "duplicate_content",
+        dropDetail: `Content hash matched: "${hashMatch.title.slice(0, 120)}"`,
+        publishedAt: item.publishedAt,
+      });
       structuralDupUrls.push(item.sourceUrl);
       skippedCount++;
       continue;
@@ -205,6 +266,14 @@ export async function runIngestPipeline(label = "Ingest"): Promise<IngestResult>
       const fpMatch = await getStoryByEventFingerprint(item.eventFingerprint);
       if (fpMatch) {
         console.log(`[${label}] Event-fingerprint dup [${item.eventFingerprint}]: "${item.title.slice(0, 70)}" → "${fpMatch.title.slice(0, 70)}"`);
+        logDrop({
+          title: item.title,
+          sourceUrl: item.sourceUrl,
+          sourceName: item.sourceName,
+          dropReason: "duplicate_content",
+          dropDetail: `Event fingerprint [${item.eventFingerprint}] matched: "${fpMatch.title.slice(0, 120)}"`,
+          publishedAt: item.publishedAt,
+        });
         structuralDupUrls.push(item.sourceUrl);
         skippedCount++;
         continue;
@@ -225,6 +294,14 @@ export async function runIngestPipeline(label = "Ingest"): Promise<IngestResult>
 
   for (const item of afterStructural) {
     if (isSimilarTitle(item.title, recentTitles, learnedDuplicatePairs)) {
+      logDrop({
+        title: item.title,
+        sourceUrl: item.sourceUrl,
+        sourceName: item.sourceName,
+        dropReason: "duplicate_title",
+        dropDetail: "Title-similarity fuzzy match against recent stories",
+        publishedAt: item.publishedAt,
+      });
       titleDupUrls.push(item.sourceUrl);
       skippedCount++;
       continue;
@@ -234,6 +311,14 @@ export async function runIngestPipeline(label = "Ingest"): Promise<IngestResult>
     if (locationMatches.length > 0) {
       const isDup = await llmDedupCheck(item.title, locationMatches, invokeLLM, learnedDuplicatePairs);
       if (isDup) {
+        logDrop({
+          title: item.title,
+          sourceUrl: item.sourceUrl,
+          sourceName: item.sourceName,
+          dropReason: "duplicate_title",
+          dropDetail: `LLM dedup: matched location/incident pattern. Similar to: "${locationMatches[0]?.slice(0, 120)}"`,
+          publishedAt: item.publishedAt,
+        });
         titleDupUrls.push(item.sourceUrl);
         skippedCount++;
         continue;
@@ -256,19 +341,53 @@ export async function runIngestPipeline(label = "Ingest"): Promise<IngestResult>
 
   for (const item of afterTitle) {
     if (batchSeenHashes.has(item.contentHash)) {
+      logDrop({
+        title: item.title,
+        sourceUrl: item.sourceUrl,
+        sourceName: item.sourceName,
+        dropReason: "duplicate_batch",
+        dropDetail: "Content hash duplicate within this ingest batch",
+        publishedAt: item.publishedAt,
+      });
       batchDupUrls.push(item.sourceUrl); skippedCount++; continue;
     }
     if (item.eventFingerprint && batchSeenFingerprints.has(item.eventFingerprint)) {
+      logDrop({
+        title: item.title,
+        sourceUrl: item.sourceUrl,
+        sourceName: item.sourceName,
+        dropReason: "duplicate_batch",
+        dropDetail: `Event fingerprint duplicate within this ingest batch: [${item.eventFingerprint}]`,
+        publishedAt: item.publishedAt,
+      });
       batchDupUrls.push(item.sourceUrl); skippedCount++; continue;
     }
     if (batchSeenTitles.length > 0 && isSimilarTitle(item.title, batchSeenTitles, learnedDuplicatePairs)) {
+      logDrop({
+        title: item.title,
+        sourceUrl: item.sourceUrl,
+        sourceName: item.sourceName,
+        dropReason: "duplicate_batch",
+        dropDetail: "Title-similarity duplicate within this ingest batch",
+        publishedAt: item.publishedAt,
+      });
       batchDupUrls.push(item.sourceUrl); skippedCount++; continue;
     }
     if (batchSeenTitles.length > 0) {
       const batchLocMatches = getLocationIncidentMatches(item.title, batchSeenTitles);
       if (batchLocMatches.length > 0) {
         const isDup = await llmDedupCheck(item.title, batchLocMatches, invokeLLM, learnedDuplicatePairs);
-        if (isDup) { batchDupUrls.push(item.sourceUrl); skippedCount++; continue; }
+        if (isDup) {
+          logDrop({
+            title: item.title,
+            sourceUrl: item.sourceUrl,
+            sourceName: item.sourceName,
+            dropReason: "duplicate_batch",
+            dropDetail: `LLM dedup: batch location/incident match. Similar to: "${batchLocMatches[0]?.slice(0, 120)}"`,
+            publishedAt: item.publishedAt,
+          });
+          batchDupUrls.push(item.sourceUrl); skippedCount++; continue;
+        }
       }
     }
     batchSeenTitles.push(item.title);
@@ -313,14 +432,23 @@ export async function runIngestPipeline(label = "Ingest"): Promise<IngestResult>
     if (ruleScore.score >= 30) {
       llmCandidates.push({ ...item, ruleScore });
     } else {
+      logDrop({
+        title: item.title,
+        sourceUrl: item.sourceUrl,
+        sourceName: item.sourceName,
+        dropReason: "score_below_rule",
+        dropDetail: `Rule score ${ruleScore.score} < 30 threshold. Category: ${ruleScore.category}`,
+        ruleScore: ruleScore.score,
+        feedThreshold: item.feedThreshold,
+        category: ruleScore.category,
+        publishedAt: item.publishedAt,
+      });
       markUrlAsSeen(item.sourceUrl, "score_below_threshold").catch(() => {});
       skippedCount++;
     }
   }
 
   // Sort by category so each batch of 10 is as category-homogeneous as possible.
-  // batchScoreStoriesWithLLM builds its override-example context from the first
-  // story's category — homogeneous batches mean all 10 stories get relevant examples.
   llmCandidates.sort((a, b) => (a.ruleScore.category ?? "").localeCompare(b.ruleScore.category ?? ""));
 
   // ── Phase 2: Batch LLM scoring ────────────────────────────────────────────
@@ -374,7 +502,23 @@ export async function runIngestPipeline(label = "Ingest"): Promise<IngestResult>
   // ── Phase 3: Persist stories ──────────────────────────────────────────────
   for (const s of llmScoredStories) {
     await markUrlAsSeen(s.sourceUrl, s.finalScore < s.feedThreshold ? "score_below_threshold" : undefined);
-    if (s.finalScore < s.feedThreshold) { skippedCount++; continue; }
+
+    if (s.finalScore < s.feedThreshold) {
+      logDrop({
+        title: s.title,
+        sourceUrl: s.sourceUrl,
+        sourceName: s.sourceName,
+        dropReason: "score_below_feed",
+        dropDetail: `LLM score ${s.finalScore} < feed threshold ${s.feedThreshold}. Category: ${s.finalCategory}. Reason: ${s.finalReason?.slice(0, 200)}`,
+        ruleScore: s.finalRuleScore,
+        llmScore: s.finalScore,
+        feedThreshold: s.feedThreshold,
+        category: s.finalCategory,
+        publishedAt: s.publishedAt,
+      });
+      skippedCount++;
+      continue;
+    }
 
     const storyId = await createStory({
       title: s.title,
@@ -397,13 +541,32 @@ export async function runIngestPipeline(label = "Ingest"): Promise<IngestResult>
       similarExamplesUsed: s.similarExamplesUsed ?? undefined,
     });
 
+    // Log successful ingestion
+    logDrop({
+      title: s.title,
+      sourceUrl: s.sourceUrl,
+      sourceName: s.sourceName,
+      dropReason: "ingested",
+      dropDetail: `Score: ${s.finalScore}. Label: ${s.finalLabel}. Category: ${s.finalCategory}`,
+      ruleScore: s.finalRuleScore,
+      llmScore: s.finalScore,
+      feedThreshold: s.feedThreshold,
+      category: s.finalCategory,
+      publishedAt: s.publishedAt,
+    });
+
     await createStoryPackage({ storyId, processingStatus: "queued" });
     recentTitles.push(s.title);
     newCount++;
   }
 
   const durationMs = Date.now() - t0;
-  console.log(`[${label}] Complete — ${newCount} new stories, ${skippedCount} skipped, ${durationMs}ms`);
+  console.log(`[${label}] Complete — ${newCount} new stories, ${skippedCount} skipped, ${durationMs}ms (runId: ${runId})`);
 
-  return { newCount, skippedCount, sourcesChecked: activeSources.length, durationMs };
+  // Flush all log entries to DB — fire-and-forget so it doesn't block the response
+  batchInsertIngestLog(logEntries).catch(err =>
+    console.warn(`[${label}] IngestLog flush failed:`, err instanceof Error ? err.message : err)
+  );
+
+  return { newCount, skippedCount, sourcesChecked: activeSources.length, durationMs, runId };
 }

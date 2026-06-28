@@ -13,6 +13,7 @@ import Insights from "@/pages/Insights";
 import Login from "@/pages/Login";
 import ExampleArticles from "@/pages/ExampleArticles";
 import Digest from "@/pages/Digest";
+import IngestLog from "@/pages/IngestLog";
 import AssistantPanel from "@/components/AssistantPanel";
 import { useAuth } from "./_core/hooks/useAuth";
 
@@ -28,6 +29,7 @@ function Router() {
       <Route path="/login" component={Login} />
       <Route path="/example-articles" component={ExampleArticles} />
       <Route path="/digest" component={Digest} />
+      <Route path="/ingest-log" component={IngestLog} />
       <Route path="/404" component={NotFound} />
       <Route component={NotFound} />
     </Switch>

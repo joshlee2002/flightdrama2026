@@ -162,6 +162,36 @@ export async function runSchemaMigrations(): Promise<void> {
       console.warn("[Migration] seen_urls UNIQUE constraint warning:", msg);
     }
   }
+
+  // ── Migration 7: ingest_log diagnostic table ─────────────────────────────
+  try {
+    await db.execute(
+      `CREATE TABLE IF NOT EXISTS \`ingest_log\` (
+        \`id\` int NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        \`ingestRunId\` varchar(36) NOT NULL,
+        \`title\` varchar(500) NOT NULL,
+        \`sourceUrl\` varchar(768) NOT NULL,
+        \`sourceName\` varchar(255) NOT NULL,
+        \`dropReason\` varchar(64) NOT NULL,
+        \`dropDetail\` varchar(500) NULL,
+        \`ruleScore\` int NULL,
+        \`llmScore\` int NULL,
+        \`feedThreshold\` int NULL,
+        \`category\` varchar(64) NULL,
+        \`publishedAt\` timestamp NULL,
+        \`createdAt\` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        INDEX \`ingest_log_runId_idx\` (\`ingestRunId\`),
+        INDEX \`ingest_log_dropReason_idx\` (\`dropReason\`),
+        INDEX \`ingest_log_createdAt_idx\` (\`createdAt\`)
+      )` as any
+    );
+    console.log("[Migration] ingest_log table created");
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!msg.includes("already exists")) {
+      console.warn("[Migration] ingest_log table warning:", msg);
+    }
+  }
 }
 
 /**

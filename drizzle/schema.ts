@@ -312,3 +312,31 @@ export const weeklyDigests = mysqlTable("weekly_digests", {
 
 export type WeeklyDigest = typeof weeklyDigests.$inferSelect;
 export type InsertWeeklyDigest = typeof weeklyDigests.$inferInsert;
+
+// Diagnostic ingest log — one row per dropped/passed story per ingest run
+export const ingestLog = mysqlTable("ingest_log", {
+  id: int("id").autoincrement().primaryKey(),
+  ingestRunId: varchar("ingestRunId", { length: 36 }).notNull(),
+  title: varchar("title", { length: 500 }).notNull(),
+  sourceUrl: varchar("sourceUrl", { length: 768 }).notNull(),
+  sourceName: varchar("sourceName", { length: 255 }).notNull(),
+  // Drop reason values:
+  //   already_seen      — URL already in seen_urls from a previous run
+  //   not_aviation      — failed the aviation keyword gate
+  //   duplicate_content — content-hash or event-fingerprint matched existing story
+  //   duplicate_title   — title-similarity or LLM dedup matched existing story
+  //   duplicate_batch   — duplicate within the current ingest batch
+  //   score_below_rule  — rule score < 30, dropped before LLM
+  //   score_below_feed  — LLM score below feed threshold (default 40)
+  //   ingested          — story passed all gates and was saved to dashboard
+  dropReason: varchar("dropReason", { length: 64 }).notNull(),
+  dropDetail: varchar("dropDetail", { length: 500 }),
+  ruleScore: int("ruleScore"),
+  llmScore: int("llmScore"),
+  feedThreshold: int("feedThreshold"),
+  category: varchar("category", { length: 64 }),
+  publishedAt: timestamp("publishedAt"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+});
+export type IngestLogEntry = typeof ingestLog.$inferSelect;
+export type InsertIngestLogEntry = typeof ingestLog.$inferInsert;

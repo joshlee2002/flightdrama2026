@@ -43,6 +43,8 @@ import {
   recordDuplicatePair,
   getRecentDuplicatePairs,
   atomicIncrementScoringCounter,
+  getIngestLog,
+  getIngestLogSummary,
 } from "./db";
 import { eq, sql } from "drizzle-orm";
 import { stories } from "../drizzle/schema";
@@ -1751,6 +1753,33 @@ export const appRouter = router({
           description: "Custom uploaded image",
           source: "custom" as const,
         };
+      }),
+  }),
+  // ── Ingest Log ─────────────────────────────────────────────────────────────
+  ingestLog: router({
+    summary: protectedProcedure
+      .input(z.object({ sinceHours: z.number().optional() }))
+      .query(async ({ input }) => {
+        const since = input.sinceHours
+          ? new Date(Date.now() - input.sinceHours * 60 * 60 * 1000)
+          : undefined;
+        return getIngestLogSummary(since);
+      }),
+    list: protectedProcedure
+      .input(z.object({
+        limit: z.number().optional(),
+        dropReason: z.string().optional(),
+        sinceHours: z.number().optional(),
+      }))
+      .query(async ({ input }) => {
+        const since = input.sinceHours
+          ? new Date(Date.now() - input.sinceHours * 60 * 60 * 1000)
+          : undefined;
+        return getIngestLog({
+          limit: input.limit ?? 200,
+          dropReason: input.dropReason,
+          since,
+        });
       }),
   }),
   // ── Cost Control — toggle LLM features on/off ──────────────────────────────

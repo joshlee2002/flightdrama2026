@@ -4,7 +4,9 @@ import { drizzle } from "drizzle-orm/mysql2";
 import {
   exampleArticles,
   historicalPosts,
+  ingestLog,
   InsertHistoricalPost,
+  InsertIngestLogEntry,
   InsertRssSource,
   InsertStory,
   InsertStoryPackage,
@@ -871,4 +873,62 @@ export async function getStoryByContentHash(
     .orderBy(desc(stories.createdAt))
     .limit(1);
   return result[0] ?? null;
+}
+
+// ── Ingest Log ─────────────────────────────────────────────────────────────────────────────────
+
+export async function batchInsertIngestLog(
+  entries: InsertIngestLogEntry[]
+): Promise<void> {
+  if (!entries.length) return;
+  const db = await getDb();
+  if (!db) return;
+  const CHUNK = 100;
+  for (let i = 0; i < entries.length; i += CHUNK) {
+    await db.insert(ingestLog).values(entries.slice(i, i + CHUNK)).catch((err: unknown) => {
+      console.warn("[IngestLog] batch insert warning:", err instanceof Error ? err.message : err);
+    });
+  }
+}
+
+export async function getIngestLog(opts?: {
+  limit?: number;
+  runId?: string;
+  dropReason?: string;
+  since?: Date;
+}) {
+  const db = await getDb();
+  if (!db) return [];
+  const conditions = [];
+  if (opts?.runId) conditions.push(eq(ingestLog.ingestRunId, opts.runId));
+  if (opts?.dropReason) conditions.push(eq(ingestLog.dropReason, opts.dropReason));
+  if (opts?.since) conditions.push(gte(ingestLog.createdAt, opts.since));
+  return db
+    .select()
+    .from(ingestLog)
+    .where(conditions.length > 0 ? and(...conditions) : undefined)
+    .orderBy(desc(ingestLog.createdAt))
+    .limit(opts?.limit ?? 500);
+}
+
+export async function getIngestLogSummary(since?: Date) {
+  const db = await getDb();
+  if (!db) return [];
+  const conditions = since ? [gte(ingestLog.createdAt, since)] : [];
+  return db
+    .select({
+      dropReason: ingestLog.dropReason,
+      count: sql<number>`count(*)`,
+    })
+    .from(ingestLog)
+    .where(conditions.length > 0 ? and(...conditions) : undefined)
+    .groupBy(ingestLog.dropReason)
+    .orderBy(desc(sql<number>`count(*)`));
+}
+
+export async function pruneIngestLog(olderThanDays = 7): Promise<void> {
+  const db = await getDb();
+  if (!db) return;
+  const cutoff = new Date(Date.now() - olderThanDays * 24 * 60 * 60 * 1000);
+  await db.delete(ingestLog).where(sql`${ingestLog.createdAt} < ${cutoff}`);
 }
