@@ -300,16 +300,17 @@ export async function runIngestPipeline(label = "Ingest"): Promise<IngestResult>
 
   // ── Phase 1h: Rule-score (pre-filter only — no stat adjustment applied) ────
   // The rule score is used only as a cheap pre-filter to drop obvious rejects
-  // (score < 40) before spending LLM credits. Threshold raised from 30 → 40 to
-  // filter out weak stories (listicles, routine press releases) that the LLM
-  // would score low anyway. The LLM apprentice scoring in Phase 2 is the
-  // authoritative score — no post-LLM stat adjustment is applied.
+  // (score < 30) before spending LLM credits. Threshold is intentionally LOW —
+  // the rule engine starts at a baseline of 20 and many legitimate stories only
+  // pick up 10-20 points on rules but score 70+ after the LLM sees full context.
+  // The final feedThreshold gate (default 40) handles what actually appears on
+  // the dashboard. The LLM apprentice scoring in Phase 2 is the authoritative score.
   type PendingStory = CandidateItem & { ruleScore: ReturnType<typeof scoreStory> };
   const llmCandidates: PendingStory[] = [];
 
   for (const item of dedupedCandidates) {
     const ruleScore = scoreStory(item.title, item.content);
-    if (ruleScore.score >= 40) {
+    if (ruleScore.score >= 30) {
       llmCandidates.push({ ...item, ruleScore });
     } else {
       markUrlAsSeen(item.sourceUrl, "score_below_threshold").catch(() => {});
