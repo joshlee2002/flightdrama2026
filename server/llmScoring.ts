@@ -96,7 +96,7 @@ async function buildScoringContext(): Promise<{ systemPrompt: string; hasExample
     // mustPostThreshold = p90 of editor scores. We do NOT hard-cap at maxScore
     // because that would prevent the model from ever suggesting a story is
     // exceptional — instead we use maxScore as a soft nudge in the prompt text.
-    const mustPostThreshold = Math.max(p90, 80); // never lower than 80
+    const mustPostThreshold = Math.max(p90, 70); // never lower than 70 — let the editor's real distribution set the ceiling
     const strongThreshold = Math.max(Math.min(mustPostThreshold - 12, 75), 55); // 55–75 range
 
     // Soft ceiling: tell the model the editor's highest score, but frame it as
@@ -112,7 +112,8 @@ async function buildScoringContext(): Promise<{ systemPrompt: string; hasExample
       `- Score range seen so far: ${minScore}–${maxScore} | Average: ${avgScore}`,
       `- Distribution: ${pct(bucket0_30)}% score 0–30 | ${pct(bucket31_60)}% score 31–60 | ${pct(bucket61_80)}% score 61–80 | ${pct(bucket81_100)}% score 81–100`,
       softCeilingNote,
-      `- Most strong stories score ${strongThreshold}–${mustPostThreshold - 1}. Reserve ${mustPostThreshold}+ for genuinely shocking events.`,
+      `- Most strong stories score ${strongThreshold}–${mustPostThreshold - 1}. Reserve ${mustPostThreshold}+ for genuinely shocking events — no more than 15% of stories should reach must_post.`,
+      `- DISTRIBUTION RULE: Do NOT cluster scores at the top. If you find yourself scoring more than 2–3 stories in a batch above ${mustPostThreshold}, you are inflating. Score lower and let the editor correct upward.`,
       ...(anchors.length > 0 ? [`- Recent real score anchors from this editor (use these to calibrate):`, ...anchors] : []),
       ``,
       `Score thresholds (calibrated to this editor's scale):`,
@@ -217,28 +218,45 @@ async function buildScoringContext(): Promise<{ systemPrompt: string; hasExample
   // ── Build the full system prompt ──────────────────────────────────────────
   // If we have calibration data, use it as the primary score range definition.
   // Otherwise fall back to the static defaults.
-  const staticScoreRanges = `Score from 0–100:
-- 88–98 = must_post (matches top performer pattern — shocking, emotional, or deeply surprising; DO NOT score above 98)
-- 70–87 = strong_candidate (similar to strong performers — clear hook, aviation drama)
-- 50–69 = maybe (some potential but weaker hook than typical performers)
-- 0–49 = reject (routine news, no emotional hook, not similar to any top performer)
+  const staticScoreRanges = `Score this story RELATIVE to what a typical aviation editor would find exceptional.
+- Most aviation stories are routine. Score 50–75 for stories with a real hook but nothing extraordinary.
+- Score 85+ ONLY if this story is clearly better than a typical aviation incident — a major crash, mass casualties, a famous aircraft, a shocking near-miss caught on video.
+- Score 88+ (must_post) for no more than 15% of stories. If you are unsure whether a story deserves 88+, score it 75 instead.
+- DISTRIBUTION RULE: Do NOT cluster scores at the top. A batch where most stories score 88–95 is wrong. Spread scores across 45–85.
+- 88–95 = must_post (genuinely exceptional — would make national news, high emotional impact, rare event)
+- 70–87 = strong_candidate (clear aviation drama, strong hook, above-average story)
+- 50–69 = maybe (some potential but routine for aviation news)
+- 0–49 = reject (routine news, no emotional hook, no viral angle)
 - AUTOMATIC REJECT (score 0–15): listicles, travel guides, product reviews, opinion columns with no news event, sponsored content, award announcements, any headline starting with a number followed by a noun ("16 Hotels...", "5 Reasons...").`;
 
   // ── Build the system prompt ──────────────────────────────────────────────
-  // STRUCTURE: context first, hard constraints LAST.
-  // The LLM gives more weight to instructions at the end of the system prompt.
-  // Calibration/scoring rules MUST come after all context so they act as a
-  // hard override, not a suggestion that gets buried by Instagram data.
+  // STRUCTURE: editor override history FIRST (primary signal), then context,
+  // then hard constraints LAST.
+  //
+  // WHY: The LLM must understand the editor's taste before it sees anything else.
+  // If override examples come after Instagram data and learned rules, the LLM
+  // treats them as weak context. By putting them FIRST with explicit framing,
+  // the LLM anchors on the editor's actual corrections as its primary instruction.
 
   let systemPrompt = `You are a viral content scoring engine for FlightDrama, an aviation Instagram/TikTok/YouTube account.
-Your job: score stories 0–100 for viral potential on aviation Instagram/TikTok/YouTube.`;
+Your job: score stories 0–100 for viral potential on aviation Instagram/TikTok/YouTube.
 
-  // 1. Instagram performance data — CONTEXT (what topics/angles work)
+Your PRIMARY INSTRUCTION is to rank stories the way THIS SPECIFIC EDITOR would rank them.
+Do not use generic "aviation drama = high score" logic. Use the editor's actual past scores as your guide.`;
+
+  // 1. Editor override history — PRIMARY SIGNAL (comes FIRST)
+  // The editor's manual corrections are the most direct signal of their taste.
+  // These must come before everything else so the LLM anchors on them.
+  if (examplesBlock) {
+    systemPrompt += `\n\n## EDITOR'S PAST SCORES — YOUR PRIMARY INSTRUCTION\nStudy these carefully. This editor has manually scored these stories. Your job is to score new stories the same way they would.\n[recent] = last 30 days (most representative of current taste).\n\nPAY ATTENTION TO THE DRIFT: when the editor scored LOWER than the AI, that story was overvalued. When they scored HIGHER, it was undervalued. Learn from these corrections.\n\n${examplesBlock}\n\nIMPORTANT: Look at the range of scores above. If most of the editor's scores are in the 55–80 range, that is where most new stories should land. Do not score new stories higher than the editor's typical range unless the story is clearly exceptional by comparison.`;
+  }
+
+  // 2. Instagram performance data — CONTEXT (what topics/angles work)
   if (instagramBlock) {
     systemPrompt += `\n\n${instagramBlock}`;
   }
 
-  // 2. Structured weights from deep learner
+  // 3. Structured weights from deep learner
   if (structuredWeightsRaw) {
     try {
       const sw = JSON.parse(structuredWeightsRaw);
@@ -272,7 +290,7 @@ Your job: score stories 0–100 for viral potential on aviation Instagram/TikTok
     if (learnedInsights) systemPrompt += `\n\n## Editor Preferences\n${learnedInsights}`;
   }
 
-  // 3. Statistical learner output
+  // 4. Statistical learner output
   if (statWeights || statKeywordBoosts || statKeywordPenalties) {
     systemPrompt += `\n\n## Statistical Signals (from override history)`;
     if (statWeights) systemPrompt += `\nCategory score adjustments: ${statWeights}`;
@@ -280,14 +298,9 @@ Your job: score stories 0–100 for viral potential on aviation Instagram/TikTok
     if (statKeywordPenalties) systemPrompt += `\nKeywords editor consistently scores LOWER: ${statKeywordPenalties}`;
   }
 
-  // 4. Editor override examples — the most direct learning signal
-  if (examplesBlock) {
-    systemPrompt += `\n\n## Editor Override History (most recent first)\nThe editor has manually corrected these AI scores. This is your most direct calibration signal.\n[recent] = last 30 days. Study the pattern — what did the editor score higher than the AI? Lower?\n\n${examplesBlock}`;
-  }
-
   // 5. HARD SCORING CONSTRAINTS — these come LAST so they override everything above
   // The LLM must use these exact score ranges regardless of what the context suggests.
-  systemPrompt += `\n\n## SCORING RULES (MANDATORY — apply these AFTER reading all context above)\n${calibrationBlock ?? staticScoreRanges}\n- CRITICAL: The engagement ranks (eng:X/10) in the Instagram data above are engagement metrics, NOT score targets. Do not copy them into your score.\n- CRITICAL: A score of 100 means a once-in-a-year story. Do not give 100 unless the story is genuinely unprecedented.`;
+  systemPrompt += `\n\n## SCORING RULES (MANDATORY)\n${calibrationBlock ?? staticScoreRanges}\n- CRITICAL: The engagement ranks (eng:X/10) in the Instagram data above are engagement metrics, NOT score targets. Do not copy them into your score.\n- CRITICAL: A score of 100 means a once-in-a-year story. Do not give 100 unless the story is genuinely unprecedented.\n- DISTRIBUTION RULE: Do NOT cluster scores at the top. If you are scoring a batch of stories and most are coming out above 85, you are inflating. Most aviation stories should score 50–75. Score 85+ only when the story is clearly exceptional compared to the editor's past scores above.\n- WHEN IN DOUBT: Score LOWER. The editor will correct you upward if needed. It is better to score 65 and be corrected to 80 than to score 90 and have the editor correct you down every single time.`;
 
   systemPrompt += `\n\nRespond ONLY with a valid JSON object in this exact format:
 {
