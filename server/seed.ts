@@ -110,6 +110,40 @@ export async function runSchemaMigrations(): Promise<void> {
     }
   }
 
+  // ── Migration 6: apprentice transparency columns ──────────────────────────
+  // Adds ruleScore, apprenticeConfidence, apprenticeReasoning, similarExamplesUsed
+  // to the stories table. All nullable — existing rows are unaffected.
+  // CRITICAL: without these columns, createStory() throws on every ingest insert.
+  const apprenticeColMigrations: Array<{ col: string; ddl: string }> = [
+    {
+      col: "ruleScore",
+      ddl: "ALTER TABLE `stories` ADD COLUMN `ruleScore` int NULL",
+    },
+    {
+      col: "apprenticeConfidence",
+      ddl: "ALTER TABLE `stories` ADD COLUMN `apprenticeConfidence` varchar(16) NULL",
+    },
+    {
+      col: "apprenticeReasoning",
+      ddl: "ALTER TABLE `stories` ADD COLUMN `apprenticeReasoning` text NULL",
+    },
+    {
+      col: "similarExamplesUsed",
+      ddl: "ALTER TABLE `stories` ADD COLUMN `similarExamplesUsed` json NULL",
+    },
+  ];
+  for (const { col, ddl } of apprenticeColMigrations) {
+    try {
+      await db.execute(ddl as any);
+      console.log(`[Migration] stories.${col} column added`);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!msg.includes("Duplicate column") && !msg.includes("already exists")) {
+        console.warn(`[Migration] stories.${col} migration warning:`, msg);
+      }
+    }
+  }
+
   // ── Migration 5: seen_urls UNIQUE constraint on url ───────────────────────
   // Without this, ON DUPLICATE KEY UPDATE in markUrlAsSeen is a no-op and
   // the same URL can appear multiple times in seen_urls.
