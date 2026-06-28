@@ -340,3 +340,24 @@ export const ingestLog = mysqlTable("ingest_log", {
 });
 export type IngestLogEntry = typeof ingestLog.$inferSelect;
 export type InsertIngestLogEntry = typeof ingestLog.$inferInsert;
+
+// Editor-confirmed duplicate pairs — high-quality training data for dedup learning.
+// Stores the exact story IDs the editor selected, not guessed title pairs.
+// These are used as the highest-confidence examples in the LLM dedup prompt.
+export const duplicateLearning = mysqlTable("duplicate_learning", {
+  id: int("id").autoincrement().primaryKey(),
+  // The story the editor marked as a duplicate
+  duplicateStoryId: int("duplicateStoryId").notNull(),
+  // The canonical story the editor selected as the original
+  canonicalStoryId: int("canonicalStoryId").notNull(),
+  // Titles at time of dismissal — kept for backwards-compatible LLM prompt injection
+  // and for readability in the admin panel. IDs are the source of truth.
+  dismissedTitle: text("dismissedTitle").notNull(),
+  canonicalTitle: text("canonicalTitle").notNull(),
+  // Confidence score 0–1 from the candidate ranking that surfaced this canonical
+  confidence: float("confidence").default(1.0).notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+});
+
+export type DuplicateLearningEntry = typeof duplicateLearning.$inferSelect;
+export type InsertDuplicateLearningEntry = typeof duplicateLearning.$inferInsert;

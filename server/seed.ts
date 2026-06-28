@@ -193,6 +193,32 @@ export async function runSchemaMigrations(): Promise<void> {
     }
   }
 
+  // ── Migration 9: duplicate_learning table ──────────────────────────────────
+  // Stores editor-confirmed duplicate pairs (story IDs + titles at time of dismissal).
+  // Replaces the noisy guessed-title pairs stored in scoring_config.
+  try {
+    await db.execute(
+      `CREATE TABLE IF NOT EXISTS \`duplicate_learning\` (
+        \`id\` int NOT NULL AUTO_INCREMENT,
+        \`duplicateStoryId\` int NOT NULL,
+        \`canonicalStoryId\` int NOT NULL,
+        \`dismissedTitle\` text NOT NULL,
+        \`canonicalTitle\` text NOT NULL,
+        \`confidence\` float NOT NULL DEFAULT 1.0,
+        \`createdAt\` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (\`id\`),
+        KEY \`idx_dup_learning_canonical\` (\`canonicalStoryId\`),
+        KEY \`idx_dup_learning_duplicate\` (\`duplicateStoryId\`)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4` as any
+    );
+    console.log("[Migration] duplicate_learning table ensured");
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!msg.includes("already exists")) {
+      console.warn("[Migration] duplicate_learning table warning:", msg);
+    }
+  }
+
   // ── Migration 8: clear stale seen_url blocks ─────────────────────────────────
   // Stories that were previously rejected by the keyword gate or scored below
   // threshold are permanently blocked from re-evaluation. This is wrong —

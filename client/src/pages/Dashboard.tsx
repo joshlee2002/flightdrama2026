@@ -69,7 +69,7 @@ interface StoryCardProps {
   onApprove: (variant?: string) => void;
   onReject: () => void;
   onDismiss: () => void;
-  onDismissAsDuplicate: () => void;
+  onDismissAsDuplicate: (canonicalStoryId?: number) => void;
   onProcess: () => void;
   onOverrideScore: (score: number | null, label: string | null) => void;
   isProcessing: boolean;
@@ -535,6 +535,13 @@ export default function Dashboard() {
     },
   });
 
+  // Duplicate modal state
+  const [duplicateModalStoryId, setDuplicateModalStoryId] = useState<number | null>(null);
+  const { data: duplicateCandidates, isFetching: loadingCandidates } = trpc.stories.getDuplicateCandidates.useQuery(
+    { id: duplicateModalStoryId! },
+    { enabled: duplicateModalStoryId !== null }
+  );
+
   const [overridingIds, setOverridingIds] = useState<Set<number>>(new Set());
 
   const overrideScore = trpc.stories.overrideScore.useMutation({
@@ -816,7 +823,13 @@ export default function Dashboard() {
                           onApprove={(variant) => approve.mutate({ id: story.id, usedHeadlineVariant: variant })}
                           onReject={() => reject.mutate({ id: story.id })}
                           onDismiss={() => dismiss.mutate({ id: story.id })}
-                          onDismissAsDuplicate={() => dismissAsDuplicate.mutate({ id: story.id })}
+                          onDismissAsDuplicate={(canonicalId) => {
+                            if (canonicalId !== undefined) {
+                              dismissAsDuplicate.mutate({ id: story.id, canonicalStoryId: canonicalId });
+                            } else {
+                              setDuplicateModalStoryId(story.id);
+                            }
+                          }}
                           onProcess={() => handleProcess(story.id)}
                           onOverrideScore={(score, label) => handleOverrideScore(story.id, score, label)}
                         />
@@ -837,6 +850,82 @@ export default function Dashboard() {
           </div>
         )}
       </div>
+      {/* ── Duplicate canonical selection modal ── */}
+      {duplicateModalStoryId !== null && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+          onClick={() => setDuplicateModalStoryId(null)}
+        >
+          <div
+            className="bg-card border border-border rounded-2xl shadow-2xl w-full max-w-lg mx-4 overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-5 py-4 border-b border-border flex items-center justify-between">
+              <div>
+                <h2 className="text-sm font-semibold text-foreground">Which story is this a duplicate of?</h2>
+                <p className="text-xs text-muted-foreground mt-0.5">Select the original story, or skip to dismiss without linking</p>
+              </div>
+              <button
+                className="w-7 h-7 rounded-md flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-colors"
+                onClick={() => setDuplicateModalStoryId(null)}
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 space-y-2">
+              {loadingCandidates ? (
+                <div className="flex items-center justify-center py-8">
+                  <Loader2 className="w-5 h-5 animate-spin text-primary" />
+                </div>
+              ) : !duplicateCandidates || duplicateCandidates.length === 0 ? (
+                <p className="text-xs text-muted-foreground text-center py-6">No similar stories found in recent history.</p>
+              ) : (
+                duplicateCandidates.map((candidate: any) => (
+                  <button
+                    key={candidate.id}
+                    className="w-full text-left rounded-xl border border-border bg-muted/20 hover:bg-muted/50 hover:border-primary/40 transition-all px-3.5 py-3 group"
+                    onClick={() => {
+                      const storyId = duplicateModalStoryId;
+                      setDuplicateModalStoryId(null);
+                      dismissAsDuplicate.mutate({ id: storyId!, canonicalStoryId: candidate.id });
+                      toast.success("Dismissed as duplicate — pair recorded");
+                    }}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <p className="text-xs font-medium text-foreground leading-snug line-clamp-2 flex-1">{candidate.title}</p>
+                      <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary border border-primary/20 font-medium">
+                        {Math.round(candidate.confidence * 100)}% match
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2 mt-1">
+                      {candidate.sourceName && (
+                        <span className="text-[10px] text-muted-foreground">{candidate.sourceName}</span>
+                      )}
+                      {candidate.publishedAt && (
+                        <span className="text-[10px] text-muted-foreground">{new Date(candidate.publishedAt).toLocaleDateString()}</span>
+                      )}
+                      <span className="text-[10px] text-muted-foreground">Score: {candidate.viralScore}</span>
+                    </div>
+                  </button>
+                ))
+              )}
+            </div>
+            <div className="px-4 pb-4">
+              <button
+                className="w-full h-9 rounded-xl border border-dashed border-border text-xs text-muted-foreground hover:text-foreground hover:border-border/70 transition-colors"
+                onClick={() => {
+                  const storyId = duplicateModalStoryId;
+                  setDuplicateModalStoryId(null);
+                  dismissAsDuplicate.mutate({ id: storyId! });
+                  toast.success("Dismissed as duplicate");
+                }}
+              >
+                Skip — dismiss without selecting canonical
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </FlightLayout>
   );
 }

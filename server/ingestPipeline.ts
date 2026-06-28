@@ -21,6 +21,7 @@ import {
   createStoryPackage,
   getDb,
   getRecentDuplicatePairs,
+  getConfirmedDuplicatePairs,
   getStoryByEventFingerprint,
   getStoryByContentHash,
   batchInsertIngestLog,
@@ -108,7 +109,7 @@ export async function runIngestPipeline(label = "Ingest"): Promise<IngestResult>
   const sources = await getActiveRssSources();
   const [recentTitles, learnedDuplicatePairs] = await Promise.all([
     getRecentStoryTitles(5000),
-    getRecentDuplicatePairs(10),
+    getConfirmedDuplicatePairs(20), // Use editor-confirmed pairs as high-quality training data
   ]);
   let newCount = 0;
   let skippedCount = 0;

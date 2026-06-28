@@ -42,6 +42,9 @@ import {
   getPendingStoriesByCategory,
   recordDuplicatePair,
   getRecentDuplicatePairs,
+  getConfirmedDuplicatePairs,
+  getDuplicateCandidates,
+  recordConfirmedDuplicatePair,
   atomicIncrementScoringCounter,
   getIngestLog,
   getIngestLogSummary,
@@ -651,57 +654,61 @@ export const appRouter = router({
      * want to see it again from any source.
      */
     dismissAsDuplicate: protectedProcedure
-      .input(z.object({ id: z.number() }))
+      .input(z.object({
+        id: z.number(),
+        // Optional: editor-confirmed canonical story ID from the modal
+        canonicalStoryId: z.number().optional(),
+      }))
       .mutation(async ({ input }) => {
         const story = await getStoryById(input.id);
         await updateStoryApproval(input.id, "duplicate");
         // Block the URL permanently — duplicate = never show this again
         if (story?.sourceUrl) await markUrlAsSeen(story.sourceUrl, "duplicate");
 
-        // ── Duplicate learning: record the dismissed title + best-guess canonical ──
-        // Find the most similar recent story title to use as the canonical pair.
-        // This teaches the dedup LLM what patterns the editor considers duplicates.
         if (story?.title) {
           setImmediate(async () => {
             try {
-              // Search 1000 recent titles for the best canonical match
-              const recentTitles = await getRecentStoryTitles(1000);
-              const candidates = recentTitles.filter(t => t !== story.title);
-
-              // Tokenise: keep ALL tokens including short ones (FAA, 737, MAX, A320).
-              // Stop-words are filtered instead of length, so aviation identifiers
-              // and acronyms are never silently dropped.
-              const STOP_WORDS = new Set(["the","a","an","and","or","but","in","on","at","to","for","of","with","is","was","are","were","has","have","had","be","been","by","as","it","its","this","that","from","after","over","into","up","out","about","than","more","not","no","new"]);
-              const tokenise = (t: string): string[] =>
-                t.toLowerCase()
-                  .replace(/[^a-z0-9\s]/g, " ")
-                  .split(/\s+/)
-                  .filter(w => w.length > 0 && !STOP_WORDS.has(w));
-
-              const dismissedTokens = tokenise(story.title);
-              const dismissedSet = new Set(dismissedTokens);
-
-              let bestMatch: string | null = null;
-              let bestSim = 0;
-
-              for (const candidate of candidates) {
-                const candTokens = tokenise(candidate);
-                const candSet = new Set(candTokens);
-                // Jaccard on token sets
-                let intersectionSize = 0;
-                Array.from(candSet).forEach(w => { if (dismissedSet.has(w)) intersectionSize++; });
-                const unionSize = new Set(Array.from(dismissedSet).concat(Array.from(candSet))).size;
-                const sim = unionSize > 0 ? intersectionSize / unionSize : 0;
-                if (sim > bestSim) { bestSim = sim; bestMatch = candidate; }
-              }
-
-              // Record if similarity exceeds 0.12 (lower than before because the
-              // better tokeniser produces more meaningful overlap signals)
-              if (bestMatch && bestSim > 0.12) {
-                await recordDuplicatePair(story.title, bestMatch);
-                console.log(`[DuplicateLearning] Recorded pair (sim ${bestSim.toFixed(2)}): "${story.title.slice(0, 60)}" → "${bestMatch.slice(0, 60)}"`);
+              if (input.canonicalStoryId) {
+                // ── Editor-confirmed canonical: high-quality learning signal ──────────
+                // The editor explicitly selected which story this is a duplicate of.
+                // Store in the proper duplicate_learning table with confidence 1.0.
+                const canonicalStory = await getStoryById(input.canonicalStoryId);
+                if (canonicalStory) {
+                  await recordConfirmedDuplicatePair(
+                    input.id,
+                    input.canonicalStoryId,
+                    story.title,
+                    canonicalStory.title,
+                    1.0
+                  );
+                  console.log(`[DuplicateLearning] Editor-confirmed pair: "${story.title.slice(0, 60)}" → "${canonicalStory.title.slice(0, 60)}"`);
+                }
               } else {
-                console.log(`[DuplicateLearning] No similar canonical found for "${story.title.slice(0, 60)}" (best sim: ${bestSim.toFixed(2)})`);
+                // ── Fallback: best-guess canonical from title similarity ──────────────
+                // No canonical selected — find the most similar recent story title.
+                // Lower confidence than editor-confirmed pairs.
+                const recentTitles = await getRecentStoryTitles(1000);
+                const candidates = recentTitles.filter(t => t !== story.title);
+                const STOP_WORDS = new Set(["the","a","an","and","or","but","in","on","at","to","for","of","with","is","was","are","were","has","have","had","be","been","by","as","it","its","this","that","from","after","over","into","up","out","about","than","more","not","no","new"]);
+                const tokenise = (t: string): string[] =>
+                  t.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(w => w.length > 0 && !STOP_WORDS.has(w));
+                const dismissedSet = new Set(tokenise(story.title));
+                let bestMatch: string | null = null;
+                let bestSim = 0;
+                for (const candidate of candidates) {
+                  const candSet = new Set(tokenise(candidate));
+                  let intersectionSize = 0;
+                  Array.from(candSet).forEach(w => { if (dismissedSet.has(w)) intersectionSize++; });
+                  const unionSize = new Set([...Array.from(dismissedSet), ...Array.from(candSet)]).size;
+                  const sim = unionSize > 0 ? intersectionSize / unionSize : 0;
+                  if (sim > bestSim) { bestSim = sim; bestMatch = candidate; }
+                }
+                if (bestMatch && bestSim > 0.12) {
+                  await recordDuplicatePair(story.title, bestMatch);
+                  console.log(`[DuplicateLearning] Guessed pair (sim ${bestSim.toFixed(2)}): "${story.title.slice(0, 60)}" → "${bestMatch.slice(0, 60)}"`);
+                } else {
+                  console.log(`[DuplicateLearning] No similar canonical found for "${story.title.slice(0, 60)}" (best sim: ${bestSim.toFixed(2)})`);
+                }
               }
             } catch (err) {
               console.warn("[DuplicateLearning] Failed to record pair:", err);
@@ -710,6 +717,16 @@ export const appRouter = router({
         }
 
         return { success: true };
+      }),
+
+    /**
+     * Get top duplicate candidates for a story — used by the canonical selection modal.
+     * Returns up to 5 stories ranked by event fingerprint match, title similarity, and recency.
+     */
+    getDuplicateCandidates: protectedProcedure
+      .input(z.object({ id: z.number() }))
+      .query(async ({ input }) => {
+        return getDuplicateCandidates(input.id, 5);
       }),
 
     updateArticle: protectedProcedure
@@ -761,7 +778,7 @@ export const appRouter = router({
       .mutation(async ({ input }) => {
         const [recentTitles, learnedDuplicatePairs] = await Promise.all([
           getRecentStoryTitles(300),
-          getRecentDuplicatePairs(10),
+          getConfirmedDuplicatePairs(20), // Use editor-confirmed pairs as high-quality training data
         ]);
         const results: {
           url: string;

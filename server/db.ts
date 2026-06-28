@@ -2,6 +2,7 @@ import { and, desc, eq, gte, inArray, isNull, lte, ne, not, or, sql } from "driz
 import { DEFAULT_RSS_SOURCES } from "./ingestion";
 import { drizzle } from "drizzle-orm/mysql2";
 import {
+  duplicateLearning,
   exampleArticles,
   historicalPosts,
   ingestLog,
@@ -931,4 +932,173 @@ export async function pruneIngestLog(olderThanDays = 7): Promise<void> {
   if (!db) return;
   const cutoff = new Date(Date.now() - olderThanDays * 24 * 60 * 60 * 1000);
   await db.delete(ingestLog).where(sql`${ingestLog.createdAt} < ${cutoff}`);
+}
+
+// ── Duplicate learning (confirmed pairs) ─────────────────────────────────────
+// Editor-confirmed duplicate pairs stored in the duplicate_learning table.
+// These are higher quality than the guessed title pairs in scoring_config.
+
+export interface DuplicateCandidate {
+  id: number;
+  title: string;
+  sourceName: string | null;
+  publishedAt: Date | null;
+  viralScore: number;
+  confidence: number; // 0–1 ranking score used to sort candidates
+}
+
+/**
+ * Find the top N candidate canonical stories for a given story.
+ * Ranked by: event fingerprint match (1.0) > title similarity (0–0.8) > recency.
+ * Returns up to `limit` candidates, excluding the story itself and any already
+ * marked as duplicate/dismissed/rejected.
+ */
+export async function getDuplicateCandidates(
+  storyId: number,
+  limit = 5
+): Promise<DuplicateCandidate[]> {
+  const db = await getDb();
+  if (!db) return [];
+
+  // Fetch the story we're looking for a canonical for
+  const storyRow = await db
+    .select({ title: stories.title, eventFingerprint: stories.eventFingerprint })
+    .from(stories)
+    .where(eq(stories.id, storyId))
+    .limit(1);
+  if (!storyRow[0]) return [];
+  const { title: dismissedTitle, eventFingerprint } = storyRow[0];
+
+  // Fetch recent non-dismissed stories (last 500) to rank against
+  const candidates = await db
+    .select({
+      id: stories.id,
+      title: stories.title,
+      sourceName: stories.sourceName,
+      publishedAt: stories.publishedAt,
+      viralScore: stories.viralScore,
+      eventFingerprint: stories.eventFingerprint,
+      createdAt: stories.createdAt,
+    })
+    .from(stories)
+    .where(
+      and(
+        ne(stories.id, storyId),
+        ne(stories.approvalStatus, "duplicate" as any),
+        ne(stories.approvalStatus, "dismissed" as any),
+        ne(stories.approvalStatus, "rejected" as any),
+      )
+    )
+    .orderBy(desc(stories.createdAt))
+    .limit(500);
+
+  // Score each candidate
+  const STOP_WORDS = new Set(["the","a","an","and","or","but","in","on","at","to","for","of","with","is","was","are","were","has","have","had","be","been","by","as","it","its","this","that","from","after","over","into","up","out","about","than","more","not","no","new"]);
+  const tokenise = (t: string): string[] =>
+    t.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(w => w.length > 0 && !STOP_WORDS.has(w));
+  const dismissedTokens = tokenise(dismissedTitle);
+  const dismissedSet = new Set(dismissedTokens);
+
+  const scored = candidates.map(c => {
+    let confidence = 0;
+
+    // Highest signal: matching event fingerprint
+    if (eventFingerprint && c.eventFingerprint && eventFingerprint === c.eventFingerprint) {
+      confidence = 1.0;
+    } else {
+      // Title similarity (Jaccard on tokens)
+      const candTokens = tokenise(c.title);
+      const candSet = new Set(candTokens);
+      let intersectionSize = 0;
+      Array.from(candSet).forEach(w => { if (dismissedSet.has(w)) intersectionSize++; });
+      const unionSize = new Set([...Array.from(dismissedSet), ...Array.from(candSet)]).size;
+      const sim = unionSize > 0 ? intersectionSize / unionSize : 0;
+      confidence = sim * 0.8; // cap title similarity at 0.8 so fingerprint always wins
+    }
+
+    // Recency boost: stories from the last 7 days get a small bump
+    const ageMs = Date.now() - (c.createdAt?.getTime() ?? 0);
+    const ageDays = ageMs / (1000 * 60 * 60 * 24);
+    if (ageDays < 7) confidence += 0.05;
+
+    return { ...c, confidence };
+  });
+
+  // Sort by confidence desc, then by createdAt desc as tiebreaker
+  scored.sort((a, b) => b.confidence - a.confidence || (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0));
+
+  return scored.slice(0, limit).map(c => ({
+    id: c.id,
+    title: c.title,
+    sourceName: c.sourceName,
+    publishedAt: c.publishedAt,
+    viralScore: c.viralScore,
+    confidence: Math.round(c.confidence * 100) / 100,
+  }));
+}
+
+/**
+ * Record an editor-confirmed duplicate pair in the duplicate_learning table.
+ * Also writes the legacy Base64 pair for backwards compatibility with the
+ * existing isSimilarTitle and llmDedupCheck functions.
+ */
+export async function recordConfirmedDuplicatePair(
+  duplicateStoryId: number,
+  canonicalStoryId: number,
+  dismissedTitle: string,
+  canonicalTitle: string,
+  confidence: number
+): Promise<void> {
+  const db = await getDb();
+  if (!db) return;
+  try {
+    // Write to the new proper table (ID-based, source of truth)
+    await db.insert(duplicateLearning).values({
+      duplicateStoryId,
+      canonicalStoryId,
+      dismissedTitle,
+      canonicalTitle,
+      confidence,
+    });
+    // Also write to the legacy Base64 store for backwards compatibility
+    // so isSimilarTitle and llmDedupCheck continue to benefit immediately
+    await recordDuplicatePair(dismissedTitle, canonicalTitle);
+    console.log(`[DuplicateLearning] Confirmed pair stored: "${dismissedTitle.slice(0, 60)}" → "${canonicalTitle.slice(0, 60)}" (conf: ${confidence})`);
+  } catch (err) {
+    console.warn("[DuplicateLearning] Failed to record confirmed pair:", err);
+  }
+}
+
+/**
+ * Retrieve the most recent N confirmed duplicate pairs from the proper table.
+ * Falls back to the legacy Base64 store if the new table has fewer than `limit` rows.
+ */
+export async function getConfirmedDuplicatePairs(
+  limit = 10
+): Promise<Array<{ dismissed: string; canonical: string; at: string }>> {
+  const db = await getDb();
+  if (!db) return getRecentDuplicatePairs(limit);
+  try {
+    const rows = await db
+      .select({
+        dismissedTitle: duplicateLearning.dismissedTitle,
+        canonicalTitle: duplicateLearning.canonicalTitle,
+        createdAt: duplicateLearning.createdAt,
+      })
+      .from(duplicateLearning)
+      .orderBy(desc(duplicateLearning.createdAt))
+      .limit(limit);
+    if (rows.length >= limit) {
+      return rows.map(r => ({ dismissed: r.dismissedTitle, canonical: r.canonicalTitle, at: r.createdAt.toISOString() }));
+    }
+    // Supplement with legacy pairs if not enough confirmed ones yet
+    const legacy = await getRecentDuplicatePairs(limit);
+    const confirmed = rows.map(r => ({ dismissed: r.dismissedTitle, canonical: r.canonicalTitle, at: r.createdAt.toISOString() }));
+    const confirmedDismissed = new Set(confirmed.map(p => p.dismissed));
+    const supplementary = legacy.filter(p => !confirmedDismissed.has(p.dismissed));
+    return [...confirmed, ...supplementary].slice(0, limit);
+  } catch {
+    // Table may not exist yet on first deploy — fall back to legacy
+    return getRecentDuplicatePairs(limit);
+  }
 }
