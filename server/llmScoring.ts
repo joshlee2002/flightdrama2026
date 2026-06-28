@@ -165,14 +165,14 @@ async function buildScoringContext(
   hasExamples: boolean;
   exampleTitles: string[];
 }> {
-  const [relevantExamples, config, historicalPosts] = await Promise.all([
+  const [relevantExamples, config, historicalPosts, allExamplesForCalibration] = await Promise.all([
     getRelevantOverrides(title, category, 20),
     getAllScoringConfig(),
-    getHistoricalPosts(100),
+    getHistoricalPosts(30),
+    getOverrideExamplesFromDb(200),
   ]);
 
   // ── Score calibration: compute editor's actual distribution ──────────────
-  const allExamplesForCalibration = await getOverrideExamplesFromDb(200);
   const calibrationBlock = (() => {
     const scored = allExamplesForCalibration.filter(e => e.overrideScore !== null);
     if (scored.length < 5) return null;
@@ -256,8 +256,8 @@ async function buildScoringContext(
     .filter(p => p._perfScore > 0)
     .sort((a, b) => b._perfScore - a._perfScore);
 
-  const topPerformers = rankedPosts.slice(0, 15);
-  const bottomPerformers = rankedPosts.slice(-8);
+  const topPerformers = rankedPosts.slice(0, 10);
+  const bottomPerformers = rankedPosts.slice(-5);
   const toEngagementRank = (s: number) => Math.max(1, Math.min(10, Math.round(s / 10)));
 
   const instagramBlock = topPerformers.length > 0
@@ -461,7 +461,7 @@ export async function scoreStoryWithLLM(
     }
 
     // ── Pass 2: 70B safety net for potential viral stories ────────────────
-    if (parsed8b.score >= 75 && scoringModel !== verifyModel) {
+    if (parsed8b.score >= 88 && scoringModel !== verifyModel) {
       try {
         console.log(`[LLMScoring] 8B scored "${title.slice(0, 60)}" at ${parsed8b.score} — running 70B safety check`);
         const response70b = await invokeLLM({
@@ -628,7 +628,7 @@ Return ONLY the JSON array. No other text.`
       }
 
       // 70B safety net for high-scoring stories
-      if (p.score >= 75 && scoringModel !== verifyModel) {
+      if (p.score >= 88 && scoringModel !== verifyModel) {
         try {
           const verified = await scoreStoryWithLLM(s.title, s.content);
           results.push(verified);
