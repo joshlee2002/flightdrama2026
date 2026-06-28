@@ -187,6 +187,7 @@ export async function runIngestPipeline(label = "Ingest"): Promise<IngestResult>
     title: string;
     sourceUrl: string;
     sourceName: string;
+    sourceCategory: string;
     content: string;
     publishedAt: Date | null;
     feedThreshold: number;
@@ -229,6 +230,7 @@ export async function runIngestPipeline(label = "Ingest"): Promise<IngestResult>
         title,
         sourceUrl: item.sourceUrl,
         sourceName: source.name,
+        sourceCategory: source.category,
         content,
         publishedAt: item.publishedAt ?? null,
         feedThreshold,
@@ -429,7 +431,12 @@ export async function runIngestPipeline(label = "Ingest"): Promise<IngestResult>
 
   for (const item of dedupedCandidates) {
     const ruleScore = scoreStory(item.title, item.content);
-    if (ruleScore.score >= 30) {
+    // Aviation-native and regulator sources bypass the rule pre-filter entirely.
+    // These are dedicated aviation publications — every story from them is worth
+    // showing to the editor, even if it has no viral triggers (e.g. opinion
+    // pieces, analysis, editorial takes). The LLM apprentice is the judge.
+    const bypassRuleGate = item.sourceCategory === "aviation" || item.sourceCategory === "regulator";
+    if (bypassRuleGate || ruleScore.score >= 30) {
       llmCandidates.push({ ...item, ruleScore });
     } else {
       logDrop({
@@ -437,7 +444,7 @@ export async function runIngestPipeline(label = "Ingest"): Promise<IngestResult>
         sourceUrl: item.sourceUrl,
         sourceName: item.sourceName,
         dropReason: "score_below_rule",
-        dropDetail: `Rule score ${ruleScore.score} < 30 threshold. Category: ${ruleScore.category}`,
+        dropDetail: `Rule score ${ruleScore.score} < 30 threshold. Category: ${ruleScore.category}. (source category: ${item.sourceCategory})`,
         ruleScore: ruleScore.score,
         feedThreshold: item.feedThreshold,
         category: ruleScore.category,
