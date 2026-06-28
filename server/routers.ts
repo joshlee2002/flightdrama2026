@@ -1166,20 +1166,22 @@ export const appRouter = router({
               return;
             }
 
-            // Throttle: only run if ≥10 new overrides since last run OR ≥2 hours have passed.
-            // This prevents a single override session from triggering multiple LLM calls.
+            // Throttle: only run if ≥5 new overrides since last run OR ≥4 hours have passed.
+            // 5 overrides is enough signal to update the editorial philosophy meaningfully.
+            // 4-hour gap prevents the philosophy from being regenerated multiple times in one
+            // working session, which would waste credits without improving quality.
             const lastLearnedAt = await getScoringConfig("last_learned_at");
             const lastLearnedCount = parseInt(await getScoringConfig("last_learned_examples_count") ?? "0", 10);
             const pendingOverridesRaw = await getScoringConfig("pending_learn_overrides");
             const pendingCount = parseInt(pendingOverridesRaw ?? "0", 10) + 1;
             await setScoringConfig("pending_learn_overrides", String(pendingCount));
 
-            const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1000;
-            const ranRecently = lastLearnedAt && new Date(lastLearnedAt).getTime() > twoHoursAgo;
-            const hasEnoughNewOverrides = pendingCount >= 10;
+            const fourHoursAgo = Date.now() - 4 * 60 * 60 * 1000;
+            const ranRecently = lastLearnedAt && new Date(lastLearnedAt).getTime() > fourHoursAgo;
+            const hasEnoughNewOverrides = pendingCount >= 5;
 
             if (ranRecently && !hasEnoughNewOverrides) {
-              console.log(`[AutoLearn] LLM learn deferred — only ${pendingCount} new overrides since last run (need 10 or 2h gap)`);
+              console.log(`[AutoLearn] LLM learn deferred — only ${pendingCount} new overrides since last run (need 5 or 4h gap)`);
               return;
             }
 

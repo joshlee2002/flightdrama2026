@@ -555,11 +555,15 @@ export function isSimilarTitle(
 
 /**
  * Returns the subset of existingTitles that share both a location keyword AND
- * an incident keyword with newTitle. These are "possible same-event" candidates
- * that need LLM adjudication to determine if they are reposts or new angles.
+ * an incident keyword with newTitle, AND also share an airline or aircraft entity.
  *
- * Returns an empty array when there is no location+incident overlap, meaning
- * no LLM call is needed.
+ * The extra airline/aircraft requirement significantly reduces false-positive LLM
+ * dedup calls. Two stories about "an emergency in London" are not necessarily the
+ * same event — but two stories about "a Ryanair emergency in London" almost certainly
+ * are. Without the airline/aircraft match, the LLM was being called for any two
+ * stories that happened to mention the same city and incident type.
+ *
+ * Returns an empty array when there is no overlap, meaning no LLM call is needed.
  */
 export function getLocationIncidentMatches(
   newTitle: string,
@@ -568,7 +572,15 @@ export function getLocationIncidentMatches(
   const newLc = newTitle.toLowerCase();
   const newLocations = LOCATION_KEYWORDS.filter(k => newLc.includes(k));
   const newIncident = INCIDENT_KEYWORDS.filter(k => newLc.includes(k));
+  // Must have at least a location AND an incident keyword to be worth checking
   if (newLocations.length === 0 || newIncident.length === 0) return [];
+
+  // Also extract airline and aircraft entity keywords from the new title
+  const newAirlines = AIRLINE_KEYWORDS.filter(k => newLc.includes(k));
+  const newAircraft = AIRCRAFT_ENTITY_KEYWORDS.filter(k => newLc.includes(k));
+  // If the new title has no airline or aircraft entity, the location+incident
+  // overlap alone is too weak to justify an LLM call — skip it entirely.
+  if (newAirlines.length === 0 && newAircraft.length === 0) return [];
 
   const matches: string[] = [];
   for (const existing of existingTitles) {
@@ -577,7 +589,12 @@ export function getLocationIncidentMatches(
     const existingIncident = INCIDENT_KEYWORDS.filter(k => existingLc.includes(k));
     const sharesLocation = newLocations.some(k => existingLocations.includes(k));
     const sharesIncident = newIncident.some(k => existingIncident.includes(k));
-    if (sharesLocation && sharesIncident) matches.push(existing);
+    if (!sharesLocation || !sharesIncident) continue;
+
+    // Require a shared airline or aircraft entity to confirm it is worth LLM adjudication
+    const sharesAirline = newAirlines.length > 0 && newAirlines.some(k => existingLc.includes(k));
+    const sharesAircraft = newAircraft.length > 0 && newAircraft.some(k => existingLc.includes(k));
+    if (sharesAirline || sharesAircraft) matches.push(existing);
   }
   return matches;
 }

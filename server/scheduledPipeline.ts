@@ -17,6 +17,7 @@ import { storyPackages, stories } from "../drizzle/schema";
 import { eq, and, sql, desc } from "drizzle-orm";
 
 const BATCH_SIZE = 5; // stories per run
+const PIPELINE_SCORE_GATE = 75; // Only pre-process stories scoring >= this — avoids paying for research on stories that will be rejected
 
 export async function scheduledPipelineHandler(req: Request, res: Response) {
   try {
@@ -32,7 +33,10 @@ export async function scheduledPipelineHandler(req: Request, res: Response) {
       return res.json({ ok: true, processed: 0, message: "No database connection" });
     }
 
-    // Find stories with queued packages, ordered by score descending
+    // Find stories with queued packages, ordered by score descending.
+    // SCORE GATE: Only process stories scoring >= PIPELINE_SCORE_GATE to avoid
+    // paying for expensive research on stories that will almost certainly be rejected.
+    // Lower-scored stories remain 'queued' and are processed on-demand when clicked.
     const queuedRows = await db
       .select({
         storyId: storyPackages.storyId,
@@ -44,13 +48,15 @@ export async function scheduledPipelineHandler(req: Request, res: Response) {
       .where(
         and(
           eq(storyPackages.processingStatus, "queued"),
-          eq(stories.approvalStatus, "pending" as any)
+          eq(stories.approvalStatus, "pending" as any),
+          sql`COALESCE(${stories.overrideScore}, ${stories.viralScore}) >= ${PIPELINE_SCORE_GATE}`
         )
       )
       .orderBy(desc(sql`COALESCE(${stories.overrideScore}, ${stories.viralScore})`))
       .limit(BATCH_SIZE);
 
-    // Also find pending stories with NO package at all and create packages for them
+    // Also find pending stories with NO package at all and create packages for them.
+    // Apply the same score gate — only create packages for stories worth pre-processing.
     const unpackagedRows = await db
       .select({ id: stories.id })
       .from(stories)
@@ -58,7 +64,8 @@ export async function scheduledPipelineHandler(req: Request, res: Response) {
       .where(
         and(
           eq(stories.approvalStatus, "pending" as any),
-          sql`${storyPackages.id} IS NULL`
+          sql`${storyPackages.id} IS NULL`,
+          sql`COALESCE(${stories.overrideScore}, ${stories.viralScore}) >= ${PIPELINE_SCORE_GATE}`
         )
       )
       .limit(20);
