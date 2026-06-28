@@ -300,20 +300,27 @@ export async function runIngestPipeline(label = "Ingest"): Promise<IngestResult>
 
   // ── Phase 1h: Rule-score (pre-filter only — no stat adjustment applied) ────
   // The rule score is used only as a cheap pre-filter to drop obvious rejects
-  // (score < 30) before spending LLM credits. The LLM apprentice scoring in
-  // Phase 2 is the authoritative score — no post-LLM stat adjustment is applied.
+  // (score < 40) before spending LLM credits. Threshold raised from 30 → 40 to
+  // filter out weak stories (listicles, routine press releases) that the LLM
+  // would score low anyway. The LLM apprentice scoring in Phase 2 is the
+  // authoritative score — no post-LLM stat adjustment is applied.
   type PendingStory = CandidateItem & { ruleScore: ReturnType<typeof scoreStory> };
   const llmCandidates: PendingStory[] = [];
 
   for (const item of dedupedCandidates) {
     const ruleScore = scoreStory(item.title, item.content);
-    if (ruleScore.score >= 30) {
+    if (ruleScore.score >= 40) {
       llmCandidates.push({ ...item, ruleScore });
     } else {
       markUrlAsSeen(item.sourceUrl, "score_below_threshold").catch(() => {});
       skippedCount++;
     }
   }
+
+  // Sort by category so each batch of 10 is as category-homogeneous as possible.
+  // batchScoreStoriesWithLLM builds its override-example context from the first
+  // story's category — homogeneous batches mean all 10 stories get relevant examples.
+  llmCandidates.sort((a, b) => (a.ruleScore.category ?? "").localeCompare(b.ruleScore.category ?? ""));
 
   // ── Phase 2: Batch LLM scoring ────────────────────────────────────────────
   const llmScoredStories: Array<PendingStory & {

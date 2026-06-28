@@ -435,7 +435,7 @@ export async function scoreStoryWithLLM(
 
   try {
     const { systemPrompt, exampleTitles } = await buildScoringContext(title, ruleResult.category);
-    const truncatedContent = content?.slice(0, 1200) ?? "";
+    const truncatedContent = content?.slice(0, 800) ?? ""; // 800 chars matches batch scoring — sufficient for LLM to understand the story
     const userMessage = `Score this aviation story:\n\nTitle: "${title}"\n\nContent excerpt: "${truncatedContent}"`;
 
     // ── Pass 1: 8B model (cheap) ──────────────────────────────────────────
@@ -875,7 +875,7 @@ export async function learnFromOverrides(): Promise<{ success: boolean; summary:
     };
   }
 
-  const historicalPostsData = await getHistoricalPosts(100);
+  const historicalPostsData = await getHistoricalPosts(30); // 30 is sufficient — top 10 performers is all the philosophy needs
   const postsWithMetrics = historicalPostsData.filter(p => (p.views ?? 0) > 0 || (p.likes ?? 0) > 0 || (p.shares ?? 0) > 0);
   const rankedPosts = postsWithMetrics
     .map(p => ({ ...p, _perf: calculatePerformanceScore(p) }))
@@ -899,7 +899,7 @@ export async function learnFromOverrides(): Promise<{ success: boolean; summary:
     .join("\n\n");
 
   const instagramText = rankedPosts.length > 0
-    ? `\n\n## Real FlightDrama Instagram Performance (secondary context)\nTOP PERFORMERS:\n${rankedPosts.slice(0, 15).map((p, i) => {
+    ? `\n\n## Real FlightDrama Instagram Performance (secondary context)\nTOP PERFORMERS:\n${rankedPosts.slice(0, 10).map((p, i) => {
         const stats = [p.views ? `${Math.round(p.views/1000)}k views` : null, p.likes ? `${p.likes} likes` : null].filter(Boolean).join(" | ");
         return `#${i+1} "${p.headline}" | ${p.category ?? "unknown"} | ${stats}`;
       }).join("\n")}`
