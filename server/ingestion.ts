@@ -84,6 +84,15 @@ export const DEFAULT_RSS_SOURCES = [
   { name: "GNews: Airport Chaos", url: "https://news.google.com/rss/search?q=airport+chaos+flight+cancelled&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
   { name: "GNews: NTSB", url: "https://news.google.com/rss/search?q=NTSB+aviation&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
   { name: "GNews: FAA Safety", url: "https://news.google.com/rss/search?q=FAA+aviation+safety&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
+  // Additional targeted incident searches — catches stories missed by broader terms
+  { name: "GNews: Emergency Landing", url: "https://news.google.com/rss/search?q=emergency+landing+aircraft&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
+  { name: "GNews: Engine Fire", url: "https://news.google.com/rss/search?q=engine+fire+aircraft+OR+plane&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
+  { name: "GNews: Runway Excursion", url: "https://news.google.com/rss/search?q=runway+excursion+OR+runway+overrun&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
+  { name: "GNews: Turbulence Injuries", url: "https://news.google.com/rss/search?q=turbulence+injuries+flight&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
+  { name: "GNews: Unruly Passenger", url: "https://news.google.com/rss/search?q=unruly+passenger+flight+OR+airline&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
+  { name: "GNews: Airline Bankruptcy", url: "https://news.google.com/rss/search?q=airline+bankruptcy+OR+airline+collapse&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
+  { name: "GNews: Bird Strike", url: "https://news.google.com/rss/search?q=bird+strike+aircraft+OR+plane&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
+  { name: "GNews: Near Miss", url: "https://news.google.com/rss/search?q=near+miss+aircraft+OR+planes+collision&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
 
   // ── TIER 6: MAINSTREAM VIRAL SOURCES ─────────────────────────────────────
   // General news — strict aviation keyword gate applied.
@@ -215,11 +224,15 @@ export function isAviationRelevant(title: string, content: string, category: str
     return true;
   }
 
-  // Viral/mainstream sources: check the TITLE ONLY against strict aviation keywords.
-  // We check title only (not content) to avoid false positives from buried mentions
-  // like "cabin" in "Cabinet reshuffle" or "lax" in "relaxed attitude".
+  // Viral/mainstream sources: check the TITLE first, then the opening 300 chars of
+  // the article body (the lede). This catches stories with vague headlines like
+  // "Passengers describe chaos on board" where the aviation context is in the first
+  // sentence. We limit to 300 chars to avoid false positives from buried mentions
+  // deep in unrelated articles (e.g. "cabin" in a Cabinet reshuffle piece).
   const titleLower = title.toLowerCase();
-  return VIRAL_SOURCE_AVIATION_KEYWORDS.some((kw) => titleLower.includes(kw));
+  if (VIRAL_SOURCE_AVIATION_KEYWORDS.some((kw) => titleLower.includes(kw))) return true;
+  const bodyLede = content.slice(0, 300).toLowerCase();
+  return VIRAL_SOURCE_AVIATION_KEYWORDS.some((kw) => bodyLede.includes(kw));
 }
 
 /** How far back (in days) to accept articles from RSS feeds. */
