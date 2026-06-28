@@ -624,24 +624,24 @@ export const appRouter = router({
       }),
 
     /**
-     * Permanently dismiss a story — hides it from all views forever.
-     * Marks the URL as seen so it can NEVER be re-ingested from any source.
+     * Dismiss a story — hides it from all views forever.
+     * Marks the URL as seen so it cannot be re-ingested.
+     *
+     * Intentionally does NOT write an override score or trigger the statistical
+     * learner. Dismiss means "not today" or "not interested" — it carries no
+     * signal about story quality and should not penalise that story type in
+     * future scoring. Use Reject for stories that are genuinely bad.
      */
     dismiss: protectedProcedure
       .input(z.object({ id: z.number() }))
       .mutation(async ({ input }) => {
         const story = await getStoryById(input.id);
         await updateStoryApproval(input.id, "dismissed");
-        // Permanently block this URL — dismissed stories must never reappear
+        // Block this URL so it doesn't reappear in the feed
         if (story?.sourceUrl) await markUrlAsSeen(story.sourceUrl, "manually_dismissed");
-        // ── Learning signal: dismissals also count as score 0 ──────────────────────
-        await updateStoryOverride(input.id, 0, "reject");
-        clearStatAdjustCache();
-        setImmediate(() => {
-          learnFromOverridesStatistical().catch(err =>
-            console.warn("[StatLearn] Post-dismiss learn failed:", err)
-          );
-        });
+        // ── No learning signal ──────────────────────────────────────────────────
+        // Dismiss is a neutral action. It does not affect scorer weights,
+        // keyword penalties, or category adjustments. Only Reject does that.
         return { success: true };
       }),
 
