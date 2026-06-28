@@ -186,6 +186,31 @@ export const appRouter = router({
           ? (existingPkg.allHeadlines as string[])
           : [];
         const snapshotSelected: string | null = existingPkg?.selectedHeadline ?? null;
+        // ── Research package: skip if already complete (scheduled pipeline may have pre-processed it) ──
+        // This prevents double-billing: if the story was pre-processed automatically,
+        // we reuse that data instead of running extractResearchPackage again (1× 70B call saved).
+        const alreadyComplete = existingPkg?.processingStatus === "complete" && existingPkg?.viralAngle;
+        if (alreadyComplete) {
+          // Research is already done — just record the historical post and return.
+          // Mark as complete (no-op for status, but clears any stale error)
+          await updateStoryPackage(input.id, { processingStatus: "complete", processingError: null });
+          setImmediate(async () => {
+            try {
+              const story = await getStoryById(input.id);
+              if (!story) return;
+              await createHistoricalPost({
+                headline: story.title,
+                category: story.category ?? null,
+                viralAngle: existingPkg.viralAngle ?? null,
+                storyId: input.id,
+                sourceType: "approved_story",
+                usedHeadlineVariant: input.usedHeadlineVariant ?? "selected",
+              });
+            } catch { /* non-critical */ }
+          });
+          console.log(`[Research] Reusing existing complete package for story ${input.id} — skipping re-extraction`);
+          return { success: true };
+        }
         // Mark as processing immediately so the UI shows the spinner
         await updateStoryPackage(input.id, { processingStatus: "processing", processingError: null });
         // Fire-and-forget: run research package extraction in background after approval

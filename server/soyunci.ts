@@ -2228,36 +2228,33 @@ export async function extractResearchPackage(
     ? `PRIMARY SOURCE (read every word):\n${primarySourceText.slice(0, 28000)}`
     : `(Primary source unavailable — research from RSS snippet and secondary sources only)\nRSS CONTENT:\n${content.slice(0, 4000)}`;
 
-  // Step 2: Single LLM call — extract everything, organise, do NOT summarise or reduce
+  // Step 2: Single LLM call — pure fact extraction on 8B model.
+  // viralAngle, editorialHooks, and contradictions removed: they are not used by the
+  // writing pipeline (which runs its own extractFactMatrix) and were the only fields
+  // that genuinely needed 70B reasoning. Everything remaining is direct extraction.
+  const RESEARCH_MODEL = ENV.scoringLlmModel || "llama-3.1-8b-instant"; // 8B — 12× cheaper than 70B
   const response = await invokeLLM({
-    model: PIPELINE_MODEL,
+    model: RESEARCH_MODEL,
     messages: [
       {
         role: "system",
-        content: `You are an aviation research analyst for FlightDrama.
+        content: `You are an aviation research analyst. Your only job is to EXTRACT and ORGANISE every fact from the sources into a structured JSON package.
 
-Your job is NOT to summarise. Your job is to EXTRACT and ORGANISE every piece of information from the sources.
-
-The golden rule: when in doubt, include it. Missing one important fact is a bigger failure than extracting too much.
-
-You must produce a structured research package that a journalist can hand directly to an editor.
-
-EXTRACTION RULES:
+RULES:
 - Extract EVERY meaningful piece of information: airlines, aircraft, registrations, flight numbers, airports, routes, dates, times, passenger numbers, crew numbers, injuries, fatalities, diversions, inspections, investigations, aircraft affected, financial figures, technical details, legal developments, operational details, historical context, previous related incidents, regulatory actions, safety findings, emotional details, unusual details, surprising facts, dramatic facts, hidden details, consequences.
 - Do NOT decide what is important. Extract everything.
-- Do NOT paraphrase facts — use the exact numbers, names, dates from the source.
-- REMOVE DUPLICATE FACTS: If multiple sources mention the same fact (e.g., fleet size, aircraft age), or if it is stated multiple times in different words, merge it into ONE unique fact in the extractedInfo array.
-- STAY FOCUSED ON THE MAIN STORY: Identify the primary story. If an article includes unrelated background info (e.g., an article about MD-11s also discusses new Boeing 777 routes), place that unrelated info into "additionalContext" instead of "extractedInfo".
-- For quotes: extract verbatim. Group by who said it (airline, passengers, officials, investigators, witnesses, other).
-- For contradictions: if two sources disagree on a fact, show both versions side by side.
-- For missing info: list what is NOT yet known, NOT confirmed, or NOT publicly disclosed.
+- Do NOT paraphrase — use exact numbers, names, dates from the source.
+- REMOVE DUPLICATE FACTS: merge facts stated multiple times into ONE unique entry.
+- STAY FOCUSED ON THE MAIN STORY: put unrelated background info into "additionalContext".
+- For quotes: copy verbatim. Group by speaker type.
+- For missing info: list what is NOT yet known or confirmed.
 
-Return ONLY valid JSON with exactly these fields:
+Return ONLY valid JSON:
 {
   "storySummary": "1-2 sentences: what happened, who was involved, when and where",
   "extractedInfo": ["exact fact 1", "exact fact 2", ...],
-  "additionalContext": "Unrelated background info or secondary announcements found in the text, separated from the main story",
-  "timeline": "chronological narrative of events — use specific dates and times where available",
+  "additionalContext": "Unrelated background info separated from the main story",
+  "timeline": "chronological narrative — use specific dates and times where available",
   "quotes": {
     "airline": ["verbatim quote — source name/role"],
     "passengers": ["verbatim quote — source name if known"],
@@ -2266,9 +2263,6 @@ Return ONLY valid JSON with exactly these fields:
     "witnesses": ["verbatim quote — source name if known"],
     "other": ["verbatim quote — source name/role"]
   },
-  "editorialHooks": [
-    "Factual observation identifying interesting relationships between the extracted facts (e.g. 'FedEx is returning MD-11s while UPS retired theirs'). Do not write headlines, articles, or clickbait."
-  ],
   "storyQuality": [
     "✅ Multiple reputable sources",
     "✅ Direct quotes available",
@@ -2278,9 +2272,7 @@ Return ONLY valid JSON with exactly these fields:
   "sources": [
     { "name": "source name", "url": "url if available", "type": "primary|secondary|official|social" }
   ],
-  "contradictions": "describe any disagreements between sources, or 'None identified'",
   "missingInfo": "list what remains unknown, unconfirmed, or not yet publicly disclosed",
-  "viralAngle": "the single strongest angle from: death_accountability | passenger_outrage | safety_failure | money_scandal | pilot_crew_pay | historic_milestone | rare_aircraft | boeing_airbus_controversy | human_interest | corporate_failure | regulatory_conflict | nostalgia | hidden_fact",
   "keyEntities": "comma-separated: airlines, airports, aircraft types, registrations, key people",
   "flightNumber": "flight number (e.g. AA123) — empty string if not applicable or not mentioned",
   "route": "full route (e.g. London Heathrow to New York JFK) — empty string if not applicable",
@@ -2349,14 +2341,18 @@ Return ONLY valid JSON with exactly these fields:
       ? parsed.quotes
       : {},
     sources,
-    contradictions: parsed?.contradictions ?? "None identified",
+    // viralAngle, editorialHooks, contradictions removed from extraction —
+    // the writing pipeline derives its own angle via extractFactMatrix.
+    // These fields are kept in the interface with empty/default values for
+    // backwards compatibility with any UI code that reads them.
+    contradictions: "Not assessed",
     missingInfo: parsed?.missingInfo ?? "Not assessed",
     additionalContext: parsed?.additionalContext ?? "None identified",
-    editorialHooks: Array.isArray(parsed?.editorialHooks) ? parsed.editorialHooks : [],
+    editorialHooks: [],
     storyQuality: Array.isArray(parsed?.storyQuality) ? parsed.storyQuality : [],
     sourcesResearched,
     sourceConfirmation,
-    viralAngle: parsed?.viralAngle ?? "aviation_incident",
+    viralAngle: "aviation_incident", // placeholder — not extracted here, writing pipeline sets the real angle
     keyEntities: parsed?.keyEntities ?? "",
     flightNumber: parsed?.flightNumber ?? "",
     route: parsed?.route ?? "",
@@ -2367,6 +2363,6 @@ Return ONLY valid JSON with exactly these fields:
     publicationDate: parsed?.publicationDate ?? "",
   };
 
-  console.log(`[Soyunci] Research package complete \u2014 ${result.extractedInfo.length} facts, ${sourcesResearched} sources, angle: ${result.viralAngle}`);
+  console.log(`[Soyunci] Research package complete (8B) — ${result.extractedInfo.length} facts, ${sourcesResearched} sources`);
   return result;
 }
