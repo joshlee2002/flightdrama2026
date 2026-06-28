@@ -50,6 +50,13 @@
       "when": 1751072000000,
       "tag": "0006_scoring_method_stat_adjusted",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "5",
+      "when": 1751200000000,
+      "tag": "0007_apprentice_transparency",
+      "breakpoints": true
     }
   ]
 }

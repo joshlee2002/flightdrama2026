@@ -282,7 +282,13 @@ export async function updateStoryScores(
   statusLabel: string,
   viralReason: string,
   category: string,
-  scoringMethod: "rule_based" | "llm_assisted" | "stat_adjusted" = "rule_based"
+  scoringMethod: "rule_based" | "llm_assisted" | "stat_adjusted" = "rule_based",
+  extras?: {
+    ruleScore?: number;
+    apprenticeConfidence?: string;
+    apprenticeReasoning?: string;
+    similarExamplesUsed?: string[];
+  }
 ) {
   const db = await getDb();
   if (!db) return;
@@ -294,6 +300,10 @@ export async function updateStoryScores(
       viralReason,
       category,
       scoringMethod,
+      ...(extras?.ruleScore !== undefined ? { ruleScore: extras.ruleScore } : {}),
+      ...(extras?.apprenticeConfidence !== undefined ? { apprenticeConfidence: extras.apprenticeConfidence } : {}),
+      ...(extras?.apprenticeReasoning !== undefined ? { apprenticeReasoning: extras.apprenticeReasoning } : {}),
+      ...(extras?.similarExamplesUsed !== undefined ? { similarExamplesUsed: extras.similarExamplesUsed } : {}),
       updatedAt: new Date(),
     })
     .where(eq(stories.id, id));

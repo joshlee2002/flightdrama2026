@@ -316,6 +316,54 @@ function StoryCard({
               {story.viralExplanation || story.viralReason}
             </p>
           )}
+
+          {/* Apprentice transparency panel */}
+          {(story.apprenticeReasoning || story.apprenticeConfidence || story.ruleScore !== undefined || story.similarExamplesUsed) && (
+            <div className="mt-2 rounded-md border border-violet-500/20 bg-violet-500/5 px-2.5 py-2 space-y-1">
+              <div className="flex items-center gap-1.5 mb-1">
+                <Brain className="w-3 h-3 text-violet-400" />
+                <span className="text-[10px] font-semibold text-violet-400 uppercase tracking-wide">Apprentice</span>
+                {story.apprenticeConfidence && (
+                  <span className={`ml-auto text-[10px] font-medium px-1.5 py-0.5 rounded ${
+                    story.apprenticeConfidence === "High" ? "bg-green-500/20 text-green-400" :
+                    story.apprenticeConfidence === "Medium" ? "bg-amber-500/20 text-amber-400" :
+                    "bg-red-500/20 text-red-400"
+                  }`}>
+                    {story.apprenticeConfidence} confidence
+                  </span>
+                )}
+              </div>
+              {story.apprenticeReasoning && (
+                <p className="text-[11px] text-muted-foreground leading-relaxed">
+                  {story.apprenticeReasoning}
+                </p>
+              )}
+              {story.ruleScore !== undefined && story.ruleScore !== null && (
+                <p className="text-[10px] text-muted-foreground/60">
+                  Rule-based score (debug): {story.ruleScore}
+                </p>
+              )}
+              {story.similarExamplesUsed && (() => {
+                try {
+                  const examples = typeof story.similarExamplesUsed === "string"
+                    ? JSON.parse(story.similarExamplesUsed) as string[]
+                    : story.similarExamplesUsed as string[];
+                  if (Array.isArray(examples) && examples.length > 0) {
+                    return (
+                      <div className="text-[10px] text-muted-foreground/60">
+                        <span className="font-medium">Similar examples used:</span>{" "}
+                        {examples.slice(0, 3).map((t, i) => (
+                          <span key={i} className="italic">"{t.slice(0, 50)}{t.length > 50 ? "…" : ""}"{i < Math.min(examples.length, 3) - 1 ? ", " : ""}</span>
+                        ))}
+                        {examples.length > 3 && <span> +{examples.length - 3} more</span>}
+                      </div>
+                    );
+                  }
+                } catch { /* ignore parse errors */ }
+                return null;
+              })()}
+            </div>
+          )}
         </div>{/* end title+meta */}
         </div>{/* end row-1-left */}
       </div>{/* end card header */}

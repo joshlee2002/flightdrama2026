@@ -27,6 +27,14 @@ export interface ScoringResult {
   triggers: string[];
   /** Human-readable 1-2 sentence explanation of why this story scored the way it did. */
   viralExplanation: string;
+  /** The raw rule-based score before any LLM or stat adjustment — kept for debugging. */
+  ruleScore?: number;
+  /** How confident the apprentice was based on example coverage: High / Medium / Low */
+  apprenticeConfidence?: string;
+  /** Plain-English explanation of how past corrections influenced this score. */
+  apprenticeReasoning?: string;
+  /** Titles of the override examples used as few-shot context for this score. */
+  similarExamplesUsed?: string[];
 }
 
 // ── Stat-performance score adjustment (free, no LLM) ─────────────────────────

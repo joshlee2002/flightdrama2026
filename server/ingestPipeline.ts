@@ -40,7 +40,7 @@ const invokeLLM = _invokeLLM as unknown as (params: {
   messages: Array<{ role: "system" | "user"; content: string }>;
   maxTokens?: number;
 }) => Promise<{ choices: Array<{ message: { content: string } }> }>;
-import { scoreStory, applyStatAdjustments } from "./viralScoring";
+import { scoreStory } from "./viralScoring";
 import { batchScoreStoriesWithLLM, type BatchScoringInput } from "./llmScoring";
 import { rssSources } from "../drizzle/schema";
 import { and, eq, isNotNull, lt } from "drizzle-orm";
@@ -298,16 +298,17 @@ export async function runIngestPipeline(label = "Ingest"): Promise<IngestResult>
     await pLimit(fetchTasks, ARTICLE_CONCURRENCY);
   }
 
-  // ── Phase 1h: Rule-score ──────────────────────────────────────────────────
+  // ── Phase 1h: Rule-score (pre-filter only — no stat adjustment applied) ────
+  // The rule score is used only as a cheap pre-filter to drop obvious rejects
+  // (score < 30) before spending LLM credits. The LLM apprentice scoring in
+  // Phase 2 is the authoritative score — no post-LLM stat adjustment is applied.
   type PendingStory = CandidateItem & { ruleScore: ReturnType<typeof scoreStory> };
   const llmCandidates: PendingStory[] = [];
 
   for (const item of dedupedCandidates) {
     const ruleScore = scoreStory(item.title, item.content);
-    const adjusted = await applyStatAdjustments(ruleScore.score, ruleScore.category, item.title);
-    const adjustedRuleScore = { ...ruleScore, score: adjusted };
-    if (adjusted >= 30) {
-      llmCandidates.push({ ...item, ruleScore: adjustedRuleScore });
+    if (ruleScore.score >= 30) {
+      llmCandidates.push({ ...item, ruleScore });
     } else {
       markUrlAsSeen(item.sourceUrl, "score_below_threshold").catch(() => {});
       skippedCount++;
@@ -322,6 +323,10 @@ export async function runIngestPipeline(label = "Ingest"): Promise<IngestResult>
     finalReason: string;
     finalTriggers: string[];
     scoringMethod: "rule_based" | "llm_assisted";
+    finalRuleScore?: number;
+    apprenticeConfidence?: string;
+    apprenticeReasoning?: string;
+    similarExamplesUsed?: string[];
   }> = [];
 
   for (let i = 0; i < llmCandidates.length; i += LLM_BATCH_SIZE) {
@@ -348,6 +353,10 @@ export async function runIngestPipeline(label = "Ingest"): Promise<IngestResult>
         finalReason: r.viralReason,
         finalTriggers: r.triggers ?? [],
         scoringMethod: r.scoringMethod,
+        finalRuleScore: (r as any).ruleScore,
+        apprenticeConfidence: (r as any).apprenticeConfidence,
+        apprenticeReasoning: (r as any).apprenticeReasoning,
+        similarExamplesUsed: (r as any).similarExamplesUsed,
       });
     }
   }
@@ -374,6 +383,10 @@ export async function runIngestPipeline(label = "Ingest"): Promise<IngestResult>
       processedAt: new Date(),
       eventFingerprint: s.eventFingerprint ?? undefined,
       contentHash: s.contentHash,
+      ruleScore: s.finalRuleScore,
+      apprenticeConfidence: s.apprenticeConfidence,
+      apprenticeReasoning: s.apprenticeReasoning,
+      similarExamplesUsed: s.similarExamplesUsed ?? undefined,
     });
 
     await createStoryPackage({ storyId, processingStatus: "queued" });

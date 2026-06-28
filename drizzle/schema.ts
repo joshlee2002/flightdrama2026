@@ -101,6 +101,15 @@ export const stories = mysqlTable("stories", {
   scoringMethod: mysqlEnum("scoringMethod", ["rule_based", "llm_assisted", "stat_adjusted"])
     .default("rule_based")
     .notNull(),
+  // Apprentice scoring transparency fields
+  // ruleScore: the original rule/stat-based score before LLM, kept for debugging comparison
+  ruleScore: int("ruleScore"),
+  // apprenticeConfidence: how confident the LLM was based on example coverage (High/Medium/Low)
+  apprenticeConfidence: varchar("apprenticeConfidence", { length: 16 }),
+  // apprenticeReasoning: plain-English explanation of how past corrections influenced this score
+  apprenticeReasoning: text("apprenticeReasoning"),
+  // similarExamplesUsed: JSON array of story titles used as few-shot examples
+  similarExamplesUsed: json("similarExamplesUsed").$type<string[]>(),
   processedAt: timestamp("processedAt"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),

@@ -48,7 +48,7 @@ import { eq, sql } from "drizzle-orm";
 import { stories } from "../drizzle/schema";
 import { fetchArticleContent, fetchRssFeed, isSimilarTitle, getLocationIncidentMatches, llmDedupCheck, isAviationRelevant, DEFAULT_RSS_SOURCES } from "./ingestion";
 import { invokeLLM } from "./_core/llm";
-import { scoreStory, clearStatAdjustCache, applyStatAdjustments } from "./viralScoring";
+import { scoreStory, clearStatAdjustCache } from "./viralScoring";
 import { scoreStoryWithLLM, batchScoreStoriesWithLLM, learnFromOverrides, learnFromOverridesStatistical, type BatchScoringInput } from "./llmScoring";
 import { runFullSoyunciPipeline, rewriteArticleOnly, runResearchAndWrite, extractResearchPackage } from "./soyunci";
 import { analysePerformance, getPerformanceInsights, analysePerformanceStatistical, getStatPerformanceInsights, analyseArticleStyle, getArticleStyleInsights, calculatePerformanceScore } from "./performanceAnalysis";
@@ -779,13 +779,10 @@ export const appRouter = router({
               continue;
             }
 
-            // ── 5. Viral scoring (with learned stat adjustments applied) ──────────
-            // Previously used plain scoreStory() which ignores all learned weights.
-            // Now applies stat adjustments so manual URLs benefit from override learning.
-            const ruleScoring = scoreStory(title, content);
-            const adjustedScore = await applyStatAdjustments(ruleScoring.score, ruleScoring.category, title);
-            const adjustedLabel: string = labelFromScore(adjustedScore);
-            const scoring = { ...ruleScoring, score: adjustedScore, statusLabel: adjustedLabel as typeof ruleScoring.statusLabel };
+            // ── 5. Viral scoring (apprentice LLM scoring — no post-LLM stat adjustment) ──
+            // Uses similarity-matched override examples as few-shot context.
+            // The LLM score is the final score; ruleScore is stored for debugging only.
+            const scoring = await scoreStoryWithLLM(title, content);
 
             // ── 6. Save story to DB ──────────────────────────────────────
             const storyId = await createStory({
@@ -802,6 +799,11 @@ export const appRouter = router({
               isDuplicate: false,
               approvalStatus: "pending",
               processedAt: new Date(),
+              scoringMethod: scoring.scoringMethod,
+              ruleScore: scoring.ruleScore,
+              apprenticeConfidence: scoring.apprenticeConfidence,
+              apprenticeReasoning: scoring.apprenticeReasoning,
+              similarExamplesUsed: scoring.similarExamplesUsed ?? undefined,
             });
 
             if (!storyId) throw new Error("Failed to retrieve new story ID");
@@ -1049,7 +1051,12 @@ export const appRouter = router({
               const scoring = results[j];
               if (!scoring) continue;
               try {
-                await updateStoryScores(story.id, scoring.score, scoring.statusLabel, scoring.viralReason, scoring.category, scoring.scoringMethod);
+                await updateStoryScores(story.id, scoring.score, scoring.statusLabel, scoring.viralReason, scoring.category, scoring.scoringMethod, {
+                  ruleScore: scoring.ruleScore,
+                  apprenticeConfidence: scoring.apprenticeConfidence,
+                  apprenticeReasoning: scoring.apprenticeReasoning,
+                  similarExamplesUsed: scoring.similarExamplesUsed,
+                });
                 await updateStoryTriggers(story.id, scoring.triggers);
                 completed++;
               } catch (err) {
@@ -1061,7 +1068,12 @@ export const appRouter = router({
             for (const { story } of batch) {
               try {
                 const scoring = await scoreStoryWithLLM(story.title, story.content || "");
-                await updateStoryScores(story.id, scoring.score, scoring.statusLabel, scoring.viralReason, scoring.category, scoring.scoringMethod);
+                await updateStoryScores(story.id, scoring.score, scoring.statusLabel, scoring.viralReason, scoring.category, scoring.scoringMethod, {
+                  ruleScore: scoring.ruleScore,
+                  apprenticeConfidence: scoring.apprenticeConfidence,
+                  apprenticeReasoning: scoring.apprenticeReasoning,
+                  similarExamplesUsed: scoring.similarExamplesUsed,
+                });
                 await updateStoryTriggers(story.id, scoring.triggers);
                 completed++;
               } catch (err2) {
@@ -1104,62 +1116,13 @@ export const appRouter = router({
         // Cache is already cleared above; the await ensures fresh weights are in DB
         // before the rerank below reads them.
 
-        // ── Step 3: Immediately rerank pending stories in the same category ─────
-        // Previously fired only after every 5 overrides. Now fires on EVERY override
-        // using fast stat adjustments (no LLM cost) so the queue re-orders instantly.
-        setImmediate(async () => {
-          try {
-            await setScoringConfig("targeted_rerank_last_at", new Date().toISOString());
-
-            // Get the category of the story that was just overridden
-            const overriddenStory = await getStoryById(input.id);
-            const targetCategory = overriddenStory?.category ?? null;
-
-            console.log(`[TargetedRerank] Triggered immediately after override — re-scoring pending stories in category: ${targetCategory ?? "all"}`);
-
-            // Fetch up to 50 pending stories in that category (or all if no category)
-            const toRerank = await getPendingStoriesByCategory(targetCategory, 50);
-
-            if (toRerank.length === 0) {
-              console.log("[TargetedRerank] No pending stories to re-score in this category");
-              return;
-            }
-
-            // ── Fast stat-only rerank (zero LLM cost, instant) ──────────────────
-            // Re-applies learned stat adjustments to the existing rule-based scores.
-            // This is instantaneous — no LLM calls — so the queue re-orders within
-            // milliseconds of the override. The LLM deep-learn still runs in the
-            // background on the 10-override / 2-hour schedule for deeper re-scoring.
-            let completed = 0;
-            for (const story of toRerank) {
-              try {
-                // Skip stories that already have a manual override — preserve editor judgement
-                if (story.overrideScore !== null && story.overrideScore !== undefined) continue;
-                // Re-apply stat adjustments to the original rule-based score
-                const baseScore = story.viralScore ?? 0;
-                const adjustedScore = await applyStatAdjustments(baseScore, story.category ?? "General Aviation", story.title);
-                if (adjustedScore !== baseScore) {
-                  // Derive label from adjusted score
-                  const newLabel: string = labelFromScore(adjustedScore);
-                  await updateStoryScores(
-                    story.id,
-                    adjustedScore,
-                    newLabel,
-                    story.viralReason ?? "",
-                    story.category ?? "General Aviation",
-                    "stat_adjusted"
-                  );
-                  completed++;
-                }
-              } catch (err) {
-                console.error(`[TargetedRerank] Failed to update story ${story.id}:`, err);
-              }
-            }
-            console.log(`[TargetedRerank] Stat-adjusted ${completed}/${toRerank.length} stories in category: ${targetCategory ?? "all"} (instant, no LLM)`);
-          } catch (err) {
-            console.warn("[TargetedRerank] Failed:", err);
-          }
-        });
+        // ── Step 3: Stat-adjustment rerank REMOVED ──────────────────────────────────
+        // The old approach re-applied applyStatAdjustments() to pending stories after
+        // every override, silently overwriting LLM scores with keyword math.
+        // This is now removed. The next time a story is scored (via ingest or manual
+        // rescore), it will use the updated override examples as few-shot context.
+        // The statistical learner (Step 2 above) still runs to keep the light-guidance
+        // signals fresh for the prompt, but it no longer forces score changes directly.
 
         // ── Override-driven feed regeneration ─────────────────────────────────
         // If the editor significantly boosts (≥70) or rejects (≤30) a story,

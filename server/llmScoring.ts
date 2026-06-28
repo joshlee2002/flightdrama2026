@@ -5,29 +5,34 @@
  *
  * 1. scoreStoryWithLLM()
  *    Scores a story using the LLM. Injects:
- *    - The editor's recent override history as few-shot examples
- *    - Any learned scoring rules stored in scoring_config (from either learner)
+ *    - The editor's most RELEVANT override history as few-shot examples
+ *      (category-matched + most instructive corrections, not just most recent)
+ *    - A plain-English editorial philosophy derived from all override history
+ *    - Instagram performance data as secondary context
  *    Falls back to rule-based scoring if the LLM call fails.
+ *    NOTE: applyStatAdjustments() is NO LONGER applied post-LLM.
+ *          The LLM score is the final score. The rule-based score is stored
+ *          separately in ruleScore for debugging and comparison only.
  *
  * 2. learnFromOverridesStatistical()   ← FREE, no LLM, runs automatically on every override
  *    Pure statistics: counts, averages, and keyword frequency analysis across
  *    all override history. Produces category weights and keyword boost/penalty
- *    lists that are injected into future scoring. Zero cost.
+ *    lists stored in scoring_config. Zero cost.
  *
  * 3. learnFromOverrides()              ← Uses LLM credits, call manually only
- *    Analyses all override history and asks the LLM to produce nuanced scoring
- *    rules. Stores the result in scoring_config. Only call this when you want
- *    a deep qualitative analysis — not on every override.
+ *    Analyses all override history and asks the LLM to produce a plain-English
+ *    "editorial philosophy" — a nuanced description of the editor's taste.
+ *    Replaces the old JSON weight matrix approach.
  */
 
 import { ENV } from "./_core/env";
 import { invokeLLM } from "./_core/llm";
 import { getOverrideExamplesFromDb, getAllScoringConfig, setScoringConfig, getDb, getHistoricalPosts } from "./db";
 import { calculatePerformanceScore } from "./performanceAnalysis";
-import { scoreStory, applyStatAdjustments, type ScoringResult } from "./viralScoring";
+import { scoreStory, type ScoringResult } from "./viralScoring";
 import { labelFromScore } from "@shared/const";
 import { stories } from "../drizzle/schema";
-import { and, desc, isNotNull, sql } from "drizzle-orm";
+import { and, desc, isNotNull, or, sql } from "drizzle-orm";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -35,53 +40,170 @@ export type LLMScoringResult = ScoringResult & {
   scoringMethod: "rule_based" | "llm_assisted";
 };
 
+// ── Similarity-based override retrieval ──────────────────────────────────────
+
+/**
+ * Extracts meaningful tokens from a title for similarity matching.
+ * Returns a set of lowercase words and bigrams, excluding stop words.
+ */
+function extractTokens(text: string): Set<string> {
+  const stopWords = new Set([
+    "the","a","an","and","or","but","in","on","at","to","for","of","with",
+    "by","from","as","is","was","are","were","be","been","have","has","had",
+    "this","that","after","over","into","not","new","first","last","says","said",
+  ]);
+  const words = text.toLowerCase().match(/\b[a-z][a-z-]{2,}\b/g) ?? [];
+  const filtered = words.filter(w => !stopWords.has(w) && w.length > 3);
+  const tokens = new Set(filtered);
+  // Add bigrams
+  for (let i = 0; i < filtered.length - 1; i++) {
+    tokens.add(`${filtered[i]} ${filtered[i + 1]}`);
+  }
+  return tokens;
+}
+
+/**
+ * Scores similarity between a new story and a past override example.
+ * Considers: category match, shared title tokens, and drift magnitude.
+ * Returns a number 0–100 (higher = more relevant to show as a few-shot example).
+ */
+function similarityScore(
+  newTitle: string,
+  newCategory: string,
+  example: { title: string | null; category: string | null; overrideScore: number | null; viralScore: number | null }
+): number {
+  let score = 0;
+
+  // Category match is the strongest signal
+  const exCat = (example.category ?? "").toLowerCase();
+  const newCat = newCategory.toLowerCase();
+  if (exCat && newCat && (exCat === newCat || exCat.includes(newCat) || newCat.includes(exCat))) {
+    score += 40;
+  }
+
+  // Token overlap in title
+  const newTokens = extractTokens(newTitle);
+  const exTokens = extractTokens(example.title ?? "");
+  let overlap = 0;
+  for (const t of newTokens) {
+    if (exTokens.has(t)) overlap++;
+  }
+  const unionSize = new Set([...newTokens, ...exTokens]).size;
+  if (unionSize > 0) {
+    score += Math.round((overlap / unionSize) * 40);
+  }
+
+  // Prefer examples with large drift (most instructive corrections)
+  const drift = Math.abs((example.overrideScore ?? 0) - (example.viralScore ?? 0));
+  score += Math.min(20, drift / 2);
+
+  return score;
+}
+
+/**
+ * Retrieves the most relevant override examples for a given story.
+ *
+ * Strategy:
+ * 1. Fetch all available overrides (up to 200).
+ * 2. Score each by similarity to the new story (category + title tokens).
+ * 3. Return the top N most relevant, ensuring a mix of recent and instructive.
+ */
+async function getRelevantOverrides(
+  title: string,
+  category: string,
+  limit = 20
+): Promise<Array<{
+  id: number;
+  title: string | null;
+  overrideScore: number | null;
+  overrideLabel: string | null;
+  viralScore: number | null;
+  category: string | null;
+  viralReason: string | null;
+  viralTriggers: string[] | null;
+  updatedAt: Date | null;
+}>> {
+  const allExamples = await getOverrideExamplesFromDb(200);
+  if (allExamples.length === 0) return [];
+
+  const now = Date.now();
+  const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
+
+  const scored = allExamples
+    .filter(e => e.overrideScore !== null && e.overrideLabel !== null)
+    .map(e => ({
+      ...e,
+      _similarity: similarityScore(title, category, e),
+      _isRecent: e.updatedAt ? (now - new Date(e.updatedAt).getTime()) < thirtyDaysMs : false,
+    }))
+    // Sort: similarity desc, then recency as tiebreaker
+    .sort((a, b) => {
+      if (b._similarity !== a._similarity) return b._similarity - a._similarity;
+      return (b._isRecent ? 1 : 0) - (a._isRecent ? 1 : 0);
+    });
+
+  return scored.slice(0, limit);
+}
+
 // ── Build scoring prompt ──────────────────────────────────────────────────────
 
-async function buildScoringContext(): Promise<{ systemPrompt: string; hasExamples: boolean }> {
-  const [examples, config, historicalPosts] = await Promise.all([
-    getOverrideExamplesFromDb(50),
+/**
+ * Builds the scoring context for a specific story.
+ *
+ * Changes from previous version:
+ * - Override examples are now SIMILARITY-MATCHED to the story being scored,
+ *   not just the 50 most recent.
+ * - The editorial philosophy (plain English) replaces the JSON weight matrix.
+ * - Instagram performance data is now SECONDARY context, not the primary signal.
+ * - Statistical signals are included as light guidance only.
+ */
+async function buildScoringContext(
+  title: string,
+  category: string
+): Promise<{
+  systemPrompt: string;
+  hasExamples: boolean;
+  exampleTitles: string[];
+}> {
+  const [relevantExamples, config, historicalPosts] = await Promise.all([
+    getRelevantOverrides(title, category, 20),
     getAllScoringConfig(),
-    getHistoricalPosts(100), // fetch real Instagram performance data
+    getHistoricalPosts(100),
   ]);
 
   // ── Score calibration: compute editor's actual distribution ──────────────
-  // The LLM tends to give 100s freely unless we anchor it to the editor's real scale.
-  // We compute the actual distribution from override history and inject it as a
-  // hard calibration constraint BEFORE the score range definitions.
+  const allExamplesForCalibration = await getOverrideExamplesFromDb(200);
   const calibrationBlock = (() => {
-    const scored = examples.filter(e => e.overrideScore !== null);
-    if (scored.length < 5) return null; // not enough data yet
+    const scored = allExamplesForCalibration.filter(e => e.overrideScore !== null);
+    if (scored.length < 5) return null;
 
     const scores = scored.map(e => e.overrideScore as number);
     const maxScore = Math.max(...scores);
     const minScore = Math.min(...scores);
     const avgScore = Math.round(scores.reduce((a, b) => a + b, 0) / scores.length);
 
-    // Distribution buckets
     const bucket0_30 = scores.filter(s => s <= 30).length;
     const bucket31_60 = scores.filter(s => s > 30 && s <= 60).length;
     const bucket61_80 = scores.filter(s => s > 60 && s <= 80).length;
     const bucket81_100 = scores.filter(s => s > 80).length;
     const pct = (n: number) => Math.round((n / scores.length) * 100);
 
-    // Find 3 anchor examples using RECENCY as the primary sort (most recent first),
-    // then score as tiebreaker. This means the anchor reflects the editor's current
-    // taste, not just the highest score they've ever given (which could be an outlier).
-    const byRecencyThenScore = (a: typeof scored[0], b: typeof scored[0]) => {
-      const aTime = a.updatedAt ? new Date(a.updatedAt).getTime() : 0;
-      const bTime = b.updatedAt ? new Date(b.updatedAt).getTime() : 0;
-      if (bTime !== aTime) return bTime - aTime; // most recent first
-      return (b.overrideScore ?? 0) - (a.overrideScore ?? 0); // then highest score
-    };
-    // High anchor: score ≥ p75 of all scores (adapts to the editor's actual scale)
     const sortedScores = [...scores].sort((a, b) => a - b);
     const p75 = sortedScores[Math.floor(sortedScores.length * 0.75)] ?? maxScore;
     const p90 = sortedScores[Math.min(Math.floor(sortedScores.length * 0.9), sortedScores.length - 1)] ?? maxScore;
-    const highThreshold = Math.max(p75, 75); // at least 75 to qualify as "high"
+    const highThreshold = Math.max(p75, 75);
+    const mustPostThreshold = Math.max(p90, 70);
+    const strongThreshold = Math.max(Math.min(mustPostThreshold - 12, 75), 55);
+
+    const byRecencyThenScore = (a: typeof scored[0], b: typeof scored[0]) => {
+      const aTime = a.updatedAt ? new Date(a.updatedAt).getTime() : 0;
+      const bTime = b.updatedAt ? new Date(b.updatedAt).getTime() : 0;
+      if (bTime !== aTime) return bTime - aTime;
+      return (b.overrideScore ?? 0) - (a.overrideScore ?? 0);
+    };
     const highEx = [...scored].filter(e => (e.overrideScore ?? 0) >= highThreshold).sort(byRecencyThenScore)[0];
     const midEx = [...scored].filter(e => (e.overrideScore ?? 0) >= 55 && (e.overrideScore ?? 0) < highThreshold).sort(byRecencyThenScore)[0];
     const lowEx = [...scored].filter(e => (e.overrideScore ?? 0) <= 35).sort((a, b) => {
-      // For low anchors: most recent first, then lowest score
       const aTime = a.updatedAt ? new Date(a.updatedAt).getTime() : 0;
       const bTime = b.updatedAt ? new Date(b.updatedAt).getTime() : 0;
       if (bTime !== aTime) return bTime - aTime;
@@ -92,19 +214,9 @@ async function buildScoringContext(): Promise<{ systemPrompt: string; hasExample
       .filter(Boolean)
       .map(e => `  Score ${e!.overrideScore}: "${(e!.title ?? "").slice(0, 70)}"`);
 
-    // Derive dynamic score range labels from editor's actual distribution.
-    // mustPostThreshold = p90 of editor scores. We do NOT hard-cap at maxScore
-    // because that would prevent the model from ever suggesting a story is
-    // exceptional — instead we use maxScore as a soft nudge in the prompt text.
-    const mustPostThreshold = Math.max(p90, 70); // never lower than 70 — let the editor's real distribution set the ceiling
-    const strongThreshold = Math.max(Math.min(mustPostThreshold - 12, 75), 55); // 55–75 range
-
-    // Soft ceiling: tell the model the editor's highest score, but frame it as
-    // "rarely" rather than "never" — this preserves the ability to score truly
-    // exceptional stories above the historical max.
     const softCeilingNote = scores.length >= 20
       ? `- Scores above ${maxScore} are very rare for this editor — only use them for genuinely exceptional, once-in-a-year stories`
-      : `- This editor's highest score so far is ${maxScore} — calibrate accordingly, but don't be afraid to go higher for a truly exceptional story`;
+      : `- This editor's highest score so far is ${maxScore} — calibrate accordingly`;
 
     return [
       `## CALIBRATION — You MUST match this editor's exact scoring scale`,
@@ -112,33 +224,30 @@ async function buildScoringContext(): Promise<{ systemPrompt: string; hasExample
       `- Score range seen so far: ${minScore}–${maxScore} | Average: ${avgScore}`,
       `- Distribution: ${pct(bucket0_30)}% score 0–30 | ${pct(bucket31_60)}% score 31–60 | ${pct(bucket61_80)}% score 61–80 | ${pct(bucket81_100)}% score 81–100`,
       softCeilingNote,
-      `- Most strong stories score ${strongThreshold}–${mustPostThreshold - 1}. Reserve ${mustPostThreshold}+ for genuinely shocking events — no more than 15% of stories should reach must_post.`,
-      `- DISTRIBUTION RULE: Do NOT cluster scores at the top. If you find yourself scoring more than 2–3 stories in a batch above ${mustPostThreshold}, you are inflating. Score lower and let the editor correct upward.`,
-      ...(anchors.length > 0 ? [`- Recent real score anchors from this editor (use these to calibrate):`, ...anchors] : []),
+      `- Most strong stories score ${strongThreshold}–${mustPostThreshold - 1}. Reserve ${mustPostThreshold}+ for genuinely shocking events.`,
+      `- DISTRIBUTION RULE: Do NOT cluster scores at the top. Score lower and let the editor correct upward.`,
+      ...(anchors.length > 0 ? [`- Recent real score anchors from this editor:`, ...anchors] : []),
       ``,
       `Score thresholds (calibrated to this editor's scale):`,
-      `- ${mustPostThreshold}–100 = must_post (exceptional — matches top performer pattern, shocking or deeply surprising)`,
-      `- ${strongThreshold}–${mustPostThreshold - 1} = strong_candidate (clear aviation drama, strong hook)`,
-      `- 50–${strongThreshold - 1} = maybe (some potential but weaker hook)`,
-      `- 0–49 = reject (routine news, no emotional hook)`,
-      `- AUTOMATIC REJECT (score 0–15): listicles, travel guides, product reviews, opinion columns with no news event, sponsored content, award announcements, any headline starting with a number followed by a noun ("16 Hotels...", "5 Reasons...").`,
+      `- ${mustPostThreshold}–100 = must_post`,
+      `- ${strongThreshold}–${mustPostThreshold - 1} = strong_candidate`,
+      `- 50–${strongThreshold - 1} = maybe`,
+      `- 0–49 = reject`,
+      `- AUTOMATIC REJECT (score 0–15): listicles, travel guides, product reviews, opinion columns, sponsored content, award announcements.`,
     ].join("\n");
   })();
 
-  const learnedRules = config["learned_scoring_rules"] ?? null;
-  const learnedWeights = config["learned_category_weights"] ?? null;
-  const learnedInsights = config["learned_editor_insights"] ?? null;
-  // Structured scoring weights from deep learner (JSON, applied as hard adjustments)
-  const structuredWeightsRaw = config["learned_structured_weights"] ?? null;
-  // Statistical learner output
-  const statWeights = config["stat_category_weights"] ?? null;
-  const statKeywordBoosts = config["stat_keyword_boosts"] ?? null;
-  const statKeywordPenalties = config["stat_keyword_penalties"] ?? null;
+  const staticScoreRanges = `Score this story RELATIVE to what a typical aviation editor would find exceptional.
+- Most aviation stories are routine. Score 50–75 for stories with a real hook but nothing extraordinary.
+- Score 85+ ONLY if this story is clearly better than a typical aviation incident.
+- Score 88+ (must_post) for no more than 15% of stories.
+- DISTRIBUTION RULE: Do NOT cluster scores at the top. Spread scores across 45–85.
+- AUTOMATIC REJECT (score 0–15): listicles, travel guides, product reviews, opinion columns, sponsored content, award announcements.`;
 
-  // ── Instagram performance data — PRIMARY SIGNAL ───────────────────────────
-  // Score every historical post by real engagement and build a ranked reference list.
-  // This is the most important context: the model should score new stories based on
-  // how similar they are to stories that ACTUALLY performed well for FlightDrama.
+  // ── Editorial philosophy (plain English, replaces JSON weight matrix) ─────
+  const editorialPhilosophy = config["editorial_philosophy"] ?? null;
+
+  // ── Instagram performance data — SECONDARY context ────────────────────────
   const postsWithMetrics = historicalPosts.filter(
     p => (p.views ?? 0) > 0 || (p.likes ?? 0) > 0 || (p.shares ?? 0) > 0
   );
@@ -147,160 +256,109 @@ async function buildScoringContext(): Promise<{ systemPrompt: string; hasExample
     .filter(p => p._perfScore > 0)
     .sort((a, b) => b._perfScore - a._perfScore);
 
-  const topPerformers = rankedPosts.slice(0, 25);
-  const bottomPerformers = rankedPosts.slice(-10);
-
-  // IMPORTANT: perf scores are labelled as engagement-rank (1–10 scale), NOT as
-  // story quality scores. This prevents the LLM from anchoring on the perf number
-  // as a target score. A story with engagement-rank 9/10 does NOT mean score it 90.
+  const topPerformers = rankedPosts.slice(0, 15);
+  const bottomPerformers = rankedPosts.slice(-8);
   const toEngagementRank = (s: number) => Math.max(1, Math.min(10, Math.round(s / 10)));
+
   const instagramBlock = topPerformers.length > 0
     ? [
-        `## GROUND TRUTH: Real FlightDrama Instagram Performance`,
-        `These are actual posts and their real engagement. Use these to understand what TOPICS and ANGLES work for this account.`,
-        `NOTE: The engagement-rank (e.g. "eng:9/10") is a relative engagement metric — it is NOT your story quality score. Do not copy these numbers into your score.`,
+        `## SECONDARY CONTEXT: Real FlightDrama Instagram Performance`,
+        `These are actual posts and their real engagement. Use these to understand what topics and angles resonate with the audience.`,
+        `NOTE: This is secondary context. Joshua's explicit score corrections (above) always take precedence over audience performance data.`,
+        `The engagement-rank (e.g. "eng:9/10") is a relative engagement metric — it is NOT your story quality score.`,
         ``,
-        `### TOP PERFORMERS (topics/angles that resonate with FlightDrama's audience):`,
+        `### TOP PERFORMERS:`,
         ...topPerformers.map((p, i) => {
           const stats = [
             p.views ? `${(p.views / 1000).toFixed(0)}k views` : null,
             p.likes ? `${p.likes.toLocaleString()} likes` : null,
-            p.shares ? `${p.shares} shares` : null,
-            p.saves ? `${p.saves} saves` : null,
           ].filter(Boolean).join(" | ");
-          return `#${i + 1} [eng:${toEngagementRank(p._perfScore)}/10] "${p.headline}"\n     Category: ${p.category ?? "unknown"} | ${stats}`;
+          return `#${i + 1} [eng:${toEngagementRank(p._perfScore)}/10] "${p.headline}" | ${p.category ?? "unknown"} | ${stats}`;
         }),
         ``,
-        `### BOTTOM PERFORMERS (topics/angles that did NOT resonate):`,
-        ...bottomPerformers.map(p => {
-          const stats = [
-            p.views ? `${(p.views / 1000).toFixed(0)}k views` : null,
-            p.likes ? `${p.likes.toLocaleString()} likes` : null,
-          ].filter(Boolean).join(" | ") || "low engagement";
-          return `[eng:${toEngagementRank(p._perfScore)}/10] "${p.headline}" | ${stats}`;
-        }),
+        `### BOTTOM PERFORMERS:`,
+        ...bottomPerformers.map(p => `[eng:${toEngagementRank(p._perfScore)}/10] "${p.headline}" | ${p.category ?? "unknown"}`),
       ].join("\n")
     : null;
 
-  // ── Editor override examples — SECONDARY SIGNAL ───────────────────────────
-  // Recency-weighted: overrides from the last 30 days count double.
+  // ── Statistical signals — light guidance only ─────────────────────────────
+  const statWeights = config["stat_category_weights"] ?? null;
+  const statKeywordBoosts = config["stat_keyword_boosts"] ?? null;
+  const statKeywordPenalties = config["stat_keyword_penalties"] ?? null;
+
+  // ── Build the examples block ──────────────────────────────────────────────
   const now = Date.now();
   const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
-  const validExamples = examples
-    .filter(e => e.overrideScore !== null && e.overrideLabel !== null)
-    .map(e => ({
-      ...e,
-      // Recency weight: recent overrides are more representative of current taste
-      _recencyWeight: e.updatedAt && (now - new Date(e.updatedAt).getTime()) < thirtyDaysMs ? 2 : 1,
-      _drift: (e.overrideScore ?? 0) - (e.viralScore ?? 0),
-    }));
 
-  // Sort: recent first, then by drift magnitude (most instructive corrections)
-  const sortedExamples = [...validExamples].sort((a, b) => {
-    if (a._recencyWeight !== b._recencyWeight) return b._recencyWeight - a._recencyWeight;
-    return Math.abs(b._drift) - Math.abs(a._drift);
-  });
-
-  const examplesBlock = sortedExamples.length > 0
-    ? sortedExamples
+  const exampleTitles: string[] = [];
+  const examplesBlock = relevantExamples.length > 0
+    ? relevantExamples
         .map((e, i) => {
-          const driftStr = e._drift > 0
-            ? `+${e._drift} (editor scored HIGHER — AI undervalued this)`
-            : e._drift < 0
-            ? `${e._drift} (editor scored LOWER — AI overvalued this)`
+          const drift = (e.overrideScore ?? 0) - (e.viralScore ?? 0);
+          const driftStr = drift > 0
+            ? `+${drift} (Joshua scored HIGHER — AI undervalued this)`
+            : drift < 0
+            ? `${drift} (Joshua scored LOWER — AI overvalued this)`
             : `0 (agreed)`;
-          const recency = e._recencyWeight === 2 ? " [recent]" : "";
-          return `${i + 1}.${recency} "${e.title}"\n   AI: ${e.viralScore} → Editor: ${e.overrideScore} (${e.overrideLabel}) | Drift: ${driftStr}\n   Category: ${e.category ?? "unknown"}`;
+          const recency = e.updatedAt && (now - new Date(e.updatedAt).getTime()) < thirtyDaysMs ? " [recent]" : "";
+          exampleTitles.push(e.title ?? "");
+          return `${i + 1}.${recency} "${e.title}"\n   AI: ${e.viralScore} → Joshua: ${e.overrideScore} (${e.overrideLabel}) | Drift: ${driftStr}\n   Category: ${e.category ?? "unknown"}`;
         })
         .join("\n\n")
     : null;
 
   // ── Build the full system prompt ──────────────────────────────────────────
-  // If we have calibration data, use it as the primary score range definition.
-  // Otherwise fall back to the static defaults.
-  const staticScoreRanges = `Score this story RELATIVE to what a typical aviation editor would find exceptional.
-- Most aviation stories are routine. Score 50–75 for stories with a real hook but nothing extraordinary.
-- Score 85+ ONLY if this story is clearly better than a typical aviation incident — a major crash, mass casualties, a famous aircraft, a shocking near-miss caught on video.
-- Score 88+ (must_post) for no more than 15% of stories. If you are unsure whether a story deserves 88+, score it 75 instead.
-- DISTRIBUTION RULE: Do NOT cluster scores at the top. A batch where most stories score 88–95 is wrong. Spread scores across 45–85.
-- 88–95 = must_post (genuinely exceptional — would make national news, high emotional impact, rare event)
-- 70–87 = strong_candidate (clear aviation drama, strong hook, above-average story)
-- 50–69 = maybe (some potential but routine for aviation news)
-- 0–49 = reject (routine news, no emotional hook, no viral angle)
-- AUTOMATIC REJECT (score 0–15): listicles, travel guides, product reviews, opinion columns with no news event, sponsored content, award announcements, any headline starting with a number followed by a noun ("16 Hotels...", "5 Reasons...").`;
+  // STRUCTURE:
+  // 1. Persona — editorial apprentice, not a generic scoring engine
+  // 2. Editor's past corrections — PRIMARY SIGNAL (most similar examples first)
+  // 3. Editorial philosophy — plain-English taste summary
+  // 4. Instagram performance — SECONDARY context
+  // 5. Statistical signals — light guidance
+  // 6. Hard scoring constraints — LAST
 
-  // ── Build the system prompt ──────────────────────────────────────────────
-  // STRUCTURE: editor override history FIRST (primary signal), then context,
-  // then hard constraints LAST.
-  //
-  // WHY: The LLM must understand the editor's taste before it sees anything else.
-  // If override examples come after Instagram data and learned rules, the LLM
-  // treats them as weak context. By putting them FIRST with explicit framing,
-  // the LLM anchors on the editor's actual corrections as its primary instruction.
+  let systemPrompt = `You are Joshua's editorial apprentice for FlightDrama, an aviation Instagram/TikTok/YouTube account.
 
-  let systemPrompt = `You are a viral content scoring engine for FlightDrama, an aviation Instagram/TikTok/YouTube account.
-Your job: score stories 0–100 for viral potential on aviation Instagram/TikTok/YouTube.
+Your ONLY goal is to predict the score Joshua would give this story, based on his past corrections.
+Do NOT use generic "aviation drama = high score" logic. Study Joshua's actual corrections and apply his specific taste.
+When Joshua has corrected similar stories before, those corrections are your most important instruction.`;
 
-Your PRIMARY INSTRUCTION is to rank stories the way THIS SPECIFIC EDITOR would rank them.
-Do not use generic "aviation drama = high score" logic. Use the editor's actual past scores as your guide.`;
-
-  // 1. Editor override history — PRIMARY SIGNAL (comes FIRST)
-  // The editor's manual corrections are the most direct signal of their taste.
-  // These must come before everything else so the LLM anchors on them.
+  // 1. Editor's past corrections — PRIMARY SIGNAL
   if (examplesBlock) {
-    systemPrompt += `\n\n## EDITOR'S PAST SCORES — YOUR PRIMARY INSTRUCTION\nStudy these carefully. This editor has manually scored these stories. Your job is to score new stories the same way they would.\n[recent] = last 30 days (most representative of current taste).\n\nPAY ATTENTION TO THE DRIFT: when the editor scored LOWER than the AI, that story was overvalued. When they scored HIGHER, it was undervalued. Learn from these corrections.\n\n${examplesBlock}\n\nIMPORTANT: Look at the range of scores above. If most of the editor's scores are in the 55–80 range, that is where most new stories should land. Do not score new stories higher than the editor's typical range unless the story is clearly exceptional by comparison.`;
+    systemPrompt += `\n\n## JOSHUA'S PAST CORRECTIONS — YOUR PRIMARY INSTRUCTION
+These are the most relevant stories Joshua has already scored. They are selected because they are similar to the story you are about to score.
+[recent] = last 30 days (most representative of current taste).
+
+PAY ATTENTION TO THE DRIFT: when Joshua scored LOWER than the AI, the AI overvalued that type of story. When he scored HIGHER, the AI undervalued it. Apply this directly to the new story.
+
+${examplesBlock}
+
+CRITICAL: Look at the range of scores above. If Joshua's corrections cluster in the 45–70 range for similar stories, the new story should land there too unless it is clearly exceptional. Do NOT score above Joshua's typical range for this story type unless the new story is genuinely more dramatic.`;
   }
 
-  // 2. Instagram performance data — CONTEXT (what topics/angles work)
+  // 2. Editorial philosophy — plain English taste summary
+  if (editorialPhilosophy) {
+    systemPrompt += `\n\n## JOSHUA'S EDITORIAL PHILOSOPHY (derived from all his corrections)
+${editorialPhilosophy}`;
+  }
+
+  // 3. Instagram performance — SECONDARY context
   if (instagramBlock) {
     systemPrompt += `\n\n${instagramBlock}`;
   }
 
-  // 3. Structured weights from deep learner
-  if (structuredWeightsRaw) {
-    try {
-      const sw = JSON.parse(structuredWeightsRaw);
-      const lines: string[] = [];
-      if (sw.category_boosts) {
-        const boosts = Object.entries(sw.category_boosts as Record<string, number>)
-          .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
-          .map(([cat, adj]) => `  ${cat}: ${adj > 0 ? "+" : ""}${adj}`);
-        if (boosts.length) lines.push(`Category adjustments (from ${sw.examples_used ?? "?"} overrides):\n${boosts.join("\n")}`);
-      }
-      if (sw.keyword_boosts) {
-        const boosts = Object.entries(sw.keyword_boosts as Record<string, number>)
-          .sort((a, b) => b[1] - a[1]).slice(0, 15)
-          .map(([kw, adj]) => `${kw}(+${adj})`);
-        if (boosts.length) lines.push(`Keywords to score HIGHER: ${boosts.join(", ")}`);
-      }
-      if (sw.keyword_penalties) {
-        const penalties = Object.entries(sw.keyword_penalties as Record<string, number>)
-          .sort((a, b) => a[1] - b[1]).slice(0, 10)
-          .map(([kw, adj]) => `${kw}(${adj})`);
-        if (penalties.length) lines.push(`Keywords to score LOWER: ${penalties.join(", ")}`);
-      }
-      if (sw.editor_notes) lines.push(`Editor taste notes: ${sw.editor_notes}`);
-      if (lines.length) {
-        systemPrompt += `\n\n## Learned Editor Preferences (from ${sw.examples_used ?? "?"} override corrections)\n${lines.join("\n")}`;
-      }
-    } catch { /* ignore malformed JSON */ }
-  } else {
-    if (learnedRules) systemPrompt += `\n\n## Learned Scoring Rules\n${learnedRules}`;
-    if (learnedWeights) systemPrompt += `\n\n## Learned Category Weights\n${learnedWeights}`;
-    if (learnedInsights) systemPrompt += `\n\n## Editor Preferences\n${learnedInsights}`;
-  }
-
-  // 4. Statistical learner output
+  // 4. Statistical signals — light guidance
   if (statWeights || statKeywordBoosts || statKeywordPenalties) {
-    systemPrompt += `\n\n## Statistical Signals (from override history)`;
-    if (statWeights) systemPrompt += `\nCategory score adjustments: ${statWeights}`;
-    if (statKeywordBoosts) systemPrompt += `\nKeywords editor consistently scores HIGHER: ${statKeywordBoosts}`;
-    if (statKeywordPenalties) systemPrompt += `\nKeywords editor consistently scores LOWER: ${statKeywordPenalties}`;
+    systemPrompt += `\n\n## Statistical Patterns (light guidance — Joshua's corrections above take precedence)`;
+    if (statWeights) systemPrompt += `\nCategory tendencies: ${statWeights}`;
+    if (statKeywordBoosts) systemPrompt += `\nKeywords Joshua tends to score HIGHER: ${statKeywordBoosts}`;
+    if (statKeywordPenalties) systemPrompt += `\nKeywords Joshua tends to score LOWER: ${statKeywordPenalties}`;
   }
 
-  // 5. HARD SCORING CONSTRAINTS — these come LAST so they override everything above
-  // The LLM must use these exact score ranges regardless of what the context suggests.
-  systemPrompt += `\n\n## SCORING RULES (MANDATORY)\n${calibrationBlock ?? staticScoreRanges}\n- CRITICAL: The engagement ranks (eng:X/10) in the Instagram data above are engagement metrics, NOT score targets. Do not copy them into your score.\n- CRITICAL: A score of 100 means a once-in-a-year story. Do not give 100 unless the story is genuinely unprecedented.\n- DISTRIBUTION RULE: Do NOT cluster scores at the top. If you are scoring a batch of stories and most are coming out above 85, you are inflating. Most aviation stories should score 50–75. Score 85+ only when the story is clearly exceptional compared to the editor's past scores above.\n- WHEN IN DOUBT: Score LOWER. The editor will correct you upward if needed. It is better to score 65 and be corrected to 80 than to score 90 and have the editor correct you down every single time.`;
+  // 5. Hard scoring constraints — LAST
+  systemPrompt += `\n\n## SCORING RULES (MANDATORY)\n${calibrationBlock ?? staticScoreRanges}
+- CRITICAL: The engagement ranks (eng:X/10) in the Instagram data above are engagement metrics, NOT score targets. Do not copy them into your score.
+- CRITICAL: A score of 100 means a once-in-a-year story. Do not give 100 unless the story is genuinely unprecedented.
+- WHEN IN DOUBT: Score LOWER. Joshua will correct you upward if needed.`;
 
   systemPrompt += `\n\nRespond ONLY with a valid JSON object in this exact format:
 {
@@ -308,31 +366,39 @@ Do not use generic "aviation drama = high score" logic. Use the editor's actual 
   "statusLabel": "<must_post|strong_candidate|maybe|reject>",
   "category": "<category string>",
   "viralReason": "<one sentence explanation of the score>",
-  "viralExplanation": "<two to three sentences explaining WHY this would or would not go viral — what emotional hook, what audience reaction, what makes it shareable or not>",
-  "triggers": ["<trigger 1>", "<trigger 2>"]
+  "viralExplanation": "<two to three sentences explaining WHY this would or would not go viral>",
+  "triggers": ["<trigger 1>", "<trigger 2>"],
+  "apprenticeConfidence": "<High|Medium|Low — High if 3+ very similar past corrections exist, Low if no similar examples>",
+  "apprenticeReasoning": "<one to two sentences explaining how Joshua's past corrections influenced this specific score>"
 }`;
 
-  return { systemPrompt, hasExamples: topPerformers.length > 0 || examples.length > 0 || !!learnedRules };
+  return {
+    systemPrompt,
+    hasExamples: relevantExamples.length > 0,
+    exampleTitles,
+  };
 }
 
 // ── Score a single story ──────────────────────────────────────────────────────
 
 /**
- * Score a story using the LLM with learned rules + override examples as context.
+ * Score a story using the LLM with similarity-matched override examples as context.
+ *
+ * Key changes:
+ * - applyStatAdjustments() is NO LONGER called post-LLM. The LLM score is final.
+ * - The rule-based score is stored in ruleScore for debugging only.
+ * - Override examples are similarity-matched to the story being scored.
+ * - The LLM returns apprenticeConfidence and apprenticeReasoning for transparency.
  *
  * Two-tier model strategy:
  * - Initial pass: llama-3.1-8b-instant (fast, cheap)
- * - Safety net: if 8B scores ≥ 75, verify with llama-3.3-70b-versatile to ensure
- *   no viral story is missed due to the smaller model underestimating it.
- *
- * Falls back to rule-based scoring if both LLM calls fail.
+ * - Safety net: if 8B scores ≥ 75, verify with llama-3.3-70b-versatile
  */
 export async function scoreStoryWithLLM(
   title: string,
   content: string
 ): Promise<LLMScoringResult> {
   const ruleResult = scoreStory(title, content);
-  // Scoring model: 8B for cost efficiency; 70B as safety net for high scorers
   const scoringModel = ENV.scoringLlmModel || ENV.defaultLlmModel || "llama-3.1-8b-instant";
   const verifyModel = ENV.defaultLlmModel || "llama-3.3-70b-versatile";
 
@@ -348,6 +414,8 @@ export async function scoreStoryWithLLM(
         viralReason: string;
         triggers: string[];
         viralExplanation?: string;
+        apprenticeConfidence?: string;
+        apprenticeReasoning?: string;
       };
       const validLabels = ["must_post", "strong_candidate", "maybe", "reject"];
       if (
@@ -358,9 +426,6 @@ export async function scoreStoryWithLLM(
       ) return null;
       // Hard structural cap: the LLM can never produce a score above 95.
       // A score of 96-100 can only come from a manual editor override.
-      // This is enforced in code, not in the prompt, so no prompt instruction
-      // can bypass it. The post-processing layer (applyStatAdjustments) can
-      // push a 95 higher if the editor's learned weights genuinely justify it.
       parsed.score = Math.min(95, parsed.score);
       return parsed;
     } catch {
@@ -369,11 +434,11 @@ export async function scoreStoryWithLLM(
   };
 
   try {
-    const { systemPrompt } = await buildScoringContext();
+    const { systemPrompt, exampleTitles } = await buildScoringContext(title, ruleResult.category);
     const truncatedContent = content?.slice(0, 1200) ?? "";
     const userMessage = `Score this aviation story:\n\nTitle: "${title}"\n\nContent excerpt: "${truncatedContent}"`;
 
-    // ── Pass 1: 8B model (cheap) ──────────────────────────────────────────────────────────────────────────────
+    // ── Pass 1: 8B model (cheap) ──────────────────────────────────────────
     const response8b = await invokeLLM({
       model: scoringModel,
       messages: [
@@ -387,13 +452,15 @@ export async function scoreStoryWithLLM(
 
     if (!parsed8b) {
       console.warn("[LLMScoring] 8B model returned invalid response, falling back to rule-based");
-      const statAdjustedScore = await applyStatAdjustments(ruleResult.score, ruleResult.category, title);
-      return { ...ruleResult, score: statAdjustedScore, scoringMethod: "rule_based" };
+      // Fallback: use rule score as-is (no stat adjustment applied)
+      return {
+        ...ruleResult,
+        ruleScore: ruleResult.score,
+        scoringMethod: "rule_based",
+      };
     }
 
-    // ── Pass 2: 70B safety net for potential viral stories ────────────────────
-    // If the 8B model scores a story ≥ 75, verify with the full 70B model.
-    // This ensures no viral story is ever missed due to the smaller model.
+    // ── Pass 2: 70B safety net for potential viral stories ────────────────
     if (parsed8b.score >= 75 && scoringModel !== verifyModel) {
       try {
         console.log(`[LLMScoring] 8B scored "${title.slice(0, 60)}" at ${parsed8b.score} — running 70B safety check`);
@@ -407,54 +474,54 @@ export async function scoreStoryWithLLM(
         const raw70b = String(response70b?.choices?.[0]?.message?.content ?? "");
         const parsed70b = parseScoringResponse(raw70b, ruleResult);
         if (parsed70b) {
-          // 70B is the authoritative model — its score is the final answer.
-          // The 8B pass was a cheap first filter; the 70B has better calibration
-          // and better instruction-following. We do NOT take max(8B, 70B) because
-          // that would permanently lock in any 8B inflation (e.g. 100s).
-          // If 70B says 85 and 8B said 100, we trust 70B: the story scores 85.
           const llmCategory = parsed70b.category ?? ruleResult.category;
-          const llmScore = Math.round(parsed70b.score); // already capped at 95 by parseScoringResponse
-          const statAdjustedRaw = await applyStatAdjustments(llmScore, llmCategory, title);
-          const statAdjustedScore = Math.min(95, statAdjustedRaw); // AI_MAX_SCORE: stat adjustments cannot push AI score above 95
-          // Derive label from final score — never trust the LLM's label
-          const derivedLabel70b = labelFromScore(statAdjustedScore) as ScoringResult["statusLabel"];
-          console.log(`[LLMScoring] 70B override: 8B=${parsed8b.score} → 70B=${llmScore} stat=${statAdjustedScore} label=${derivedLabel70b}`);
+          const llmScore = Math.round(parsed70b.score);
+          const derivedLabel70b = labelFromScore(llmScore) as ScoringResult["statusLabel"];
+          console.log(`[LLMScoring] 70B result: 8B=${parsed8b.score} → 70B=${llmScore} label=${derivedLabel70b}`);
           return {
-            score: statAdjustedScore,
+            score: llmScore,
             statusLabel: derivedLabel70b,
             category: llmCategory,
             viralReason: parsed70b.viralReason ?? ruleResult.viralReason,
             triggers: Array.isArray(parsed70b.triggers) ? parsed70b.triggers : ruleResult.triggers,
             viralExplanation: parsed70b.viralExplanation ?? ruleResult.viralExplanation,
+            ruleScore: ruleResult.score,
+            apprenticeConfidence: parsed70b.apprenticeConfidence ?? "Medium",
+            apprenticeReasoning: parsed70b.apprenticeReasoning,
+            similarExamplesUsed: exampleTitles.slice(0, 5),
             scoringMethod: "llm_assisted",
           };
         }
       } catch (verifyErr) {
-        // 70B verification failed — use 8B result, which is already ≥ 75 so story is kept
         console.warn("[LLMScoring] 70B safety check failed, using 8B result:", verifyErr);
       }
     }
 
-    // ── Use 8B result (no verification needed or verification skipped) ────────
+    // ── Use 8B result ─────────────────────────────────────────────────────
     const llmCategory = parsed8b.category ?? ruleResult.category;
-    const llmScore = Math.round(parsed8b.score); // already capped at 95 by parseScoringResponse
-    const statAdjustedRaw8b = await applyStatAdjustments(llmScore, llmCategory, title);
-    const statAdjustedScore = Math.min(95, statAdjustedRaw8b); // AI_MAX_SCORE: stat adjustments cannot push AI score above 95
-    // Derive label from final score — never trust the LLM's label
-    const derivedLabel8b = labelFromScore(statAdjustedScore) as ScoringResult["statusLabel"];
+    const llmScore = Math.round(parsed8b.score);
+    const derivedLabel8b = labelFromScore(llmScore) as ScoringResult["statusLabel"];
     return {
-      score: statAdjustedScore,
+      score: llmScore,
       statusLabel: derivedLabel8b,
       category: llmCategory,
       viralReason: parsed8b.viralReason ?? ruleResult.viralReason,
       triggers: Array.isArray(parsed8b.triggers) ? parsed8b.triggers : ruleResult.triggers,
       viralExplanation: parsed8b.viralExplanation ?? ruleResult.viralExplanation,
+      ruleScore: ruleResult.score,
+      apprenticeConfidence: parsed8b.apprenticeConfidence ?? "Medium",
+      apprenticeReasoning: parsed8b.apprenticeReasoning,
+      similarExamplesUsed: exampleTitles.slice(0, 5),
       scoringMethod: "llm_assisted",
     };
   } catch (err) {
     console.error("[LLMScoring] Error calling LLM, falling back to rule-based:", err);
-    const statAdjustedFallback = await applyStatAdjustments(ruleResult.score, ruleResult.category, title);
-    return { ...ruleResult, score: Math.min(95, statAdjustedFallback), scoringMethod: "rule_based" }; // AI_MAX_SCORE cap
+    // Fallback: use rule score as-is (no stat adjustment)
+    return {
+      ...ruleResult,
+      ruleScore: ruleResult.score,
+      scoringMethod: "rule_based",
+    };
   }
 }
 
@@ -469,12 +536,11 @@ export type BatchScoringInput = {
 /**
  * Score up to 10 stories in a single LLM call.
  *
- * This is the primary cost optimisation — instead of one API call per story
- * (each paying the system prompt overhead), we send up to 10 stories in one
- * call and pay the overhead once. Quality is identical to single-story scoring.
- *
- * Stories where the 8B model scores ≥ 75 are individually verified with the
- * 70B model as a safety net — the same guarantee as scoreStoryWithLLM().
+ * Key changes:
+ * - applyStatAdjustments() is NO LONGER called post-LLM.
+ * - Each story in the batch uses the shared context built from the first story's
+ *   category. For batches with mixed categories, individual scoring is preferred.
+ * - The LLM returns apprenticeConfidence and apprenticeReasoning per story.
  */
 export async function batchScoreStoriesWithLLM(
   stories: BatchScoringInput[]
@@ -484,14 +550,19 @@ export async function batchScoreStoriesWithLLM(
   const scoringModel = ENV.scoringLlmModel || ENV.defaultLlmModel || "llama-3.1-8b-instant";
   const verifyModel = ENV.defaultLlmModel || "llama-3.3-70b-versatile";
 
-  // Build the shared context once for the whole batch
-  const { systemPrompt } = await buildScoringContext();
+  // Build context using the first story's title/category as the anchor.
+  // This gives the best coverage for homogeneous batches (same ingest run).
+  const firstStory = stories[0];
+  const { systemPrompt, exampleTitles } = await buildScoringContext(
+    firstStory.title,
+    firstStory.ruleScore.category
+  );
 
   // Modify system prompt for batch output
-    const batchSystemPrompt = systemPrompt.replace(
+  const batchSystemPrompt = systemPrompt.replace(
     /Respond ONLY with a valid JSON object[\s\S]*/,
     `Respond ONLY with a valid JSON array of ${stories.length} objects, one per story, in the same order as the input. Each object must have:
-{ "score": <integer 0-100>, "statusLabel": "<must_post|strong_candidate|maybe|reject>", "category": "<category>", "viralReason": "<one sentence>", "viralExplanation": "<two to three sentences on why it would or would not go viral>", "triggers": ["<trigger 1>", "<trigger 2>"] }
+{ "score": <integer 0-100>, "statusLabel": "<must_post|strong_candidate|maybe|reject>", "category": "<category>", "viralReason": "<one sentence>", "viralExplanation": "<two to three sentences>", "triggers": ["<trigger 1>", "<trigger 2>"], "apprenticeConfidence": "<High|Medium|Low>", "apprenticeReasoning": "<one sentence on how past corrections influenced this score>" }
 Return ONLY the JSON array. No other text.`
   );
 
@@ -514,7 +585,6 @@ Return ONLY the JSON array. No other text.`
     const jsonMatch = raw.match(/\[[\s\S]*\]/);
     if (!jsonMatch) {
       console.warn("[LLMScoring] Batch: no JSON array in response, falling back to individual scoring");
-      // Fall back to individual scoring for each story
       return Promise.all(stories.map(s => scoreStoryWithLLM(s.title, s.content)));
     }
 
@@ -524,6 +594,9 @@ Return ONLY the JSON array. No other text.`
       category: string;
       viralReason: string;
       triggers: string[];
+      viralExplanation?: string;
+      apprenticeConfidence?: string;
+      apprenticeReasoning?: string;
     }>;
 
     if (!Array.isArray(parsedArray) || parsedArray.length !== stories.length) {
@@ -545,40 +618,40 @@ Return ONLY the JSON array. No other text.`
         p.score > 100 ||
         !validLabels.includes(p.statusLabel)
       ) {
-        // Invalid entry — fall back to rule-based for this story
-        const statAdjusted = await applyStatAdjustments(s.ruleScore.score, s.ruleScore.category, s.title);
-        results.push({ ...s.ruleScore, score: statAdjusted, scoringMethod: "rule_based" });
+        // Invalid entry — fall back to rule-based for this story (no stat adjustment)
+        results.push({
+          ...s.ruleScore,
+          ruleScore: s.ruleScore.score,
+          scoringMethod: "rule_based",
+        });
         continue;
       }
 
       // 70B safety net for high-scoring stories
-      // The 70B result is authoritative — it replaces the 8B batch score entirely.
-      // We do NOT use max(8B, 70B) because that locks in 8B inflation.
       if (p.score >= 75 && scoringModel !== verifyModel) {
         try {
           const verified = await scoreStoryWithLLM(s.title, s.content);
-          // Always use the 70B result (scoreStoryWithLLM uses 70B for ≥75 stories)
           results.push(verified);
           continue;
         } catch {
-          // Verification failed — use batch result (already ≥ 75, story is kept)
+          // Verification failed — use batch result
         }
       }
 
       const llmCategory = p.category ?? s.ruleScore.category;
-      // Hard cap at 95 — same as single-story path. 96-100 = manual override only.
       const llmScore = Math.min(95, Math.round(p.score));
-      const statAdjustedScore = await applyStatAdjustments(llmScore, llmCategory, s.title);
-      // Derive statusLabel from the final score in code — never trust the LLM's label.
-      // This ensures score and label are always consistent (no 100 in Strong section).
-      const derivedLabel = labelFromScore(statAdjustedScore) as ScoringResult["statusLabel"];
+      const derivedLabel = labelFromScore(llmScore) as ScoringResult["statusLabel"];
       results.push({
-        score: statAdjustedScore,
+        score: llmScore,
         statusLabel: derivedLabel,
         category: llmCategory,
         viralReason: p.viralReason ?? s.ruleScore.viralReason,
         triggers: Array.isArray(p.triggers) ? p.triggers : s.ruleScore.triggers,
-        viralExplanation: (p as any).viralExplanation ?? s.ruleScore.viralExplanation,
+        viralExplanation: p.viralExplanation ?? s.ruleScore.viralExplanation,
+        ruleScore: s.ruleScore.score,
+        apprenticeConfidence: p.apprenticeConfidence ?? "Medium",
+        apprenticeReasoning: p.apprenticeReasoning,
+        similarExamplesUsed: exampleTitles.slice(0, 5),
         scoringMethod: "llm_assisted",
       });
     }
@@ -595,18 +668,7 @@ Return ONLY the JSON array. No other text.`
 /**
  * Analyses all editor overrides using pure statistics — no LLM, no cost.
  * Runs automatically after every override (debounced to 30 seconds).
- *
- * What it computes:
- * 1. Category bias: for each category, how much does the editor consistently
- *    score above or below the rule-based system? (e.g. "Boeing Safety: +12 avg")
- * 2. Keyword boosts: words that appear frequently in stories the editor scored
- *    significantly higher than the rule-based system.
- * 3. Keyword penalties: words that appear frequently in stories the editor
- *    scored significantly lower.
- * 4. Score drift summary: overall tendency (does the editor score higher or lower
- *    than the rules on average?)
- *
- * Results are stored in scoring_config and injected into future LLM scoring prompts.
+ * Results are stored in scoring_config and used as light guidance in the prompt.
  */
 export async function learnFromOverridesStatistical(): Promise<{
   success: boolean;
@@ -616,20 +678,21 @@ export async function learnFromOverridesStatistical(): Promise<{
   const db = await getDb();
   if (!db) return { success: false, summary: "Database not available", examplesUsed: 0 };
 
-  // Fetch all override examples (no limit — we want the full history)
+  const { stories: storiesTable } = await import("../drizzle/schema");
+
   const examples = await db
     .select({
-      title: stories.title,
-      content: stories.content,
-      overrideScore: stories.overrideScore,
-      overrideLabel: stories.overrideLabel,
-      viralScore: stories.viralScore,
-      category: stories.category,
-      viralReason: stories.viralReason,
+      title: storiesTable.title,
+      content: storiesTable.content,
+      overrideScore: storiesTable.overrideScore,
+      overrideLabel: storiesTable.overrideLabel,
+      viralScore: storiesTable.viralScore,
+      category: storiesTable.category,
+      viralReason: storiesTable.viralReason,
     })
-    .from(stories)
-    .where(and(isNotNull(stories.overrideScore), isNotNull(stories.overrideLabel)))
-    .orderBy(desc(stories.updatedAt))
+    .from(storiesTable)
+    .where(and(isNotNull(storiesTable.overrideScore), isNotNull(storiesTable.overrideLabel)))
+    .orderBy(desc(storiesTable.updatedAt))
     .limit(200);
 
   if (examples.length < 3) {
@@ -641,14 +704,6 @@ export async function learnFromOverridesStatistical(): Promise<{
   }
 
   // ── 1. Category bias analysis ─────────────────────────────────────────────
-  // Track the editor's ABSOLUTE preferred score per category, then compare to
-  // the overall average preferred score. This correctly identifies which categories
-  // the editor genuinely prefers vs dislikes — NOT how much they differ from the AI.
-  //
-  // Example: if editor gives Celebrity stories avg 70 and overall avg is 55,
-  // Celebrity gets +15 (editor likes it). This is correct.
-  // Old approach: if AI scored Celebrity 90 and editor said 70, it recorded -20
-  // ("editor dislikes Celebrity") — WRONG.
   const categoryScores: Record<string, { totalScore: number; count: number }> = {};
   let totalEditorScore = 0;
   let totalEditorCount = 0;
@@ -664,16 +719,12 @@ export async function learnFromOverridesStatistical(): Promise<{
   }
 
   const avgEditorScore = totalEditorCount > 0 ? totalEditorScore / totalEditorCount : 60;
-  // Also compute overall drift for the summary line
   let totalDrift = 0;
   for (const ex of examples) {
     if (ex.overrideScore !== null && ex.viralScore !== null) totalDrift += ex.overrideScore - ex.viralScore;
   }
   const avgOverallDrift = examples.length > 0 ? totalDrift / examples.length : 0;
 
-  // Build category weight string — only include categories with ≥2 examples
-  // Adjustment = (category avg editor score) - (overall avg editor score)
-  // This tells the scoring system: "for this category, add/subtract X from the base score"
   const catEntries = Object.entries(categoryScores)
     .filter(([, v]) => v.count >= 2)
     .map(([cat, v]) => {
@@ -693,13 +744,7 @@ export async function learnFromOverridesStatistical(): Promise<{
     : "Not enough data per category yet.";
 
   // ── 2. Keyword frequency analysis ────────────────────────────────────────
-  // Split examples into "editor prefers" vs "editor avoids" based on ABSOLUTE score
-  // vs the overall editor average. This avoids penalising words that appear in stories
-  // the AI over-scored but the editor still rated reasonably.
-  //
-  // "Boosted" = editor scored this story significantly ABOVE their own average
-  // "Penalised" = editor scored this story significantly BELOW their own average
-  const ABSOLUTE_THRESHOLD = 15; // stories ≥15 pts above/below editor's own average
+  const ABSOLUTE_THRESHOLD = 15;
 
   const boostedTitles = examples
     .filter(e => e.overrideScore !== null && (e.overrideScore - avgEditorScore) >= ABSOLUTE_THRESHOLD)
@@ -711,7 +756,6 @@ export async function learnFromOverridesStatistical(): Promise<{
 
   function extractKeywords(texts: string[]): Record<string, number> {
     const counts: Record<string, number> = {};
-    // Common stop words to ignore
     const stopWords = new Set([
       "the","a","an","and","or","but","in","on","at","to","for","of","with",
       "by","from","as","is","was","are","were","be","been","being","have",
@@ -724,14 +768,12 @@ export async function learnFromOverridesStatistical(): Promise<{
       "only","own","same","too","very","just","also","new","first","last",
     ]);
     for (const text of texts) {
-      // Extract 1–3 word phrases that are meaningful
       const words = text.match(/\b[a-z][a-z-]{2,}\b/g) ?? [];
       for (const word of words) {
         if (!stopWords.has(word) && word.length > 3) {
           counts[word] = (counts[word] ?? 0) + 1;
         }
       }
-      // Also extract bigrams (2-word phrases)
       for (let i = 0; i < words.length - 1; i++) {
         const w1 = words[i], w2 = words[i + 1];
         if (!stopWords.has(w1) && !stopWords.has(w2) && w1.length > 3 && w2.length > 3) {
@@ -746,7 +788,6 @@ export async function learnFromOverridesStatistical(): Promise<{
   const boostedKeywords = extractKeywords(boostedTitles);
   const penalisedKeywords = extractKeywords(penalisedTitles);
 
-  // Top keywords that appear in boosted stories but NOT (or rarely) in penalised ones
   const boostList = Object.entries(boostedKeywords)
     .filter(([kw, cnt]) => cnt >= 2 && (penalisedKeywords[kw] ?? 0) < cnt)
     .sort((a, b) => b[1] - a[1])
@@ -761,7 +802,6 @@ export async function learnFromOverridesStatistical(): Promise<{
     .map(([kw, cnt]) => `"${kw}" (×${cnt})`)
     .join(", ");
 
-  // ── 3. Overall drift summary ──────────────────────────────────────────────
   const driftDesc = avgOverallDrift > 3
     ? `Editor scores ${Math.round(avgOverallDrift)} pts HIGHER than rules on average — rules are too conservative.`
     : avgOverallDrift < -3
@@ -770,7 +810,6 @@ export async function learnFromOverridesStatistical(): Promise<{
 
   const summary = `Statistical learning from ${examples.length} overrides: ${driftDesc} Top boosted categories: ${catEntries.slice(0, 3).join("; ") || "none yet"}.`;
 
-  // ── 4. Persist to scoring_config ─────────────────────────────────────────
   await Promise.all([
     setScoringConfig("stat_category_weights", statCategoryWeights),
     setScoringConfig("stat_keyword_boosts", boostList || "none yet"),
@@ -788,35 +827,31 @@ export async function learnFromOverridesStatistical(): Promise<{
 // ── LLM-based deep learner (costs credits — call manually only) ───────────────
 
 /**
- * Analyses all editor overrides and asks the LLM to produce improved scoring
- * rules that better match the editor's taste. Stores the result in scoring_config
- * so all future scoring calls use the improved rules automatically.
+ * Analyses all editor overrides and asks the LLM to produce a plain-English
+ * "editorial philosophy" — a nuanced description of the editor's taste.
+ *
+ * KEY CHANGE: This no longer produces a JSON weight matrix (learned_structured_weights).
+ * Instead it produces a plain-English editorial_philosophy that is injected into
+ * the scoring prompt as natural language context. This allows the LLM to reason
+ * with the philosophy rather than being constrained by rigid numeric weights.
  *
  * NOTE: This uses LLM credits. Use learnFromOverridesStatistical() for free
  * automatic learning. Only call this when you want a deep qualitative analysis.
- *
- * Returns a summary of what was learned.
  */
 export async function learnFromOverrides(): Promise<{ success: boolean; summary: string; examplesUsed: number }> {
-  // Always run the free statistical learner first — it's instant and costs nothing
+  // Always run the free statistical learner first
   learnFromOverridesStatistical().catch(err =>
     console.warn("[StatLearn] Background stat learn failed:", err)
   );
 
-  // Pull all config including previously learned rules and the last-learned timestamp
   const config = await getAllScoringConfig();
-  const previousRules = config["learned_scoring_rules"] ?? null;
-  const previousWeights = config["learned_category_weights"] ?? null;
-  const previousInsights = config["learned_editor_insights"] ?? null;
+  const previousPhilosophy = config["editorial_philosophy"] ?? null;
   const lastLearnedAt = config["last_learned_at"] ?? null;
 
-  // Fetch new overrides since last run PLUS always include the last 20 as context.
-  // This ensures the LLM always has enough examples to refine rules meaningfully,
-  // even if no new overrides were made since the last run.
-  const sinceDate = lastLearnedAt && previousRules ? new Date(lastLearnedAt) : undefined;
+  const sinceDate = lastLearnedAt && previousPhilosophy ? new Date(lastLearnedAt) : undefined;
   const newExamples = await getOverrideExamplesFromDb(undefined, sinceDate);
 
-  if (newExamples.length < 3 && !previousRules) {
+  if (newExamples.length < 3 && !previousPhilosophy) {
     return {
       success: false,
       summary: "Not enough override examples yet — override at least 3 stories before running this.",
@@ -824,42 +859,33 @@ export async function learnFromOverrides(): Promise<{ success: boolean; summary:
     };
   }
 
-  // Always include at least the last 20 overrides as context (even on subsequent runs).
-  // This prevents the LLM from running on 0 examples when no new overrides were made.
   let filteredExamples = newExamples;
-  if (sinceDate && newExamples.length < 20 && previousRules) {
+  if (sinceDate && newExamples.length < 20 && previousPhilosophy) {
     const recentContext = await getOverrideExamplesFromDb(20);
-    // Merge: new examples first, then recent context (deduped by id)
     const seenIds = new Set(newExamples.map(e => e.id));
     const contextOnly = recentContext.filter(e => !seenIds.has(e.id));
     filteredExamples = [...newExamples, ...contextOnly];
-    if (filteredExamples.length > 0) {
-      console.log(`[LLMScoring] ${newExamples.length} new overrides + ${contextOnly.length} context examples = ${filteredExamples.length} total`);
-    }
   }
 
   if (filteredExamples.length === 0) {
-    console.log("[LLMScoring] No override examples available — skipping LLM call");
     return {
       success: true,
-      summary: "No override examples available — existing rules unchanged.",
+      summary: "No override examples available — existing philosophy unchanged.",
       examplesUsed: 0,
     };
   }
 
-  // Pull Instagram performance data — this is the primary learning signal
-  const historicalPosts = await getHistoricalPosts(100);
-  const postsWithMetrics = historicalPosts.filter(p => (p.views ?? 0) > 0 || (p.likes ?? 0) > 0 || (p.shares ?? 0) > 0);
+  const historicalPostsData = await getHistoricalPosts(100);
+  const postsWithMetrics = historicalPostsData.filter(p => (p.views ?? 0) > 0 || (p.likes ?? 0) > 0 || (p.shares ?? 0) > 0);
   const rankedPosts = postsWithMetrics
     .map(p => ({ ...p, _perf: calculatePerformanceScore(p) }))
     .filter(p => p._perf > 0)
     .sort((a, b) => b._perf - a._perf);
 
-  // Cap LLM examples at 50 most recent — the free statistical learner already processes all 200.
-  // The LLM doesn't improve its rules meaningfully beyond ~50 examples; it just costs more tokens.
-  const validExamples = filteredExamples.filter(e => e.overrideScore !== null && e.overrideLabel !== null).slice(0, 50);
+  const validExamples = filteredExamples
+    .filter(e => e.overrideScore !== null && e.overrideLabel !== null)
+    .slice(0, 50);
 
-  // Recency-weight examples: last 30 days count double in the analysis
   const now = Date.now();
   const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
   const examplesText = validExamples
@@ -868,40 +894,43 @@ export async function learnFromOverrides(): Promise<{ success: boolean; summary:
       const driftStr = drift > 0 ? `+${drift} (AI undervalued)` : drift < 0 ? `${drift} (AI overvalued)` : `0 (agreed)`;
       const recency = e.updatedAt && (now - new Date(e.updatedAt).getTime()) < thirtyDaysMs ? " [RECENT]" : "";
       const contentSnippet = e.content ? `\n   Excerpt: "${e.content.slice(0, 120).replace(/\n/g, ' ')}..."` : "";
-      return `${i + 1}.${recency} "${e.title}"${contentSnippet}\n   AI: ${e.viralScore} → Editor: ${e.overrideScore} (${e.overrideLabel}) | Drift: ${driftStr} | Category: ${e.category ?? "unknown"}`;
+      return `${i + 1}.${recency} "${e.title}"${contentSnippet}\n   AI: ${e.viralScore} → Joshua: ${e.overrideScore} (${e.overrideLabel}) | Drift: ${driftStr} | Category: ${e.category ?? "unknown"}`;
     })
     .join("\n\n");
 
   const instagramText = rankedPosts.length > 0
-    ? `\n\n## GROUND TRUTH: Real FlightDrama Instagram Performance (ranked by actual engagement)\nUse this as your primary reference. The scoring rules must explain WHY the top posts performed well.\n\nTOP PERFORMERS:\n${rankedPosts.slice(0, 20).map((p, i) => {
-        const stats = [p.views ? `${Math.round(p.views/1000)}k views` : null, p.likes ? `${p.likes} likes` : null, p.shares ? `${p.shares} shares` : null].filter(Boolean).join(" | ");
-        return `#${i+1} [perf:${p._perf}/100] "${p.headline}" | ${p.category ?? "unknown"} | ${stats}`;
-      }).join("\n")}\n\nBOTTOM PERFORMERS (avoid these patterns):\n${rankedPosts.slice(-8).map(p => `[perf:${p._perf}/100] "${p.headline}" | ${p.category ?? "unknown"}`).join("\n")}`
+    ? `\n\n## Real FlightDrama Instagram Performance (secondary context)\nTOP PERFORMERS:\n${rankedPosts.slice(0, 15).map((p, i) => {
+        const stats = [p.views ? `${Math.round(p.views/1000)}k views` : null, p.likes ? `${p.likes} likes` : null].filter(Boolean).join(" | ");
+        return `#${i+1} "${p.headline}" | ${p.category ?? "unknown"} | ${stats}`;
+      }).join("\n")}`
     : "";
 
-  // Build the previous structured weights block
-  const prevStructuredRaw = config["learned_structured_weights"] ?? null;
-  let previousRulesBlock = "";
-  if (previousRules || prevStructuredRaw) {
-    previousRulesBlock = `\n\n## Previously Learned Rules (PRESERVE and REFINE — do NOT discard)`;
-    if (previousRules) previousRulesBlock += `\n${previousRules}`;
-    if (previousWeights) previousRulesBlock += `\n\nPreviously learned category weights:\n${previousWeights}`;
-    if (previousInsights) previousRulesBlock += `\n\nPreviously learned editor insights:\n${previousInsights}`;
-    previousRulesBlock += `\n\nYour job is to REFINE and EXTEND these rules with the new examples. Keep what holds true. Update what the new examples contradict. Add new rules for new patterns.`;
-  }
+  const previousPhilosophyBlock = previousPhilosophy
+    ? `\n\n## Previously Established Editorial Philosophy (REFINE and EXTEND — do NOT discard)\n${previousPhilosophy}\n\nYour job is to refine this philosophy with the new examples. Keep what holds true. Update what the new examples contradict. Add new nuances for new patterns.`
+    : "";
 
-  const isFirstRun = !previousRules && !prevStructuredRaw;
-  const systemPrompt = `You are an expert editorial analyst for FlightDrama, an aviation Instagram/TikTok/YouTube account.${previousRulesBlock}
+  const isFirstRun = !previousPhilosophy;
 
-Your job is to analyse editor override corrections AND real Instagram performance data to produce:
-1. Specific, actionable scoring rules grounded in BOTH editor taste AND real audience engagement
-2. Structured numeric weights (JSON) for categories and keywords — these are applied as hard score adjustments
-3. A plain-text description of the editor's taste
+  const systemPrompt = `You are an expert editorial analyst for FlightDrama, an aviation Instagram/TikTok/YouTube account.${previousPhilosophyBlock}
 
-The Instagram performance data is the PRIMARY signal. The editor overrides are the SECONDARY signal.
-Be specific and concrete. Avoid vague rules like "Boeing stories do well" — instead say "Boeing safety incidents with a specific failure mechanism score +20 vs generic Boeing earnings stories which score -15".`;
+Your job is to study Joshua's score corrections and produce a plain-English editorial philosophy that captures his taste.
+Focus on PATTERNS: what types of stories does he consistently value? What does he consistently reject? What nuances distinguish a 45 from a 75 from a 90 in his mind?
+Be specific and concrete. Reference actual story patterns from the examples.
+The Instagram performance data is provided as secondary context — Joshua's explicit corrections are the primary signal.`;
 
-  const userMessage = `${isFirstRun ? `Analyse these ${validExamples.length} editor override examples` : `Refine the existing rules with these ${validExamples.length} new override examples`}:\n\n${examplesText}${instagramText}\n\nReturn ONLY a JSON object with these FIVE fields:\n\n1. "learned_scoring_rules" (string): Complete updated scoring rules in plain text. Be specific and concrete. Reference actual story patterns from the examples.\n\n2. "learned_category_weights" (string): Plain text list of category adjustments, e.g. "Boeing Safety Failure: +20, Passenger Incident: +15, Earnings Report: -25"\n\n3. "learned_editor_insights" (string): A paragraph describing the editor's taste and what the Instagram data confirms about the audience.\n\n4. "learned_structured_weights" (object, NOT a string): A JSON object with these numeric fields that will be applied as hard score adjustments:\n   - category_boosts: object mapping category names to integer adjustments (e.g. {"Boeing Safety": 18, "Passenger Incident": 12, "Earnings": -20})\n   - keyword_boosts: object mapping keywords/phrases to integer boosts (e.g. {"fatal": 15, "pilot error": 12, "emergency landing": 10})\n   - keyword_penalties: object mapping keywords to negative integers (e.g. {"earnings": -15, "quarterly": -12})\n   - editor_notes: string with one sentence about the editor's taste\n   - examples_used: integer count of examples analysed\n\n5. "summary" (string): One sentence describing what changed or was reinforced.\n\nIMPORTANT: All string field values must be plain text. Do NOT use backticks or code blocks inside string values. The learned_structured_weights field must be a JSON object (not a string).`;
+  const userMessage = `${isFirstRun ? `Analyse these ${validExamples.length} editor override examples` : `Refine the existing philosophy with these ${validExamples.length} new override examples`}:
+
+${examplesText}${instagramText}
+
+Return ONLY a JSON object with these THREE fields:
+
+1. "editorial_philosophy" (string): A comprehensive plain-English description of Joshua's editorial taste. Write this as 3-5 paragraphs. Be specific: name the story types he values, the patterns he rejects, the nuances that distinguish his high scores from his low scores. This will be injected directly into the AI scoring prompt as Joshua's voice.
+
+2. "summary" (string): One sentence describing what changed or was reinforced.
+
+3. "examples_used" (integer): Count of examples analysed.
+
+IMPORTANT: All field values must be plain text. Do NOT use backticks or code blocks inside string values.`;
 
   try {
     const response = await invokeLLM({
@@ -917,7 +946,6 @@ Be specific and concrete. Avoid vague rules like "Boeing stories do well" — in
       return { success: false, summary: "LLM returned empty response.", examplesUsed: validExamples.length };
     }
 
-    // Robustly extract JSON: find the outermost { } block
     const jsonStart = raw.indexOf('{');
     const jsonEnd = raw.lastIndexOf('}');
     if (jsonStart === -1 || jsonEnd === -1 || jsonEnd <= jsonStart) {
@@ -926,69 +954,41 @@ Be specific and concrete. Avoid vague rules like "Boeing stories do well" — in
     }
 
     let jsonStr = raw.slice(jsonStart, jsonEnd + 1);
-    // Sanitise: remove any unescaped control characters inside string values
-    // that would break JSON.parse (e.g. literal newlines inside strings)
     jsonStr = jsonStr.replace(/(?<=[":,{\[]\s*"[^"]*?)\n(?=[^"]*?")/g, ' ');
 
     let parsed: {
-      learned_scoring_rules: string;
-      learned_category_weights: string;
-      learned_editor_insights: string;
-      learned_structured_weights?: Record<string, unknown>;
+      editorial_philosophy: string;
       summary: string;
+      examples_used?: number;
     };
     try {
       parsed = JSON.parse(jsonStr) as typeof parsed;
     } catch (parseErr) {
-      // Last resort: try to extract each string field with regex
       console.warn("[LLMScoring] JSON.parse failed, trying field extraction:", parseErr);
       const extract = (key: string) => {
         const m = raw.match(new RegExp(`"${key}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`,'s'));
         return m ? m[1].replace(/\\n/g, '\n').replace(/\\t/g, ' ') : '';
       };
       parsed = {
-        learned_scoring_rules: extract('learned_scoring_rules'),
-        learned_category_weights: extract('learned_category_weights'),
-        learned_editor_insights: extract('learned_editor_insights'),
+        editorial_philosophy: extract('editorial_philosophy'),
         summary: extract('summary'),
       };
-      if (!parsed.learned_scoring_rules && !parsed.learned_editor_insights) {
+      if (!parsed.editorial_philosophy) {
         return { success: false, summary: "Could not parse LLM response — JSON malformed.", examplesUsed: validExamples.length };
       }
     }
 
-    // Validate and serialise the structured weights object
-    let structuredWeightsStr: string | null = null;
-    if (parsed.learned_structured_weights && typeof parsed.learned_structured_weights === 'object') {
-      try {
-        // Ensure examples_used is set correctly
-        const sw = parsed.learned_structured_weights as Record<string, unknown>;
-        sw.examples_used = validExamples.length;
-        structuredWeightsStr = JSON.stringify(sw);
-        console.log(`[LLMScoring] Structured weights: ${Object.keys((sw.category_boosts as Record<string,number>) ?? {}).length} category boosts, ${Object.keys((sw.keyword_boosts as Record<string,number>) ?? {}).length} keyword boosts`);
-      } catch {
-        console.warn("[LLMScoring] Could not serialise structured weights");
-      }
-    }
-
-    // Persist all pieces to scoring_config
-    const saves: Promise<void>[] = [
-      setScoringConfig("learned_scoring_rules", parsed.learned_scoring_rules ?? ""),
-      setScoringConfig("learned_category_weights", parsed.learned_category_weights ?? ""),
-      setScoringConfig("learned_editor_insights", parsed.learned_editor_insights ?? ""),
+    await Promise.all([
+      setScoringConfig("editorial_philosophy", parsed.editorial_philosophy ?? ""),
       setScoringConfig("last_learned_at", new Date().toISOString()),
       setScoringConfig("last_learned_examples_count", String(validExamples.length)),
-    ];
-    if (structuredWeightsStr) {
-      saves.push(setScoringConfig("learned_structured_weights", structuredWeightsStr));
-    }
-    await Promise.all(saves);
+    ]);
 
-    console.log(`[LLMScoring] Learned from ${validExamples.length} overrides. Summary: ${parsed.summary}`);
+    console.log(`[LLMScoring] Editorial philosophy updated from ${validExamples.length} overrides. Summary: ${parsed.summary}`);
 
     return {
       success: true,
-      summary: parsed.summary ?? `Learned from ${validExamples.length} override examples.`,
+      summary: parsed.summary ?? `Editorial philosophy updated from ${validExamples.length} override examples.`,
       examplesUsed: validExamples.length,
     };
   } catch (err) {
