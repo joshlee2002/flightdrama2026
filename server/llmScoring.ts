@@ -358,7 +358,8 @@ ${editorialPhilosophy}`;
   systemPrompt += `\n\n## SCORING RULES (MANDATORY)\n${calibrationBlock ?? staticScoreRanges}
 - CRITICAL: The engagement ranks (eng:X/10) in the Instagram data above are engagement metrics, NOT score targets. Do not copy them into your score.
 - CRITICAL: A score of 100 means a once-in-a-year story. Do not give 100 unless the story is genuinely unprecedented.
-- WHEN IN DOUBT: Score LOWER. Joshua will correct you upward if needed.`;
+- WHEN IN DOUBT about a story type you have not seen before: score it 30–45 so Joshua can see it and make the call. Do NOT score 0 just because you are uncertain — reserve 0–20 for stories with zero aviation relevance whatsoever.
+- FlightDrama covers more than crashes and fights. Quirky, fun, or surprising aviation stories are valid content: unusual airline menus, pilot pay reveals, celebrity private planes, unusual liveries, strange airport incidents, and aviation curiosities. If a story is genuinely interesting aviation content but not dramatic, score it 30–50 rather than 0.`;
 
   systemPrompt += `\n\nRespond ONLY with a valid JSON object in this exact format:
 {
