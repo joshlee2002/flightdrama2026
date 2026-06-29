@@ -36,8 +36,9 @@ export const DEFAULT_RSS_SOURCES = [
   { name: "The Aviation Geek Club", url: "https://theaviationgeekclub.com/feed/", category: "aviation" as const },
   { name: "AeroTelegraph", url: "https://www.aerotelegraph.com/feed", category: "aviation" as const },
   { name: "AviationSource News", url: "https://aviationsourcenews.com/feed/", category: "aviation" as const },
-  { name: "AOPA General Aviation News", url: "https://www.aopa.org/rss", category: "aviation" as const },
-  { name: "Aviation Humor", url: "https://aviationhumor.net/feed/", category: "aviation" as const },
+  // AOPA News — both RSS URLs return stale content (89h+), keeping as low-priority fallback
+  { name: "AOPA News", url: "https://www.aopa.org/news-and-media/all-news/rss", category: "aviation" as const },
+  // Aviation Humor removed — last post was 300+ days ago (dead blog)
   { name: "Airlines Aviation Economic Times", url: "https://economictimes.indiatimes.com/rssfeeds/13354027.cms", category: "aviation" as const },
 
   // ── TIER 2: NEW AVIATION SOURCES (verified working 2026-06-12) ────────────
@@ -45,12 +46,15 @@ export const DEFAULT_RSS_SOURCES = [
   { name: "AirlineGeeks", url: "https://airlinegeeks.com/feed/", category: "aviation" as const },
   { name: "AVweb", url: "https://www.avweb.com/feed/", category: "aviation" as const },
   { name: "FlightGlobal", url: "https://www.flightglobal.com/feed", category: "aviation" as const },
-  { name: "ch-aviation Blog", url: "https://about.ch-aviation.com/feed/", category: "aviation" as const },
-  { name: "Flightradar24 Blog", url: "https://www.flightradar24.com/blog/feed/", category: "aviation" as const },
+  // ch-aviation Blog removed — last post was 40+ days ago (infrequent)
+  { name: "Flightradar24 Blog", url: "https://www.flightradar24.com/blog/feed/", category: "aviation" as const }, // kept — posts every few weeks, still useful
   { name: "Flying Magazine", url: "https://www.flyingmag.com/feed/", category: "aviation" as const },
-  { name: "AirlineReporter", url: "https://www.airlinereporter.com/feed/", category: "aviation" as const },
+  // AirlineReporter removed — last post was 10+ days ago (effectively dead)
   { name: "Cranky Flier", url: "https://crankyflier.com/feed/", category: "aviation" as const },
-  { name: "Fear of Landing", url: "https://fearoflanding.com/feed/", category: "aviation" as const },
+  // Fear of Landing removed — last post was 3+ days ago (infrequent safety blog)
+  // Mentour Pilot Blog — infrequent but authoritative pilot perspective
+  { name: "Mentour Pilot Blog", url: "https://www.mentourpilot.com/feed/", category: "aviation" as const },
+  { name: "Australian Aviation", url: "https://australianaviation.com.au/feed/", category: "aviation" as const }, // verified: 5 fresh items
   { name: "Airinsight", url: "https://airinsight.com/feed/", category: "aviation" as const },
   { name: "Paddle Your Own Kanoo", url: "https://paddleyourownkanoo.com/feed/", category: "aviation" as const },
 
@@ -68,7 +72,9 @@ export const DEFAULT_RSS_SOURCES = [
   // ── TIER 4: REGULATOR & SAFETY SOURCES ───────────────────────────────────
   // Official bodies — every story is aviation-relevant by definition
   // These are the sources that break real incidents before anyone else
-  { name: "EASA Newsroom", url: "https://www.easa.europa.eu/en/newsroom-and-events/news/rss.xml", category: "regulator" as const },
+  { name: "EASA Newsroom", url: "https://www.easa.europa.eu/en/newsroom-and-events/news/rss.xml", category: "regulator" as const }, // low-frequency but authoritative
+  // NTSB, FAA Safety Briefing, SKYbrary RSS feeds tested and returned 0 items — not added
+  // Coverage for NTSB/FAA stories is handled by GNews: NTSB Investigation and GNews: FAA Grounding
 
   // ── TIER 5: GOOGLE NEWS TOPIC FEEDS ──────────────────────────────────────
   // Targeted searches that catch stories missed by all other feeds.
@@ -82,16 +88,18 @@ export const DEFAULT_RSS_SOURCES = [
   { name: "GNews: Airbus", url: "https://news.google.com/rss/search?q=Airbus+aviation&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
   { name: "GNews: Pilot Strike", url: "https://news.google.com/rss/search?q=pilot+strike+airline&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
   { name: "GNews: Airport Chaos", url: "https://news.google.com/rss/search?q=airport+chaos+flight+cancelled&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
-  { name: "GNews: NTSB", url: "https://news.google.com/rss/search?q=NTSB+aviation&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
-  { name: "GNews: FAA Safety", url: "https://news.google.com/rss/search?q=FAA+aviation+safety&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
+  { name: "GNews: NTSB Investigation", url: "https://news.google.com/rss/search?q=NTSB+investigation+crash&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
+  { name: "GNews: FAA Grounding", url: "https://news.google.com/rss/search?q=FAA+grounded+OR+FAA+fine+OR+FAA+order&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
   // Additional targeted incident searches — catches stories missed by broader terms
   { name: "GNews: Emergency Landing", url: "https://news.google.com/rss/search?q=emergency+landing+aircraft&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
   { name: "GNews: Engine Fire", url: "https://news.google.com/rss/search?q=engine+fire+aircraft+OR+plane&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
   { name: "GNews: Runway Excursion", url: "https://news.google.com/rss/search?q=runway+excursion+OR+runway+overrun&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
   { name: "GNews: Turbulence Injuries", url: "https://news.google.com/rss/search?q=turbulence+injuries+flight&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
   { name: "GNews: Unruly Passenger", url: "https://news.google.com/rss/search?q=unruly+passenger+flight+OR+airline&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
-  { name: "GNews: Airline Bankruptcy", url: "https://news.google.com/rss/search?q=airline+bankruptcy+OR+airline+collapse&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
-  { name: "GNews: Bird Strike", url: "https://news.google.com/rss/search?q=bird+strike+aircraft+OR+plane&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
+  { name: "GNews: Airline Collapse", url: "https://news.google.com/rss/search?q=airline+ceases+operations+OR+airline+goes+bust+OR+airline+liquidation&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
+  { name: "GNews: Bird Strike", url: "https://news.google.com/rss/search?q=bird+strike+plane+OR+bird+strike+flight&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
+  { name: "GNews: Pilot Error", url: "https://news.google.com/rss/search?q=pilot+error+crash+OR+cockpit+incident&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
+  { name: "GNews: Airline Strike", url: "https://news.google.com/rss/search?q=airline+strike+OR+cabin+crew+strike&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
   { name: "GNews: Near Miss", url: "https://news.google.com/rss/search?q=near+miss+aircraft+OR+planes+collision&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
 
   // ── TIER 6: MAINSTREAM VIRAL SOURCES ─────────────────────────────────────
