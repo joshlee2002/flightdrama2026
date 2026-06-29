@@ -55,7 +55,7 @@ import { fetchArticleContent, fetchRssFeed, isSimilarTitle, getLocationIncidentM
 import { invokeLLM } from "./_core/llm";
 import { scoreStory, clearStatAdjustCache } from "./viralScoring";
 import { scoreStoryWithLLM, batchScoreStoriesWithLLM, learnFromOverrides, learnFromOverridesStatistical, type BatchScoringInput } from "./llmScoring";
-import { runFullSoyunciPipeline, rewriteArticleOnly, runResearchAndWrite, extractResearchPackage } from "./soyunci";
+import { runFullSoyunciPipeline, rewriteArticleOnly, runResearchAndWrite, extractResearchPackage, clearDeepResearchCache } from "./soyunci";
 import { analysePerformance, getPerformanceInsights, analysePerformanceStatistical, getStatPerformanceInsights, analyseArticleStyle, getArticleStyleInsights, calculatePerformanceScore } from "./performanceAnalysis";
 import { syncInstagramPosts, verifyInstagramToken } from "./instagramSync";
 import { generateWeeklyDigest, getRecentDigests } from "./weeklyDigest";
@@ -1004,6 +1004,10 @@ export const appRouter = router({
 
         // Mark as processing immediately
         await updateStoryPackage(input.storyId, { processingStatus: "processing", processingError: null });
+
+        // Clear the deep-research cache for this URL so the retry always fetches
+        // fresh source material instead of reusing a potentially empty cached result.
+        if (story.sourceUrl) clearDeepResearchCache(story.sourceUrl);
 
         // Run the research pipeline in the background — return immediately
         // so the HTTP request never times out (research takes 30-90s)

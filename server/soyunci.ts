@@ -299,6 +299,16 @@ async function fetchNewsRss(query: string): Promise<Array<{ title: string; sourc
 const _deepResearchCache = new Map<string, { result: DeepResearchResult; ts: number }>();
 const DEEP_RESEARCH_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
 
+/** Clears the deep-research cache entry for a given source URL.
+ * Call this before re-running extractResearchPackage so a retry always fetches
+ * fresh source material instead of reusing a potentially empty cached result.
+ */
+export function clearDeepResearchCache(sourceUrl: string): void {
+  const key = sourceUrl.replace(/[?#].*$/, "").toLowerCase();
+  _deepResearchCache.delete(key);
+  console.log(`[Soyunci] Deep research cache cleared for ${sourceUrl}`);
+}
+
 /** Result from deepResearch — includes the context string and how many sources were successfully fetched */
 export interface DeepResearchResult {
   context: string;
@@ -2228,28 +2238,26 @@ export async function extractResearchPackage(
     ? `PRIMARY SOURCE (read every word):\n${primarySourceText.slice(0, 28000)}`
     : `(Primary source unavailable — research from RSS snippet and secondary sources only)\nRSS CONTENT:\n${content.slice(0, 4000)}`;
 
-  // Step 2: Single LLM call — pure fact extraction on 8B model.
-  // viralAngle, editorialHooks, and contradictions removed: they are not used by the
-  // writing pipeline (which runs its own extractFactMatrix) and were the only fields
-  // that genuinely needed 70B reasoning. Everything remaining is direct extraction.
-  const RESEARCH_MODEL = ENV.scoringLlmModel || "llama-3.1-8b-instant"; // 8B — 12× cheaper than 70B
-  const response = await invokeLLM({
-    model: RESEARCH_MODEL,
-    messages: [
-      {
-        role: "system",
-        content: `You are an aviation research analyst. Your only job is to EXTRACT and ORGANISE every fact from the sources into a structured JSON package.
+  // Step 2: Single LLM call — pure fact extraction.
+  // Uses the default (70B) model for maximum extraction quality.
+  // response_format: json_object forces the model to emit clean JSON without
+  // markdown fences or preamble text, which was causing silent parse failures.
+  const RESEARCH_MODEL = ENV.defaultLlmModel || "llama-3.3-70b-versatile";
 
-RULES:
+  const SYSTEM_PROMPT = `You are an aviation research analyst. Your ONLY job is to EXTRACT and ORGANISE every fact from the sources into a structured JSON package.
+
+CRITICAL RULES:
 - Extract EVERY meaningful piece of information: airlines, aircraft, registrations, flight numbers, airports, routes, dates, times, passenger numbers, crew numbers, injuries, fatalities, diversions, inspections, investigations, aircraft affected, financial figures, technical details, legal developments, operational details, historical context, previous related incidents, regulatory actions, safety findings, emotional details, unusual details, surprising facts, dramatic facts, hidden details, consequences.
 - Do NOT decide what is important. Extract everything.
 - Do NOT paraphrase — use exact numbers, names, dates from the source.
 - REMOVE DUPLICATE FACTS: merge facts stated multiple times into ONE unique entry.
 - STAY FOCUSED ON THE MAIN STORY: put unrelated background info into "additionalContext".
-- For quotes: copy verbatim. Group by speaker type.
+- For quotes: copy verbatim. Group by speaker type. Only include quotes that actually appear in the source text.
 - For missing info: list what is NOT yet known or confirmed.
+- You MUST return at least 5 items in extractedInfo. If the source is thin, extract every available detail including background context.
+- Your response MUST be valid JSON and nothing else.`;
 
-Return ONLY valid JSON:
+  const USER_PROMPT = `STORY TITLE: ${title}\n\n${sourceBlock}\n\nADDITIONAL SOURCES (${sourcesResearched} total):\n${researchContext.slice(0, 20000)}\n\nExtract everything. Do not summarise. Do not filter. Return ONLY valid JSON with this exact structure:
 {
   "storySummary": "1-2 sentences: what happened, who was involved, when and where",
   "extractedInfo": ["exact fact 1", "exact fact 2", ...],
@@ -2263,43 +2271,101 @@ Return ONLY valid JSON:
     "witnesses": ["verbatim quote — source name if known"],
     "other": ["verbatim quote — source name/role"]
   },
-  "storyQuality": [
-    "✅ Multiple reputable sources",
-    "✅ Direct quotes available",
-    "⚠ Developing story",
-    "... include 3-5 checkmarks/warnings assessing reliability and completeness"
-  ],
-  "sources": [
-    { "name": "source name", "url": "url if available", "type": "primary|secondary|official|social" }
-  ],
-  "missingInfo": "list what remains unknown, unconfirmed, or not yet publicly disclosed",
+  "storyQuality": ["✅ or ⚠ assessment 1", "✅ or ⚠ assessment 2", "✅ or ⚠ assessment 3"],
+  "sources": [{ "name": "source name", "url": "url if available", "type": "primary|secondary|official|social" }],
+  "missingInfo": "what remains unknown or unconfirmed",
   "keyEntities": "comma-separated: airlines, airports, aircraft types, registrations, key people",
-  "flightNumber": "flight number (e.g. AA123) — empty string if not applicable or not mentioned",
-  "route": "full route (e.g. London Heathrow to New York JFK) — empty string if not applicable",
-  "aircraftTypeDetail": "aircraft type and registration if known (e.g. Boeing 737-800, reg G-ABCD) — empty string if not mentioned",
-  "passengerCount": "number of passengers on board as stated in the source (e.g. 189 passengers) — empty string if not mentioned",
-  "crewCount": "number of crew on board as stated in the source (e.g. 6 crew) — empty string if not mentioned",
-  "eventDate": "date the event occurred, not the publication date (e.g. 14 June 2025) — empty string if not known",
-  "publicationDate": "publication date of the primary source article (e.g. 15 June 2025) — empty string if not found"
-}`,
-      },
-      {
-        role: "user",
-        content: `STORY TITLE: ${title}\n\n${sourceBlock}\n\nADDITIONAL SOURCES (${sourcesResearched} total):\n${researchContext.slice(0, 20000)}\n\nExtract everything. Do not summarise. Do not filter. Return ONLY valid JSON.`,
-      },
-    ],
-  });
+  "flightNumber": "flight number or empty string",
+  "route": "full route or empty string",
+  "aircraftTypeDetail": "aircraft type and registration or empty string",
+  "passengerCount": "passenger count as stated in source or empty string",
+  "crewCount": "crew count as stated in source or empty string",
+  "eventDate": "date event occurred or empty string",
+  "publicationDate": "publication date or empty string"
+}`;
 
-  const raw = extractText(response);
-  let parsed: any = null;
-  try {
+  const parseResponse = (raw: string): any => {
+    if (!raw) return null;
+    // Try direct parse first (response_format: json_object should give clean JSON)
+    try { return JSON.parse(raw); } catch { /* fall through */ }
+    // Strip markdown fences if present
+    const fenceStripped = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "");
+    try { return JSON.parse(fenceStripped); } catch { /* fall through */ }
+    // Extract JSON object by brace matching
     const s = raw.indexOf("{");
     const e = raw.lastIndexOf("}");
     if (s !== -1 && e > s) {
-      parsed = JSON.parse(raw.slice(s, e + 1));
+      try { return JSON.parse(raw.slice(s, e + 1)); } catch { /* fall through */ }
     }
-  } catch {
-    console.warn(`[Soyunci] Research package JSON parse failed for "${title}" — using fallback`);
+    return null;
+  };
+
+  let parsed: any = null;
+  try {
+    const response = await invokeLLM({
+      model: RESEARCH_MODEL,
+      responseFormat: { type: "json_object" },
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content: USER_PROMPT },
+      ],
+    });
+    const raw = extractText(response);
+    parsed = parseResponse(raw);
+    if (!parsed) {
+      console.warn(`[Soyunci] Research package JSON parse failed for "${title}" — raw: ${raw.slice(0, 200)}`);
+    }
+  } catch (llmErr) {
+    console.warn(`[Soyunci] Research LLM call failed for "${title}": ${llmErr}`);
+  }
+
+  // Retry with a simpler prompt if extraction returned no facts
+  // (parse failed, model returned empty arrays, or LLM call errored)
+  const extractedInfoRaw: string[] = Array.isArray(parsed?.extractedInfo) ? parsed.extractedInfo : [];
+  if (extractedInfoRaw.length === 0) {
+    console.warn(`[Soyunci] No facts extracted for "${title}" — retrying with simplified prompt`);
+    try {
+      const retryResponse = await invokeLLM({
+        model: RESEARCH_MODEL,
+        responseFormat: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content: `You are a news fact extractor. Read the story below and return a JSON object with these exact fields. Do not add any other text.
+{
+  "storySummary": "one sentence summary",
+  "extractedInfo": ["fact 1", "fact 2", "fact 3", "fact 4", "fact 5"],
+  "quotes": {},
+  "timeline": "",
+  "storyQuality": ["⚠ Limited source material available"],
+  "sources": [],
+  "missingInfo": "Full article could not be retrieved",
+  "keyEntities": "",
+  "flightNumber": "", "route": "", "aircraftTypeDetail": "",
+  "passengerCount": "", "crewCount": "", "eventDate": "", "publicationDate": "",
+  "additionalContext": ""
+}`,
+          },
+          {
+            role: "user",
+            content: `STORY TITLE: ${title}\n\nSOURCE MATERIAL:\n${sourceBlock}\n\nRSS/SNIPPET:\n${researchContext.slice(0, 8000)}\n\nExtract at least 5 facts. Return ONLY the JSON object.`,
+          },
+        ],
+      });
+      const retryRaw = extractText(retryResponse);
+      const retryParsed = parseResponse(retryRaw);
+      if (retryParsed && Array.isArray(retryParsed.extractedInfo) && retryParsed.extractedInfo.length > 0) {
+        // Merge retry result into parsed — keep any fields from the first attempt
+        parsed = { ...retryParsed, ...(parsed ?? {}) };
+        // Ensure extractedInfo comes from the retry if original was empty
+        parsed.extractedInfo = retryParsed.extractedInfo;
+        console.log(`[Soyunci] Retry extraction succeeded: ${retryParsed.extractedInfo.length} facts for "${title}"`);
+      } else {
+        console.warn(`[Soyunci] Retry extraction also returned no facts for "${title}"`);
+      }
+    } catch (retryErr) {
+      console.warn(`[Soyunci] Retry LLM call failed for "${title}": ${retryErr}`);
+    }
   }
 
   // Build source confirmation string
@@ -2363,6 +2429,6 @@ Return ONLY valid JSON:
     publicationDate: parsed?.publicationDate ?? "",
   };
 
-  console.log(`[Soyunci] Research package complete (8B) — ${result.extractedInfo.length} facts, ${sourcesResearched} sources`);
+  console.log(`[Soyunci] Research package complete — ${result.extractedInfo.length} facts, ${sourcesResearched} sources, quotes: ${Object.values(result.quotes).flat().length}`);
   return result;
 }
