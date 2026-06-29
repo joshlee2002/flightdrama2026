@@ -1198,11 +1198,25 @@ function ApprovedCard({ story, pkg, onUnapprove, isUnapproving, onMarkComplete, 
       {isProcessing && <ProcessingState storyId={story.id} />}
       {isFailed && (
         <div className="px-4 py-4 text-center">
-          <p className="text-sm text-destructive mb-2">Soyunci pipeline failed</p>
-          {pkg?.processingError && <p className="text-xs text-muted-foreground mb-3">{pkg.processingError}</p>}
-          <Button size="sm" variant="outline" onClick={() => regenerate.mutate({ id: story.id })} disabled={regenerate.isPending}>
-            <RotateCcw className="w-3.5 h-3.5 mr-1.5" />Retry
-          </Button>
+          <p className="text-sm text-destructive mb-2">Research pipeline failed</p>
+          {pkg?.processingError && (
+            <p className="text-xs text-muted-foreground mb-3 max-w-sm mx-auto">{pkg.processingError}</p>
+          )}
+          <div className="flex items-center justify-center gap-2 flex-wrap">
+            <Button
+              size="sm"
+              variant="outline"
+              className="gap-1.5 border-sky-500/30 text-sky-400 hover:bg-sky-500/10"
+              onClick={() => reResearch.mutate({ storyId: story.id })}
+              disabled={reResearch.isPending}
+            >
+              {reResearch.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <FlaskConical className="w-3.5 h-3.5" />}
+              Re-Research
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => regenerate.mutate({ id: story.id })} disabled={regenerate.isPending}>
+              <RotateCcw className="w-3.5 h-3.5 mr-1.5" />Full Regen
+            </Button>
+          </div>
         </div>
       )}
 

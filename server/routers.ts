@@ -192,7 +192,14 @@ export const appRouter = router({
         // ── Research package: skip if already complete (scheduled pipeline may have pre-processed it) ──
         // This prevents double-billing: if the story was pre-processed automatically,
         // we reuse that data instead of running extractResearchPackage again (1× 70B call saved).
-        const alreadyComplete = existingPkg?.processingStatus === "complete" && existingPkg?.viralAngle;
+        // A package is only truly complete if it has research data (storySummary).
+        // Packages that were previously marked "complete" from the old pipeline (which only
+        // wrote article/headlines but no research fields) must be re-processed so quotes,
+        // facts, timeline, and other research content are actually populated.
+        const alreadyComplete =
+          existingPkg?.processingStatus === "complete" &&
+          existingPkg?.viralAngle &&
+          existingPkg?.storySummary;
         if (alreadyComplete) {
           // Research is already done — just record the historical post and return.
           // Mark as complete (no-op for status, but clears any stale error)
@@ -289,11 +296,14 @@ export const appRouter = router({
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             console.error(`[Research] Extraction failed/timed out for story ${storyId}:`, msg);
-            // Mark as complete with error note so the UI doesn't spin forever
+            // Mark as failed so the UI shows an error state and the Re-Research button
+            // remains visible. Do NOT mark as "complete" — that would bypass re-processing
+            // on the next approval and leave the card permanently empty.
             await updateStoryPackage(storyId, {
-              processingStatus: "complete",
-              storySummary: `Research could not be fully extracted (${msg.includes("timeout") ? "sources took too long to load" : "fetch error"}). Try Re-Research.`,
-              sourceConfirmation: "⚠️ Pipeline did not complete — click Re-Research to retry.",
+              processingStatus: "failed",
+              processingError: msg.includes("timeout")
+                ? "Research timed out (sources took too long to load). Click Re-Research to retry."
+                : `Research failed: ${msg}. Click Re-Research to retry.`,
             }).catch(() => {});
           }
         });
@@ -998,16 +1008,24 @@ export const appRouter = router({
         // Run the research pipeline in the background — return immediately
         // so the HTTP request never times out (research takes 30-90s)
         setImmediate(async () => {
+          // Hard 120-second timeout — pipeline must complete or we save a clear error
+          const timeoutPromise = new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error("Re-research pipeline timeout after 120s")), 120000)
+          );
           try {
-            const rp = await extractResearchPackage(
-              story.title,
-              story.content ?? "",
-              story.sourceUrl ?? "",
-              story.viralReason ?? "",
-              story.category ?? "General Aviation"
-            );
+            const rp = await Promise.race([
+              extractResearchPackage(
+                story.title,
+                story.content ?? "",
+                story.sourceUrl ?? "",
+                story.viralReason ?? "",
+                story.category ?? "General Aviation"
+              ),
+              timeoutPromise,
+            ]);
             await updateStoryPackage(input.storyId, {
               processingStatus: "complete",
+              processingError: null,
               viralAngle: rp.viralAngle,
               extractedFacts: JSON.stringify(rp.extractedInfo),
               sourcesResearched: rp.sourcesResearched,
@@ -1037,7 +1055,9 @@ export const appRouter = router({
             console.error(`[ReResearch] Extraction failed for story ${input.storyId}:`, errorMsg);
             await updateStoryPackage(input.storyId, {
               processingStatus: "failed",
-              processingError: errorMsg,
+              processingError: errorMsg.includes("timeout")
+                ? "Re-research timed out (sources took too long to load). Click Re-Research to retry."
+                : `Re-research failed: ${errorMsg}. Click Re-Research to retry.`,
             }).catch(() => {});
           }
         });

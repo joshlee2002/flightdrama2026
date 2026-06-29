@@ -394,6 +394,7 @@ export async function updateStoryPackage(
   // JSON-typed fields that need explicit serialization
   const JSON_FIELDS = new Set([
     "researchExtracted", "researchQuotes", "researchSources",
+    "researchEditorialHooks", "researchStoryQuality",
     "imageRecommendations", "imageCandidates", "hashtags",
     "allHeadlines", "topThreeHeadlines", "headlineObjects", "editorReview",
   ]);
