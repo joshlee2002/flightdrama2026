@@ -59,15 +59,24 @@ export const DEFAULT_RSS_SOURCES = [
   { name: "Paddle Your Own Kanoo", url: "https://paddleyourownkanoo.com/feed/", category: "aviation" as const },
 
   // ── TIER 3: PASSENGER / CONSUMER AVIATION ────────────────────────────────
-  // Travel-focused but aviation-heavy — good for passenger chaos and airline drama
+  // Aviation-focused blogs — every story is about airlines, airports, or flying.
+  // These are aviation-native and pass all stories through.
   { name: "One Mile at a Time", url: "https://onemileatatime.com/feed/", category: "aviation" as const },
   { name: "View from the Wing", url: "http://boardingarea.com/blogs/viewfromthewing/feed/", category: "aviation" as const },
-  { name: "Live and Lets Fly", url: "https://liveandletsfly.com/feed/", category: "aviation" as const },
-  { name: "Head for Points", url: "https://headforpoints.com/feed/", category: "aviation" as const },
-  { name: "The Points Guy", url: "https://thepointsguy.com/feed/", category: "aviation" as const },
-  { name: "Boarding Area", url: "https://boardingarea.com/feed/", category: "aviation" as const },
-  { name: "Business Traveller", url: "https://www.businesstraveller.com/feed/", category: "aviation" as const },
-  { name: "Condé Nast Traveler", url: "https://www.cntraveler.com/feed/rss", category: "aviation" as const },
+
+  // ── TIER 3b: TRAVEL / LIFESTYLE WITH AVIATION CONTENT ────────────────────
+  // These are general travel/lifestyle publications that sometimes cover aviation.
+  // They MUST use the strict keyword gate (category="viral") to filter out
+  // non-aviation stories like wellness guides, hotel reviews, and travel tips.
+  // Condé Nast Traveler, The Points Guy, Boarding Area, etc. all publish
+  // significant non-aviation content that was previously bypassing the gate.
+  { name: "Live and Lets Fly", url: "https://liveandletsfly.com/feed/", category: "viral" as const },
+  { name: "Head for Points", url: "https://headforpoints.com/feed/", category: "viral" as const },
+  { name: "The Points Guy", url: "https://thepointsguy.com/feed/", category: "viral" as const },
+  { name: "Boarding Area", url: "https://boardingarea.com/feed/", category: "viral" as const },
+  { name: "Business Traveller", url: "https://www.businesstraveller.com/feed/", category: "viral" as const },
+  { name: "Condé Nast Traveler", url: "https://www.cntraveler.com/feed/rss", category: "viral" as const },
+  { name: "Upgraded Points", url: "https://upgradedpoints.com/feed/", category: "viral" as const },
 
   // ── TIER 4: REGULATOR & SAFETY SOURCES ───────────────────────────────────
   // Official bodies — every story is aviation-relevant by definition

@@ -114,12 +114,13 @@ export async function getActiveRssSources() {
 export async function upsertRssSource(source: InsertRssSource) {
   const db = await getDb();
   if (!db) return;
-  // Only update name and url on conflict — do NOT overwrite category so that
-  // manual DB category corrections (aviation vs viral) are preserved across reseeds.
+  // Update name, url, AND category on conflict so that category changes in
+  // DEFAULT_RSS_SOURCES (e.g. moving lifestyle feeds from 'aviation' to 'viral')
+  // are applied to existing DB rows when reseed is triggered.
   await db
     .insert(rssSources)
     .values(source)
-    .onDuplicateKeyUpdate({ set: { name: source.name, url: source.url } });
+    .onDuplicateKeyUpdate({ set: { name: source.name, url: source.url, category: source.category } });
 }
 
 export async function toggleRssSource(id: number, isActive: boolean) {

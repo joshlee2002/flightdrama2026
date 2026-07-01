@@ -673,11 +673,47 @@ function hasPattern(text: string, pattern: RegExp): boolean {
 
 // ─── Main scoring function ────────────────────────────────────────────────────
 
+// ── Non-aviation content patterns — hard penalty ────────────────────────────
+// These patterns identify content that is clearly NOT aviation-related.
+// Stories matching these patterns get a hard -60 penalty, pushing them to Reject
+// regardless of other signals. This catches lifestyle/wellness/travel content
+// that slips through from feeds like Condé Nast Traveler, The Points Guy, etc.
+const NON_AVIATION_PATTERNS = [
+  // Wellness / health / biohacking
+  /\b(wellness|biohacking|biohack|supplement|vitamin|meditation|yoga|mindfulness|gut\s+health|sleep\s+hack|longevity|anti.?aging|detox|cleanse|skincare|skin\s+care|beauty\s+routine|self.?care)\b/i,
+  // Food / restaurants / hotels (when not aviation-related)
+  /\b(restaurant|hotel\s+review|best\s+hotel|resort|spa\s+day|michelin\s+star|recipe|cookbook|chef|cuisine|foodie|wine\s+tasting|cocktail\s+bar)\b/i,
+  // Travel guides / listicles (non-aviation)
+  /\b(best\s+beaches|top\s+destinations|places\s+to\s+visit|travel\s+guide|bucket\s+list|hidden\s+gem|travel\s+tips|packing\s+tips|what\s+to\s+pack|travel\s+hack)\b/i,
+  // Nature / wildlife (non-aviation)
+  /\b(cactus|cacti|succulent|plant\s+collector|mushroom\s+foraging|forager|birdwatching|safari|whale\s+watching|coral\s+reef|national\s+park\s+guide)\b/i,
+  // Celebrity gossip (non-aviation)
+  /\b(royal\s+family|king\s+charles|prince\s+william|princess\s+kate|meghan|harry\s+and\s+meghan|sussex|archie\s+and\s+lilibet|kensington\s+palace)\b/i,
+];
+
+// Aviation content signals — if ANY of these are present, the non-aviation penalty is NOT applied
+const AVIATION_CONTENT_SIGNALS = [
+  /\b(flight|airline|airlines|airport|aircraft|plane|pilot|aviation|airfare|boeing|airbus|runway|cockpit|cabin\s+crew|flight\s+attendant|air\s+traffic|faa|ntsb|easa|turbulence|emergency\s+landing|plane\s+crash|helicopter)\b/i,
+];
+
 export function scoreStory(title: string, content: string): ScoringResult {
   const fullText = `${title} ${content}`;
   const titleLower = title.toLowerCase();
   const triggers: string[] = [];
   let score = 20; // baseline
+
+  // ── Hard non-aviation penalty ──────────────────────────────────────────────────
+  // Catches wellness, food, hotel, travel-guide, and celebrity gossip content
+  // that slips through from lifestyle feeds. Only fires if there are NO aviation
+  // signals in the story at all.
+  const hasAviationSignal = AVIATION_CONTENT_SIGNALS.some(p => p.test(fullText));
+  if (!hasAviationSignal) {
+    const nonAviationMatch = NON_AVIATION_PATTERNS.find(p => p.test(fullText));
+    if (nonAviationMatch) {
+      score -= 60;
+      triggers.push("Non-aviation content — lifestyle/wellness/travel guide penalty");
+    }
+  }
 
   // ── Tier 1: Boeing safety + rivalry (avg 3,777 engagement) ──────────────
   const boeingSafetyMatches = getMatchedKeywords(fullText, BOEING_SAFETY_KEYWORDS);
