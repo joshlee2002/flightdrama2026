@@ -37,6 +37,37 @@ import {
 } from "./ingestion";
 import { buildEventFingerprint, buildContentHash } from "./eventFingerprint";
 import { invokeLLM as _invokeLLM } from "./_core/llm";
+import { ENV } from "./_core/env";
+
+/**
+ * LLM rescue check — called when the keyword gate rejects a story from a
+ * viral/mainstream feed. Uses the fast 8B model to ask a simple yes/no
+ * question: is this headline about aviation? Costs ~$0.00001 per call.
+ * Only fires for viral-category feeds (aviation feeds bypass the gate entirely).
+ */
+async function llmAviationRescue(title: string, content: string): Promise<boolean> {
+  try {
+    const snippet = content.slice(0, 300).replace(/\s+/g, " ").trim();
+    const result = await _invokeLLM({
+      model: ENV.scoringLlmModel || ENV.defaultLlmModel,
+      messages: [
+        {
+          role: "system",
+          content: `You are a strict aviation content classifier. Your only job is to decide if a news story is about aviation — meaning it directly involves aircraft, airlines, airports, pilots, air traffic control, aviation safety, aerospace, or the commercial/private flying industry. Respond with a single word: YES or NO. Do not explain.`,
+        },
+        {
+          role: "user",
+          content: `Headline: ${title}\nSnippet: ${snippet}\n\nIs this story about aviation?`,
+        },
+      ],
+      maxTokens: 5,
+    });
+    const answer = result.choices?.[0]?.message?.content?.trim().toUpperCase() ?? "NO";
+    return answer.startsWith("YES");
+  } catch {
+    return false; // On error, keep the gate's decision (drop)
+  }
+}
 // Cast to the narrower signature expected by llmDedupCheck
 const invokeLLM = _invokeLLM as unknown as (params: {
   model?: string;
@@ -212,17 +243,28 @@ export async function runIngestPipeline(label = "Ingest"): Promise<IngestResult>
       }
 
       if (!isAviationRelevant(item.title || "", item.content || "", source.category)) {
-        logDrop({
-          title: item.title || "Untitled",
-          sourceUrl: item.sourceUrl,
-          sourceName: source.name,
-          dropReason: "not_aviation",
-          dropDetail: `Category: ${source.category}. Title: "${(item.title || "").slice(0, 120)}"`,
-          publishedAt: item.publishedAt ?? null,
-        });
-        markSeenBatch.push({ url: item.sourceUrl, reason: "not_aviation" });
-        skippedCount++;
-        continue;
+        // ── LLM rescue: keyword gate missed it, ask the 8B model ─────────────
+        // Only runs for viral/mainstream feeds (aviation feeds bypass the gate).
+        // Uses maxTokens:5 so it's extremely cheap (~$0.00001 per call).
+        const rescued = source.category === "viral"
+          ? await llmAviationRescue(item.title || "", item.content || "")
+          : false;
+
+        if (!rescued) {
+          logDrop({
+            title: item.title || "Untitled",
+            sourceUrl: item.sourceUrl,
+            sourceName: source.name,
+            dropReason: "not_aviation",
+            dropDetail: `Category: ${source.category}. LLM rescue: no. Title: "${(item.title || "").slice(0, 120)}"`,
+            publishedAt: item.publishedAt ?? null,
+          });
+          markSeenBatch.push({ url: item.sourceUrl, reason: "not_aviation" });
+          skippedCount++;
+          continue;
+        }
+        // Rescued — log it and let it fall through to the candidate list
+        console.log(`[ingest] LLM rescued: "${(item.title || "").slice(0, 80)}" (keyword gate missed it)`);
       }
 
       const title = item.title || "Untitled";
