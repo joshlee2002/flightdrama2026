@@ -487,6 +487,8 @@ async function extractFactsAndAngle(
 
 CRITICAL RULE: You are working from the FULL TEXT of the original article, not a summary or RSS snippet. Read it carefully. Extract every specific number, name, date, quote, consequence, and piece of context you can find.
 
+ANTI-HALLUCINATION RULE: Every fact you list MUST be explicitly stated in the source text. Do NOT add facts from your own training data. Do NOT infer or invent plausible-sounding details. If the source does not contain a specific number, name, or claim, do not include it. A shorter list of real facts is correct. A longer list of invented facts is harmful.
+
 VIRAL ANGLES (ranked by reader impact):
 1. Death and accountability — deaths, injuries, who is responsible
 2. Passenger outrage — passengers stranded, mistreated, lied to
@@ -1379,6 +1381,8 @@ Do not list facts from secondary threads unless they directly explain or support
 Every fact must be specific: a number, a date, a name, a location, an aircraft registration, a cost, a consequence.
 No vague statements. No "some critics say" without naming who and when.
 
+CRITICAL: Extract ONLY facts that are explicitly stated in the source text. Do NOT invent, infer, or add facts from your own knowledge. If the source is thin, return fewer facts — do not pad the list with plausible-sounding claims. A short list of real facts is far better than a long list of invented ones. Every item in the "facts" array must be directly traceable to a sentence in the source text provided.
+
 STEP 3 — EXTRACT SUPPORTING ELEMENTS:
 - TIMELINE: Chronological sequence of events for the primary story only
 - KEY ENTITIES: Airlines, airports, aircraft types, regulators, officials directly involved
@@ -1526,12 +1530,23 @@ Lead with the most interesting fact, consequence, contradiction, conflict, surpr
 
 Do not simply tell readers what happened. Explain why it is interesting.
 
-YOU ARE AN AVIATION EXPERT. Use everything you know.
-You have deep knowledge of: aircraft types and their characteristics, airline economics and business models, load factors and what is normal vs exceptional, fleet strategy and aircraft orders, aviation regulators (FAA, EASA, NTSB, CAA, AAIB), accident investigation procedures, pilot unions and labour disputes, passenger rights regulations, airport operations, maintenance requirements, historical incidents and precedents, and how the industry has changed over time.
+STRICT SOURCE DISCIPLINE — the single most important rule:
+EVERY fact, number, statistic, quote, name, date, and claim in your article MUST come directly from the fact matrix provided below. Do NOT add any fact, figure, or claim that is not explicitly present in the fact matrix — even if it sounds plausible, even if you know it from your aviation training, even if it would make the article more interesting.
 
-This knowledge is your most valuable tool. A fact from the source becomes a story when you add the context that explains why it matters. If the source says Delta sold 87% of first-class seats, you know that a decade ago airlines routinely gave those seats away as upgrades rather than selling them — that context is what makes the number interesting. Use it. If a Boeing 737 MAX is mentioned, you know its history. If an airline posts a 15% margin, you know what typical margins look like. If a regulator issues an airworthiness directive, you know what that means operationally.
+You may use your aviation knowledge ONLY to:
+- Choose which facts from the matrix are most significant
+- Explain what a fact MEANS (e.g. "an airworthiness directive means the FAA has ordered all operators to act")
+- Provide one-sentence industry context that is universally known and uncontroversial (e.g. "the 737 MAX was grounded for 20 months following two fatal crashes")
 
-The rule: you may use your aviation knowledge to add context, historical comparison, industry norms, and significance. You may NOT invent facts, fabricate quotes, or claim causation the source does not support.
+You may NOT:
+- Add specific numbers, percentages, or statistics not in the fact matrix
+- Add names of people, aircraft registrations, or flight numbers not in the fact matrix
+- Add dates, times, or locations not in the fact matrix
+- Invent quotes or paraphrase what someone "likely" said
+- Add background facts about an airline's history, fleet size, or financials unless they are in the fact matrix
+- Fill gaps with plausible-sounding claims when the source does not contain that information
+
+If the fact matrix is thin, write a shorter, tighter article using only what is confirmed. A 100-word article built on real facts is better than a 200-word article padded with invented context.
 
 CONTENT TYPE CHECK — do this before anything else:
 Identify what type of content the source is:
@@ -1727,7 +1742,8 @@ The conflict, mystery, or human consequence is the story. Lead with the tension.
 async function runEditorReview(
   title: string,
   article: string,
-  angle: string
+  angle: string,
+  factMatrixSummary?: string
 ): Promise<EditorReview> {
   const response = await invokeLLM({
     model: PIPELINE_MODEL,
@@ -1751,9 +1767,10 @@ Review the article against these 12 questions:
 10. Does the article feel like an editor wrote it, or an AI summarised it?
 11. FABRICATED CONCERN CHECK: Does the article state that something "raises concerns," "poses risks," "introduces challenges," or "has raised eyebrows" without naming a specific person, organisation, or source who expressed that concern? If yes, this is a fabricated claim. Score must be 4 or below.
 12. INVENTED NARRATIVE CHECK: Does the article reframe the story into a different narrative than what the source supports? For example: the source describes an achievement (NASA's X-59 went supersonic) but the article frames it as a safety risk story. Or the source describes a route launch but the article invents strategic significance. If the article's central argument cannot be supported by the source, score must be 4 or below.
+13. HALLUCINATED FACTS CHECK: Does the article contain any specific numbers, statistics, names, dates, or claims that are NOT present in the fact matrix provided? For example: the fact matrix says "Boeing delivered 40 aircraft" but the article says "Boeing delivered 40 aircraft, down from 60 the previous year" (the comparison figure was not in the fact matrix). Any fact added from the writer's own knowledge that is not in the fact matrix is a hallucination. Score must be 4 or below.
 
 SCORING RULES — these override everything else:
-- If question 11 or 12 is YES, score must be 4 or below regardless of writing quality.
+- If question 11, 12, or 13 is YES, score must be 4 or below regardless of writing quality.
 - If the article contains affiliate language, recommendation language, or tells readers what to buy, score must be 5 or below.
 - If the final sentence is a generic summary, lesson, or "this highlights" conclusion, deduct 1 point.
 
@@ -1769,7 +1786,7 @@ Output JSON only. No other text.`,
       },
       {
         role: "user",
-        content: `STORY TITLE: ${title}\nINTENDED ANGLE: ${angle}\n\nARTICLE:\n${article}\n\nOutput JSON:\n{\n  "storyAngle": "one sentence",\n  "biggestWeakness": "one sentence",\n  "missingContext": "one sentence or none",\n  "fillerSentences": ["exact sentence if any"],\n  "soyunciScore": 7,\n  "verdict": "Approve"\n}`,
+        content: `STORY TITLE: ${title}\nINTENDED ANGLE: ${angle}\n${factMatrixSummary ? `\nFACT MATRIX (the ONLY facts the writer was given — use this to check question 13):\n${factMatrixSummary}\n` : ""}\nARTICLE:\n${article}\n\nOutput JSON:\n{\n  "storyAngle": "one sentence",\n  "biggestWeakness": "one sentence",\n  "missingContext": "one sentence or none",\n  "fillerSentences": ["exact sentence if any"],\n  "soyunciScore": 7,\n  "verdict": "Approve"\n}`,
       },
     ],
   });
@@ -1841,7 +1858,15 @@ async function researchAndWrite(
   // Threshold raised from 7 to 6: a 6/10 article is good enough to publish.
   // This eliminates ~20% of rewrite calls (the 6/10 cases) with no quality impact.
   console.log(`[Soyunci] Step C — editor review...`);
-  let editorReview = await runEditorReview(title, article, factMatrix.angle);
+  // Build a compact fact matrix summary for the editor's hallucination check
+  const factMatrixSummary = [
+    factMatrix.primaryStory ? `PRIMARY STORY: ${factMatrix.primaryStory}` : "",
+    factMatrix.facts.length > 0 ? `FACTS:\n${factMatrix.facts.map(f => `- ${f}`).join("\n")}` : "",
+    factMatrix.directQuotes.length > 0 ? `QUOTES:\n${factMatrix.directQuotes.map(q => `- "${q}"`).join("\n")}` : "",
+    factMatrix.consequences ? `CONSEQUENCES: ${factMatrix.consequences}` : "",
+  ].filter(Boolean).join("\n\n").slice(0, 3000);
+
+  let editorReview = await runEditorReview(title, article, factMatrix.angle, factMatrixSummary);
   console.log(`[Soyunci] Editor score: ${editorReview.soyunciScore}/10 — ${editorReview.verdict}`);
 
   if (editorReview.verdict === "Needs Revision" && editorReview.soyunciScore < 6) {
@@ -1855,7 +1880,7 @@ async function researchAndWrite(
     seoTitle = rewriteResult.seoTitle;
     seoDescription = rewriteResult.seoDescription;
     // Re-review the rewritten article
-    editorReview = await runEditorReview(title, article, factMatrix.angle);
+    editorReview = await runEditorReview(title, article, factMatrix.angle, factMatrixSummary);
     console.log(`[Soyunci] Rewrite editor score: ${editorReview.soyunciScore}/10 — ${editorReview.verdict}`);
   }
 
@@ -2254,7 +2279,7 @@ CRITICAL RULES:
 - STAY FOCUSED ON THE MAIN STORY: put unrelated background info into "additionalContext".
 - For quotes: copy verbatim. Group by speaker type. Only include quotes that actually appear in the source text.
 - For missing info: list what is NOT yet known or confirmed.
-- You MUST return at least 5 items in extractedInfo. If the source is thin, extract every available detail including background context.
+- ANTI-HALLUCINATION RULE: Every fact in extractedInfo MUST be explicitly stated in the source text above. Do NOT add facts from your own training data, do NOT infer facts that are not stated, do NOT invent plausible-sounding details. If the source is thin, return fewer facts — even just 2 or 3 real facts is correct. Do NOT pad the list to reach a minimum count.
 - Your response MUST be valid JSON and nothing else.`;
 
   const USER_PROMPT = `STORY TITLE: ${title}\n\n${sourceBlock}\n\nADDITIONAL SOURCES (${sourcesResearched} total):\n${researchContext.slice(0, 20000)}\n\nExtract everything. Do not summarise. Do not filter. Return ONLY valid JSON with this exact structure:
@@ -2348,7 +2373,7 @@ CRITICAL RULES:
           },
           {
             role: "user",
-            content: `STORY TITLE: ${title}\n\nSOURCE MATERIAL:\n${sourceBlock}\n\nRSS/SNIPPET:\n${researchContext.slice(0, 8000)}\n\nExtract at least 5 facts. Return ONLY the JSON object.`,
+            content: `STORY TITLE: ${title}\n\nSOURCE MATERIAL:\n${sourceBlock}\n\nRSS/SNIPPET:\n${researchContext.slice(0, 8000)}\n\nExtract ONLY facts that are explicitly stated in the source text above. Do NOT invent or infer facts. If the source is thin, return fewer facts. Return ONLY the JSON object.`,
           },
         ],
       });
