@@ -1848,6 +1848,136 @@ export const appRouter = router({
         });
       }),
   }),
+  // ── System Health Diagnostics ───────────────────────────────────────────────
+  diagnostics: router({
+    health: protectedProcedure.query(async () => {
+      const db = await getDb();
+
+      // ── Feed health ──────────────────────────────────────────────────────────
+      const allFeeds = await getRssSources();
+      const now = Date.now();
+      const STALE_THRESHOLD_MS = 3 * 60 * 60 * 1000; // 3 hours
+      const feedHealth = allFeeds.map((f: any) => ({
+        id: f.id,
+        name: f.name,
+        category: f.category,
+        isActive: f.isActive,
+        sourceType: f.sourceType,
+        lastFetchedAt: f.lastFetchedAt ? f.lastFetchedAt.toISOString() : null,
+        isStale: f.lastFetchedAt ? (now - new Date(f.lastFetchedAt).getTime()) > STALE_THRESHOLD_MS : true,
+        minutesSinceFetch: f.lastFetchedAt ? Math.floor((now - new Date(f.lastFetchedAt).getTime()) / 60000) : null,
+      }));
+      const activeFeeds = feedHealth.filter((f: any) => f.isActive);
+      const staleFeeds = activeFeeds.filter((f: any) => f.isStale);
+      const healthyFeeds = activeFeeds.filter((f: any) => !f.isStale);
+
+      // ── Ingest stats (last 24h and 7d) ───────────────────────────────────────
+      const since24h = new Date(now - 24 * 60 * 60 * 1000);
+      const since7d = new Date(now - 7 * 24 * 60 * 60 * 1000);
+      const summary24h = await getIngestLogSummary(since24h);
+      const summary7d = await getIngestLogSummary(since7d);
+
+      const toStats = (summary: any[]) => ({
+        ingested: Number(summary.find((s: any) => s.dropReason === "ingested")?.count ?? 0),
+        notAviation: Number(summary.find((s: any) => s.dropReason === "not_aviation")?.count ?? 0),
+        duplicate: Number([
+          summary.find((s: any) => s.dropReason === "duplicate_content"),
+          summary.find((s: any) => s.dropReason === "duplicate_title"),
+          summary.find((s: any) => s.dropReason === "duplicate_batch"),
+        ].reduce((a, s) => a + Number(s?.count ?? 0), 0)),
+        lowScore: Number([
+          summary.find((s: any) => s.dropReason === "score_below_rule"),
+          summary.find((s: any) => s.dropReason === "score_below_feed"),
+        ].reduce((a, s) => a + Number(s?.count ?? 0), 0)),
+        total: summary.reduce((a: number, s: any) => a + Number(s.count), 0),
+      });
+
+      // ── Override learning stats ───────────────────────────────────────────────
+      const allConfig = await getAllScoringConfig();
+      const lastLearnedAt = allConfig["last_learned_at"] ?? null;
+      const lastLearnedCount = parseInt(allConfig["last_learned_examples_count"] ?? "0", 10);
+      const statLastLearnedAt = allConfig["stat_last_learned_at"] ?? null;
+      const statExamplesCount = parseInt(allConfig["stat_examples_count"] ?? "0", 10);
+      const pendingOverrides = parseInt(allConfig["pending_learn_overrides"] ?? "0", 10);
+      const editorialPhilosophy = allConfig["editorial_philosophy"] ?? null;
+      const statCategoryWeights = allConfig["stat_category_weights"] ?? null;
+      const statKeywordBoosts = allConfig["stat_keyword_boosts"] ?? null;
+      const statKeywordPenalties = allConfig["stat_keyword_penalties"] ?? null;
+      const statOverallDrift = allConfig["stat_overall_drift"] ?? null;
+
+      // Total override examples in DB
+      let totalOverrides = 0;
+      if (db) {
+        const result = await db.select({ count: sql<number>`count(*)` }).from(stories)
+          .where(sql`${stories.overrideScore} IS NOT NULL AND ${stories.overrideLabel} IS NOT NULL`);
+        totalOverrides = Number(result[0]?.count ?? 0);
+      }
+
+      // Overrides added in last 7 days
+      let recentOverrides = 0;
+      if (db) {
+        const result = await db.select({ count: sql<number>`count(*)` }).from(stories)
+          .where(sql`${stories.overrideScore} IS NOT NULL AND ${stories.overrideLabel} IS NOT NULL AND ${stories.updatedAt} >= ${since7d}`);
+        recentOverrides = Number(result[0]?.count ?? 0);
+      }
+
+      // Score distribution of current pending stories
+      let scoreDistribution: { bucket: string; count: number }[] = [];
+      if (db) {
+        const rows = await db.select({ viralScore: stories.viralScore })
+          .from(stories)
+          .where(sql`${stories.approvalStatus} = 'pending' AND ${stories.viralScore} IS NOT NULL`);
+        const buckets: Record<string, number> = { "0-29": 0, "30-49": 0, "50-69": 0, "70-84": 0, "85-100": 0 };
+        for (const r of rows) {
+          const s = r.viralScore ?? 0;
+          if (s < 30) buckets["0-29"]++;
+          else if (s < 50) buckets["30-49"]++;
+          else if (s < 70) buckets["50-69"]++;
+          else if (s < 85) buckets["70-84"]++;
+          else buckets["85-100"]++;
+        }
+        scoreDistribution = Object.entries(buckets).map(([bucket, count]) => ({ bucket, count }));
+      }
+
+      // Approved stories count
+      let approvedCount = 0;
+      if (db) {
+        const result = await db.select({ count: sql<number>`count(*)` }).from(stories)
+          .where(sql`${stories.approvalStatus} = 'approved'`);
+        approvedCount = Number(result[0]?.count ?? 0);
+      }
+
+      return {
+        feedHealth,
+        feedSummary: {
+          total: allFeeds.length,
+          active: activeFeeds.length,
+          healthy: healthyFeeds.length,
+          stale: staleFeeds.length,
+        },
+        staleFeeds: staleFeeds.map((f: any) => ({ name: f.name, minutesSinceFetch: f.minutesSinceFetch, category: f.category })),
+        ingest24h: toStats(summary24h),
+        ingest7d: toStats(summary7d),
+        learning: {
+          totalOverrides,
+          recentOverrides,
+          pendingOverrides,
+          lastLearnedAt,
+          lastLearnedCount,
+          statLastLearnedAt,
+          statExamplesCount,
+          editorialPhilosophy,
+          statCategoryWeights,
+          statKeywordBoosts,
+          statKeywordPenalties,
+          statOverallDrift,
+        },
+        scoreDistribution,
+        approvedCount,
+        generatedAt: new Date().toISOString(),
+      };
+    }),
+  }),
   // ── Cost Control — toggle LLM features on/off ──────────────────────────────
   costControl: router({
     get: protectedProcedure.query(async () => {

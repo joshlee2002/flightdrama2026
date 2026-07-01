@@ -16,6 +16,7 @@ import {
   Menu,
   X,
   Activity,
+  ShieldCheck,
 } from "lucide-react";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
@@ -42,6 +43,7 @@ const navItems = [
   { href: "/example-articles", label: "Example Articles", icon: BookOpen },
   { href: "/digest", label: "Weekly Digest", icon: Newspaper },
   { href: "/ingest-log", label: "Ingest Log", icon: Activity },
+  { href: "/system-health", label: "System Health", icon: ShieldCheck },
 ];
 
 interface FlightLayoutProps {

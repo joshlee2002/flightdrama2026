@@ -14,6 +14,7 @@ import Login from "@/pages/Login";
 import ExampleArticles from "@/pages/ExampleArticles";
 import Digest from "@/pages/Digest";
 import IngestLog from "@/pages/IngestLog";
+import SystemHealth from "@/pages/SystemHealth";
 import AssistantPanel from "@/components/AssistantPanel";
 import { useAuth } from "./_core/hooks/useAuth";
 
@@ -30,6 +31,7 @@ function Router() {
       <Route path="/example-articles" component={ExampleArticles} />
       <Route path="/digest" component={Digest} />
       <Route path="/ingest-log" component={IngestLog} />
+      <Route path="/system-health" component={SystemHealth} />
       <Route path="/404" component={NotFound} />
       <Route component={NotFound} />
     </Switch>
