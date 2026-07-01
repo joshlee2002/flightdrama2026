@@ -849,10 +849,10 @@ export async function learnFromOverrides(): Promise<{ success: boolean; summary:
   const previousPhilosophy = config["editorial_philosophy"] ?? null;
   const lastLearnedAt = config["last_learned_at"] ?? null;
 
-  const sinceDate = lastLearnedAt && previousPhilosophy ? new Date(lastLearnedAt) : undefined;
-  const newExamples = await getOverrideExamplesFromDb(undefined, sinceDate);
+  // Fetch ALL overrides (no limit) — we'll select a smart 50 from them below
+  const allOverrides = await getOverrideExamplesFromDb();
 
-  if (newExamples.length < 3 && !previousPhilosophy) {
+  if (allOverrides.length < 3 && !previousPhilosophy) {
     return {
       success: false,
       summary: "Not enough override examples yet — override at least 3 stories before running this.",
@@ -860,12 +860,28 @@ export async function learnFromOverrides(): Promise<{ success: boolean; summary:
     };
   }
 
-  let filteredExamples = newExamples;
-  if (sinceDate && newExamples.length < 20 && previousPhilosophy) {
-    const recentContext = await getOverrideExamplesFromDb(20);
-    const seenIds = new Set(newExamples.map(e => e.id));
-    const contextOnly = recentContext.filter(e => !seenIds.has(e.id));
-    filteredExamples = [...newExamples, ...contextOnly];
+  // Smart selection from all overrides:
+  // - Most recent 30 (captures current taste)
+  // - Highest drift 15 (most instructive corrections where AI was most wrong)
+  // - Oldest 5 (historical baseline)
+  // This ensures the philosophy stays current even with 500+ overrides
+  const byRecent = [...allOverrides].sort((a, b) =>
+    (b.updatedAt ? new Date(b.updatedAt).getTime() : 0) - (a.updatedAt ? new Date(a.updatedAt).getTime() : 0)
+  );
+  const byDrift = [...allOverrides].sort((a, b) =>
+    Math.abs((b.overrideScore ?? 0) - (b.viralScore ?? 0)) - Math.abs((a.overrideScore ?? 0) - (a.viralScore ?? 0))
+  );
+  const byOldest = [...allOverrides].sort((a, b) =>
+    (a.updatedAt ? new Date(a.updatedAt).getTime() : 0) - (b.updatedAt ? new Date(b.updatedAt).getTime() : 0)
+  );
+
+  const selectedIds = new Set<number>();
+  const filteredExamples: typeof allOverrides = [];
+  for (const ex of [...byRecent.slice(0, 30), ...byDrift.slice(0, 15), ...byOldest.slice(0, 5)]) {
+    if (ex.id && !selectedIds.has(ex.id)) {
+      selectedIds.add(ex.id);
+      filteredExamples.push(ex);
+    }
   }
 
   if (filteredExamples.length === 0) {
@@ -940,6 +956,8 @@ IMPORTANT: All field values must be plain text. Do NOT use backticks or code blo
         { role: "system", content: systemPrompt },
         { role: "user", content: userMessage },
       ],
+      maxTokens: 2000,
+      responseFormat: { type: "json_object" },
     });
 
     const raw = response?.choices?.[0]?.message?.content;
