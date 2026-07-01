@@ -335,10 +335,19 @@ ${examplesBlock}
 CRITICAL: Look at the range of scores above. If Joshua's corrections cluster in the 45–70 range for similar stories, the new story should land there too unless it is clearly exceptional. Do NOT score above Joshua's typical range for this story type unless the new story is genuinely more dramatic.`;
   }
 
-  // 2. Editorial philosophy — plain English taste summary
+  // 2a. Structured pattern library — per-category rules (Layer 2, strongest qualitative signal)
+  if (patternLibrary) {
+    systemPrompt += `\n\n## JOSHUA'S SCORING RULES BY CATEGORY (derived from all his corrections — apply these directly)\n${patternLibrary}\n\nFor any story whose category matches one of the above, apply those rules first. The score range and conditions listed are based on Joshua's actual historical corrections.`;
+  }
+
+  // 2b. Editorial philosophy — fallback for categories not in the pattern library
   if (editorialPhilosophy) {
-    systemPrompt += `\n\n## JOSHUA'S EDITORIAL PHILOSOPHY (derived from all his corrections)
-${editorialPhilosophy}`;
+    systemPrompt += `\n\n## JOSHUA'S OVERALL EDITORIAL PHILOSOPHY (fallback for story types not in the pattern library above)\n${editorialPhilosophy}`;
+  }
+
+  // 2c. Drift calibration offsets — Layer 3 systematic bias correction
+  if (driftCalibrationHint) {
+    systemPrompt += `\n\n${driftCalibrationHint}`;
   }
 
   // 3. Instagram performance — SECONDARY context
@@ -828,13 +837,21 @@ export async function learnFromOverridesStatistical(): Promise<{
 // ── LLM-based deep learner (costs credits — call manually only) ───────────────
 
 /**
- * Analyses all editor overrides and asks the LLM to produce a plain-English
- * "editorial philosophy" — a nuanced description of the editor's taste.
+ * THREE-LAYER EDITORIAL LEARNING SYSTEM
  *
- * KEY CHANGE: This no longer produces a JSON weight matrix (learned_structured_weights).
- * Instead it produces a plain-English editorial_philosophy that is injected into
- * the scoring prompt as natural language context. This allows the LLM to reason
- * with the philosophy rather than being constrained by rigid numeric weights.
+ * Layer 1 — Direct examples (in buildScoringContext): similarity-matched past
+ *   overrides injected directly into every scoring prompt. Strongest signal.
+ *   Works from day 1, scales to unlimited overrides.
+ *
+ * Layer 2 — Structured pattern library (this function): LLM reads ALL overrides
+ *   and produces a structured per-category breakdown of Joshua's scoring rules.
+ *   Replaces the single prose editorial_philosophy paragraph. Stored as JSON.
+ *   Scales without losing nuance — each category's rules are maintained separately.
+ *
+ * Layer 3 — Drift calibration offsets (this function): pure statistics, no LLM.
+ *   Computes per-category average drift (Joshua's score minus AI score) across
+ *   all historical overrides. Stored as JSON offsets. Applied as a pre-LLM
+ *   calibration step so systematic biases are corrected automatically.
  *
  * NOTE: This uses LLM credits. Use learnFromOverridesStatistical() for free
  * automatic learning. Only call this when you want a deep qualitative analysis.
@@ -846,13 +863,12 @@ export async function learnFromOverrides(): Promise<{ success: boolean; summary:
   );
 
   const config = await getAllScoringConfig();
-  const previousPhilosophy = config["editorial_philosophy"] ?? null;
   const lastLearnedAt = config["last_learned_at"] ?? null;
 
-  // Fetch ALL overrides (no limit) — we'll select a smart 50 from them below
+  // ── Fetch ALL overrides — no cap ─────────────────────────────────────────
   const allOverrides = await getOverrideExamplesFromDb();
 
-  if (allOverrides.length < 3 && !previousPhilosophy) {
+  if (allOverrides.length < 3) {
     return {
       success: false,
       summary: "Not enough override examples yet — override at least 3 stories before running this.",
@@ -860,11 +876,40 @@ export async function learnFromOverrides(): Promise<{ success: boolean; summary:
     };
   }
 
-  // Smart selection from all overrides:
-  // - Most recent 30 (captures current taste)
-  // - Highest drift 15 (most instructive corrections where AI was most wrong)
+  // ── LAYER 3: Compute drift calibration offsets (free, no LLM) ────────────
+  // For each category, compute: average(Joshua's score - AI's score)
+  // This tells us how systematically wrong the AI is per category.
+  // e.g. "Aviation Safety: AI scores +12 too high on average" → apply -12 offset
+  const driftByCategory: Record<string, { totalDrift: number; count: number; avgJoshua: number; totalJoshua: number }> = {};
+  for (const ex of allOverrides) {
+    if (ex.overrideScore === null || ex.viralScore === null) continue;
+    const cat = ex.category ?? "General Aviation";
+    if (!driftByCategory[cat]) driftByCategory[cat] = { totalDrift: 0, count: 0, avgJoshua: 0, totalJoshua: 0 };
+    driftByCategory[cat].totalDrift += ex.overrideScore - ex.viralScore;
+    driftByCategory[cat].totalJoshua += ex.overrideScore;
+    driftByCategory[cat].count++;
+  }
+
+  const calibrationOffsets: Record<string, { offset: number; avgJoshua: number; sampleSize: number }> = {};
+  for (const [cat, data] of Object.entries(driftByCategory)) {
+    if (data.count < 3) continue; // need at least 3 examples to trust the offset
+    calibrationOffsets[cat] = {
+      offset: Math.round(data.totalDrift / data.count), // positive = AI undervalues, negative = AI overvalues
+      avgJoshua: Math.round(data.totalJoshua / data.count),
+      sampleSize: data.count,
+    };
+  }
+
+  // Save drift offsets to scoring_config
+  await setScoringConfig("drift_calibration_offsets", JSON.stringify(calibrationOffsets));
+  console.log(`[DeepLearn] Drift offsets computed for ${Object.keys(calibrationOffsets).length} categories from ${allOverrides.length} overrides`);
+
+  // ── LAYER 2: Build structured pattern library (LLM) ──────────────────────
+  // Smart selection: representative sample across all overrides
+  // - Most recent 30 (current taste)
+  // - Highest drift 15 (most instructive — where AI was most wrong)
+  // - Per-category representatives: up to 3 per category not already selected
   // - Oldest 5 (historical baseline)
-  // This ensures the philosophy stays current even with 500+ overrides
   const byRecent = [...allOverrides].sort((a, b) =>
     (b.updatedAt ? new Date(b.updatedAt).getTime() : 0) - (a.updatedAt ? new Date(a.updatedAt).getTime() : 0)
   );
@@ -877,41 +922,71 @@ export async function learnFromOverrides(): Promise<{ success: boolean; summary:
 
   const selectedIds = new Set<number>();
   const filteredExamples: typeof allOverrides = [];
+  const catCounts: Record<string, number> = {};
+
+  // Add recent, high-drift, and oldest first
   for (const ex of [...byRecent.slice(0, 30), ...byDrift.slice(0, 15), ...byOldest.slice(0, 5)]) {
     if (ex.id && !selectedIds.has(ex.id)) {
       selectedIds.add(ex.id);
       filteredExamples.push(ex);
+      const cat = ex.category ?? "unknown";
+      catCounts[cat] = (catCounts[cat] ?? 0) + 1;
     }
   }
 
-  if (filteredExamples.length === 0) {
+  // Fill remaining slots with per-category representatives (up to 3 per category not yet represented)
+  for (const ex of allOverrides) {
+    if (filteredExamples.length >= 60) break;
+    if (!ex.id || selectedIds.has(ex.id)) continue;
+    const cat = ex.category ?? "unknown";
+    if ((catCounts[cat] ?? 0) < 3) {
+      selectedIds.add(ex.id);
+      filteredExamples.push(ex);
+      catCounts[cat] = (catCounts[cat] ?? 0) + 1;
+    }
+  }
+
+  const validExamples = filteredExamples
+    .filter(e => e.overrideScore !== null && e.overrideLabel !== null);
+
+  if (validExamples.length === 0) {
     return {
       success: true,
-      summary: "No override examples available — existing philosophy unchanged.",
+      summary: "No override examples available — pattern library unchanged.",
       examplesUsed: 0,
     };
   }
 
-  const historicalPostsData = await getHistoricalPosts(30); // 30 is sufficient — top 10 performers is all the philosophy needs
+  const historicalPostsData = await getHistoricalPosts(30);
   const postsWithMetrics = historicalPostsData.filter(p => (p.views ?? 0) > 0 || (p.likes ?? 0) > 0 || (p.shares ?? 0) > 0);
   const rankedPosts = postsWithMetrics
     .map(p => ({ ...p, _perf: calculatePerformanceScore(p) }))
     .filter(p => p._perf > 0)
     .sort((a, b) => b._perf - a._perf);
 
-  const validExamples = filteredExamples
-    .filter(e => e.overrideScore !== null && e.overrideLabel !== null)
-    .slice(0, 50);
-
   const now = Date.now();
   const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
-  const examplesText = validExamples
-    .map((e, i) => {
-      const drift = (e.overrideScore ?? 0) - (e.viralScore ?? 0);
-      const driftStr = drift > 0 ? `+${drift} (AI undervalued)` : drift < 0 ? `${drift} (AI overvalued)` : `0 (agreed)`;
-      const recency = e.updatedAt && (now - new Date(e.updatedAt).getTime()) < thirtyDaysMs ? " [RECENT]" : "";
-      const contentSnippet = e.content ? `\n   Excerpt: "${e.content.slice(0, 120).replace(/\n/g, ' ')}..."` : "";
-      return `${i + 1}.${recency} "${e.title}"${contentSnippet}\n   AI: ${e.viralScore} → Joshua: ${e.overrideScore} (${e.overrideLabel}) | Drift: ${driftStr} | Category: ${e.category ?? "unknown"}`;
+
+  // Group examples by category for the prompt
+  const byCategory: Record<string, typeof validExamples> = {};
+  for (const ex of validExamples) {
+    const cat = ex.category ?? "General Aviation";
+    if (!byCategory[cat]) byCategory[cat] = [];
+    byCategory[cat].push(ex);
+  }
+
+  const examplesText = Object.entries(byCategory)
+    .sort((a, b) => b[1].length - a[1].length) // most examples first
+    .map(([cat, exs]) => {
+      const lines = exs.map(e => {
+        const drift = (e.overrideScore ?? 0) - (e.viralScore ?? 0);
+        const driftStr = drift > 0 ? `+${drift}` : `${drift}`;
+        const recency = e.updatedAt && (now - new Date(e.updatedAt).getTime()) < thirtyDaysMs ? " [recent]" : "";
+        return `  - ${recency}"${e.title?.slice(0, 90)}" | AI:${e.viralScore}→Joshua:${e.overrideScore} (drift:${driftStr}) | ${e.overrideLabel}`;
+      }).join("\n");
+      const catOffset = calibrationOffsets[cat];
+      const offsetNote = catOffset ? ` [avg drift: ${catOffset.offset > 0 ? "+" : ""}${catOffset.offset} pts across ${catOffset.sampleSize} overrides]` : "";
+      return `### ${cat}${offsetNote}\n${lines}`;
     })
     .join("\n\n");
 
@@ -922,32 +997,37 @@ export async function learnFromOverrides(): Promise<{ success: boolean; summary:
       }).join("\n")}`
     : "";
 
-  const previousPhilosophyBlock = previousPhilosophy
-    ? `\n\n## Previously Established Editorial Philosophy (REFINE and EXTEND — do NOT discard)\n${previousPhilosophy}\n\nYour job is to refine this philosophy with the new examples. Keep what holds true. Update what the new examples contradict. Add new nuances for new patterns.`
+  const previousPatternLibrary = config["pattern_library"] ?? null;
+  const previousBlock = previousPatternLibrary
+    ? `\n\n## Previously Established Pattern Library (REFINE — do NOT discard categories that have no new examples)\n${previousPatternLibrary}\n\nRefine with the new examples. Keep rules that still hold. Update rules the new examples contradict. Add new categories if new patterns emerge.`
     : "";
 
-  const isFirstRun = !previousPhilosophy;
+  const systemPrompt = `You are an expert editorial analyst for FlightDrama, an aviation Instagram/TikTok/YouTube account.${previousBlock}
 
-  const systemPrompt = `You are an expert editorial analyst for FlightDrama, an aviation Instagram/TikTok/YouTube account.${previousPhilosophyBlock}
+Your job is to build a STRUCTURED PATTERN LIBRARY from Joshua's score corrections.
+This is NOT a prose summary — it is a structured set of rules per story category.
+Each category must have: a score range, the key factors that push scores up or down, and what Joshua rejects.
+Be specific and concrete. Use the actual examples to derive the rules.
+The Instagram performance data is secondary context — Joshua's explicit corrections are the primary signal.`;
 
-Your job is to study Joshua's score corrections and produce a plain-English editorial philosophy that captures his taste.
-Focus on PATTERNS: what types of stories does he consistently value? What does he consistently reject? What nuances distinguish a 45 from a 75 from a 90 in his mind?
-Be specific and concrete. Reference actual story patterns from the examples.
-The Instagram performance data is provided as secondary context — Joshua's explicit corrections are the primary signal.`;
-
-  const userMessage = `${isFirstRun ? `Analyse these ${validExamples.length} editor override examples` : `Refine the existing philosophy with these ${validExamples.length} new override examples`}:
+  const userMessage = `Analyse these ${validExamples.length} editor override examples (grouped by category) and build a structured pattern library:
 
 ${examplesText}${instagramText}
 
-Return ONLY a JSON object with these THREE fields:
+Return ONLY a JSON object with these fields:
 
-1. "editorial_philosophy" (string): A comprehensive plain-English description of Joshua's editorial taste. Write this as 3-5 paragraphs. Be specific: name the story types he values, the patterns he rejects, the nuances that distinguish his high scores from his low scores. This will be injected directly into the AI scoring prompt as Joshua's voice.
+1. "pattern_library" (string): A structured breakdown per category. For EACH category with enough data, write:
+   CATEGORY NAME: [score range Joshua gives] | Key boosters: [what pushes score up] | Key killers: [what drops the score] | Reject if: [specific conditions]
+   Write one line per category. Be specific — use actual patterns from the examples, not generic advice.
+   Example format: "Passenger Outrage: 65-85 | Boosters: specific money figure, named airline, duration stated | Killers: vague complaint, no resolution | Reject if: no aviation element, just general travel complaint"
 
-2. "summary" (string): One sentence describing what changed or was reinforced.
+2. "editorial_philosophy" (string): A 2-3 paragraph plain-English summary of Joshua's overall taste that works ACROSS all categories. This is the fallback for story types not in the pattern library.
 
-3. "examples_used" (integer): Count of examples analysed.
+3. "summary" (string): One sentence describing the most important pattern found or reinforced.
 
-IMPORTANT: All field values must be plain text. Do NOT use backticks or code blocks inside string values.`;
+4. "examples_used" (integer): Count of examples analysed.
+
+IMPORTANT: All field values must be plain text. Do NOT use backticks, markdown headers, or code blocks inside string values. Use pipe characters (|) as separators in the pattern_library field.`;
 
   try {
     const response = await invokeLLM({
@@ -956,7 +1036,7 @@ IMPORTANT: All field values must be plain text. Do NOT use backticks or code blo
         { role: "system", content: systemPrompt },
         { role: "user", content: userMessage },
       ],
-      maxTokens: 2000,
+      maxTokens: 3000,
       responseFormat: { type: "json_object" },
     });
 
@@ -965,49 +1045,45 @@ IMPORTANT: All field values must be plain text. Do NOT use backticks or code blo
       return { success: false, summary: "LLM returned empty response.", examplesUsed: validExamples.length };
     }
 
-    const jsonStart = raw.indexOf('{');
-    const jsonEnd = raw.lastIndexOf('}');
-    if (jsonStart === -1 || jsonEnd === -1 || jsonEnd <= jsonStart) {
-      console.error("[LLMScoring] No JSON block found in response:", raw.slice(0, 200));
-      return { success: false, summary: "Could not parse LLM response — no JSON block found.", examplesUsed: validExamples.length };
-    }
-
-    let jsonStr = raw.slice(jsonStart, jsonEnd + 1);
-    jsonStr = jsonStr.replace(/(?<=[":,{\[]\s*"[^"]*?)\n(?=[^"]*?")/g, ' ');
-
     let parsed: {
+      pattern_library: string;
       editorial_philosophy: string;
       summary: string;
       examples_used?: number;
     };
     try {
-      parsed = JSON.parse(jsonStr) as typeof parsed;
-    } catch (parseErr) {
-      console.warn("[LLMScoring] JSON.parse failed, trying field extraction:", parseErr);
-      const extract = (key: string) => {
-        const m = raw.match(new RegExp(`"${key}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`,'s'));
-        return m ? m[1].replace(/\\n/g, '\n').replace(/\\t/g, ' ') : '';
-      };
-      parsed = {
-        editorial_philosophy: extract('editorial_philosophy'),
-        summary: extract('summary'),
-      };
-      if (!parsed.editorial_philosophy) {
+      parsed = JSON.parse(raw) as typeof parsed;
+    } catch {
+      // Try extracting JSON block
+      const jsonStart = raw.indexOf('{');
+      const jsonEnd = raw.lastIndexOf('}');
+      if (jsonStart === -1 || jsonEnd === -1) {
+        return { success: false, summary: "Could not parse LLM response — no JSON block found.", examplesUsed: validExamples.length };
+      }
+      try {
+        parsed = JSON.parse(raw.slice(jsonStart, jsonEnd + 1)) as typeof parsed;
+      } catch {
         return { success: false, summary: "Could not parse LLM response — JSON malformed.", examplesUsed: validExamples.length };
       }
     }
 
+    if (!parsed.pattern_library && !parsed.editorial_philosophy) {
+      return { success: false, summary: "LLM returned empty pattern library.", examplesUsed: validExamples.length };
+    }
+
     await Promise.all([
+      setScoringConfig("pattern_library", parsed.pattern_library ?? ""),
       setScoringConfig("editorial_philosophy", parsed.editorial_philosophy ?? ""),
       setScoringConfig("last_learned_at", new Date().toISOString()),
       setScoringConfig("last_learned_examples_count", String(validExamples.length)),
+      setScoringConfig("total_override_count", String(allOverrides.length)),
     ]);
 
-    console.log(`[LLMScoring] Editorial philosophy updated from ${validExamples.length} overrides. Summary: ${parsed.summary}`);
+    console.log(`[DeepLearn] Pattern library + philosophy updated from ${validExamples.length} selected / ${allOverrides.length} total overrides. Summary: ${parsed.summary}`);
 
     return {
       success: true,
-      summary: parsed.summary ?? `Editorial philosophy updated from ${validExamples.length} override examples.`,
+      summary: parsed.summary ?? `Pattern library updated from ${allOverrides.length} total overrides (${validExamples.length} analysed).`,
       examplesUsed: validExamples.length,
     };
   } catch (err) {

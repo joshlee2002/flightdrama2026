@@ -1292,7 +1292,14 @@ export const appRouter = router({
     scoringInsights: protectedProcedure.query(async () => {
       const config = await getAllScoringConfig();
       return {
-        // LLM deep learner output
+        // LLM deep learner output (three-layer system)
+        patternLibrary: config["pattern_library"] ?? null,
+        editorialPhilosophy: config["editorial_philosophy"] ?? null,
+        driftCalibrationOffsets: config["drift_calibration_offsets"] ?? null,
+        totalOverrideCount: config["total_override_count"]
+          ? parseInt(config["total_override_count"])
+          : null,
+        // Legacy fields kept for backwards compatibility
         learnedRules: config["learned_scoring_rules"] ?? null,
         learnedWeights: config["learned_category_weights"] ?? null,
         learnedInsights: config["learned_editor_insights"] ?? null,

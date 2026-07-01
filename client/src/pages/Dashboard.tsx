@@ -741,25 +741,63 @@ export default function Dashboard() {
             </button>
             {showLearningPanel && (
               <div className="px-4 pb-4 pt-1 space-y-3 border-t border-violet-500/15">
-                {insights.learnedRules && (
+                {/* Header row with total override count */}
+                {(insights as any).totalOverrideCount != null && (
+                  <p className="text-xs text-muted-foreground">
+                    <span className="font-semibold text-violet-300">{(insights as any).totalOverrideCount}</span> total corrections stored — all used for learning
+                  </p>
+                )}
+
+                {/* Layer 2 — Per-category pattern library */}
+                {(insights as any).patternLibrary && (
+                  <div>
+                    <p className="text-[10px] font-semibold text-violet-400 uppercase tracking-wide mb-1.5">Layer 2 — Scoring Rules by Category</p>
+                    <p className="text-xs text-foreground/80 leading-relaxed whitespace-pre-wrap">{(insights as any).patternLibrary}</p>
+                  </div>
+                )}
+
+                {/* Layer 3 — Drift calibration offsets */}
+                {(insights as any).driftCalibrationOffsets && (() => {
+                  try {
+                    const offsets = JSON.parse((insights as any).driftCalibrationOffsets) as Record<string, { offset: number; avgJoshua: number; sampleSize: number }>;
+                    const rows = Object.entries(offsets)
+                      .filter(([, d]) => d.sampleSize >= 3)
+                      .sort((a, b) => Math.abs(b[1].offset) - Math.abs(a[1].offset));
+                    if (rows.length === 0) return null;
+                    return (
+                      <div>
+                        <p className="text-[10px] font-semibold text-violet-400 uppercase tracking-wide mb-1.5">Layer 3 — Systematic Bias Corrections</p>
+                        <div className="space-y-1">
+                          {rows.map(([cat, data]) => (
+                            <div key={cat} className="flex items-center gap-2 text-xs">
+                              <span className="text-muted-foreground w-40 truncate shrink-0">{cat}</span>
+                              <span className={data.offset > 3 ? "text-emerald-400" : data.offset < -3 ? "text-red-400" : "text-muted-foreground"}>
+                                {data.offset > 0 ? `AI scores ${data.offset} pts too low` : data.offset < 0 ? `AI scores ${Math.abs(data.offset)} pts too high` : "well calibrated"}
+                              </span>
+                              <span className="text-muted-foreground/50 text-[10px]">({data.sampleSize} examples)</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  } catch { return null; }
+                })()}
+
+                {/* Fallback: show old editorial philosophy if new pattern library not yet generated */}
+                {!(insights as any).patternLibrary && (insights as any).editorialPhilosophy && (
+                  <div>
+                    <p className="text-[10px] font-semibold text-violet-400 uppercase tracking-wide mb-1.5">Editorial Philosophy</p>
+                    <p className="text-xs text-foreground/80 leading-relaxed whitespace-pre-wrap">{(insights as any).editorialPhilosophy}</p>
+                  </div>
+                )}
+                {!(insights as any).patternLibrary && insights.learnedRules && (
                   <div>
                     <p className="text-[10px] font-semibold text-violet-400 uppercase tracking-wide mb-1.5">Learned Scoring Rules</p>
                     <p className="text-xs text-foreground/80 leading-relaxed whitespace-pre-wrap">{insights.learnedRules}</p>
                   </div>
                 )}
-                {insights.learnedInsights && (
-                  <div>
-                    <p className="text-[10px] font-semibold text-violet-400 uppercase tracking-wide mb-1.5">Editor Insights</p>
-                    <p className="text-xs text-foreground/80 leading-relaxed whitespace-pre-wrap">{insights.learnedInsights}</p>
-                  </div>
-                )}
-                {insights.learnedWeights && (
-                  <div>
-                    <p className="text-[10px] font-semibold text-violet-400 uppercase tracking-wide mb-1.5">Category Weights</p>
-                    <p className="text-xs text-muted-foreground leading-relaxed whitespace-pre-wrap">{insights.learnedWeights}</p>
-                  </div>
-                )}
-                {!insights.learnedRules && !insights.learnedInsights && !insights.learnedWeights && (
+
+                {!(insights as any).patternLibrary && !insights.learnedRules && (
                   <p className="text-xs text-muted-foreground italic">Override some story scores on the dashboard, then click "Re-learn Now" to train the AI on your preferences.</p>
                 )}
               </div>
