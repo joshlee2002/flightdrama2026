@@ -72,6 +72,31 @@ export default function FlightLayout({ children }: FlightLayoutProps) {
     return () => { document.body.style.overflow = ""; };
   }, [drawerOpen]);
 
+  // ── Rerank progress polling ──────────────────────────────────────────────
+  // Poll every 2 seconds while a rerank is in progress; stop when done.
+  const { data: rerankProgress } = trpc.stories.rerankProgress.useQuery(undefined, {
+    refetchInterval: reranking ? 2000 : false,
+    // Don't stale-invalidate while we're actively polling
+    staleTime: reranking ? 0 : 60000,
+  });
+
+  // When the server reports done=true, clear the local reranking state and
+  // refresh the story list so the new scores appear immediately.
+  useEffect(() => {
+    if (reranking && rerankProgress?.done && rerankProgress.total > 0) {
+      setReranking(false);
+      utils.stories.list.invalidate();
+      utils.stories.pendingCount.invalidate();
+      toast.success(`Re-rank complete — ${rerankProgress.completed}/${rerankProgress.total} stories scored`);
+    }
+  }, [reranking, rerankProgress?.done, rerankProgress?.total]);
+
+  const rerankPct = rerankProgress && rerankProgress.total > 0
+    ? Math.round((rerankProgress.completed / rerankProgress.total) * 100)
+    : 0;
+  const rerankEtaSec = rerankProgress?.etaMs ? Math.ceil(rerankProgress.etaMs / 1000) : null;
+  // ────────────────────────────────────────────────────────────────────────
+
   const refreshFeeds = trpc.stories.refreshFeeds.useMutation({
     onSuccess: () => {
       toast.success("Ingest started — new stories will appear shortly");
@@ -124,9 +149,13 @@ export default function FlightLayout({ children }: FlightLayoutProps) {
 
   const rerank = trpc.stories.rerank.useMutation({
     onSuccess: (data) => {
-      toast.success(`Re-ranked ${data.reranked} stories`);
-      setReranking(false);
-      utils.stories.list.invalidate();
+      // Don't show toast here — the progress polling useEffect will handle it
+      // when done=true. Just keep reranking=true so polling stays active.
+      // If the server returns 0 stories (nothing to rerank), clear immediately.
+      if (data.total === 0) {
+        toast.info("No stories to re-rank (all have manual overrides)");
+        setReranking(false);
+      }
     },
     onError: (err) => {
       toast.error(`Re-rank failed: ${err.message}`);
@@ -161,6 +190,38 @@ export default function FlightLayout({ children }: FlightLayoutProps) {
     if (mins < 60) return `${mins}m ago`;
     if (hrs < 24) return `${hrs}h ago`;
     return new Date(lastIngestTime).toLocaleDateString();
+  };
+
+  /** Rerank progress bar component — shown in both sidebar and drawer */
+  const RerankProgressBar = () => {
+    if (!reranking) return null;
+    return (
+      <div className="px-3 pt-1 pb-2">
+        <div className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 space-y-1.5">
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] font-medium text-primary">Re-ranking stories…</span>
+            <span className="text-[10px] text-muted-foreground tabular-nums">
+              {rerankProgress ? `${rerankProgress.completed}/${rerankProgress.total}` : "…"}
+            </span>
+          </div>
+          {/* Progress track */}
+          <div className="h-1.5 rounded-full bg-primary/10 overflow-hidden">
+            <div
+              className="h-full rounded-full bg-primary transition-all duration-500"
+              style={{ width: `${rerankPct}%` }}
+            />
+          </div>
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] text-muted-foreground">{rerankPct}%</span>
+            {rerankEtaSec !== null && rerankEtaSec > 0 && (
+              <span className="text-[10px] text-muted-foreground tabular-nums">
+                ~{rerankEtaSec < 60 ? `${rerankEtaSec}s` : `${Math.ceil(rerankEtaSec / 60)}m`} left
+              </span>
+            )}
+          </div>
+        </div>
+      </div>
+    );
   };
 
   return (
@@ -221,6 +282,9 @@ export default function FlightLayout({ children }: FlightLayoutProps) {
           <p className="text-[10px] text-muted-foreground/60 leading-tight">Last ingested</p>
           <p className="text-[11px] text-muted-foreground mt-0.5">{formatLastIngest()}</p>
         </div>
+
+        {/* Rerank progress bar (desktop) */}
+        <RerankProgressBar />
 
         {/* Quick actions */}
         <div className="px-3 pb-4 space-y-2 border-t border-sidebar-border pt-3">
@@ -346,6 +410,9 @@ export default function FlightLayout({ children }: FlightLayoutProps) {
             <div className="px-4 py-2 border-t border-sidebar-border">
               <p className="text-[10px] text-muted-foreground/60">Last ingested: {formatLastIngest()}</p>
             </div>
+
+            {/* Rerank progress bar (mobile drawer) */}
+            <RerankProgressBar />
 
             {/* Quick actions */}
             <div className="px-3 pb-6 pt-3 space-y-2 border-t border-sidebar-border">

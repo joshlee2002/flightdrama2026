@@ -1097,11 +1097,13 @@ export const appRouter = router({
      * Uses batch scoring (10 stories per LLM call) for ~10x cost/speed efficiency.
      */
     rerank: protectedProcedure.mutation(async () => {
-      const allStories = await getStoriesWithPackages({ approvalStatus: "pending", limit: 200 });
+      const allStories = await getStoriesWithPackages({ approvalStatus: "pending", limit: 2000 });
       const toRerank = allStories.filter(
         ({ story }) => story.overrideScore === null || story.overrideScore === undefined
       );
       // Run in the background so the HTTP request returns immediately (avoids timeout on large queues)
+      const rerankStartedAt = Date.now();
+      await setScoringConfig("rerank_progress", JSON.stringify({ completed: 0, total: toRerank.length, startedAt: rerankStartedAt, done: false }));
       setImmediate(async () => {
         const BATCH_SIZE = 10;
         let completed = 0;
@@ -1149,10 +1151,39 @@ export const appRouter = router({
               }
             }
           }
+          // Update progress in DB after each batch so client can poll it
+          const elapsedMs = Date.now() - rerankStartedAt;
+          const avgMsPerStory = completed > 0 ? elapsedMs / completed : 3000;
+          const remaining = toRerank.length - completed;
+          const etaMs = Math.round(avgMsPerStory * remaining);
+          await setScoringConfig("rerank_progress", JSON.stringify({ completed, total: toRerank.length, startedAt: rerankStartedAt, etaMs, done: false }));
         }
+        await setScoringConfig("rerank_progress", JSON.stringify({ completed, total: toRerank.length, startedAt: rerankStartedAt, etaMs: 0, done: true }));
         console.log(`[Rerank] Completed rescoring ${completed}/${toRerank.length} stories`);
       });
-      return { reranked: toRerank.length, message: `Rescoring ${toRerank.length} stories in the background using batch scoring. Refresh in 1-2 minutes.` };
+      return { reranked: toRerank.length, total: toRerank.length, message: `Rescoring ${toRerank.length} stories in the background using batch scoring. Refresh in 1-2 minutes.` };
+    }),
+
+    /**
+     * Poll the current rerank progress.
+     * Returns the latest progress snapshot written to scoringConfig by the rerank mutation.
+     * The client polls this every 2 seconds while reranking is active.
+     */
+    rerankProgress: publicProcedure.query(async () => {
+      const raw = await getScoringConfig("rerank_progress");
+      if (!raw) return { completed: 0, total: 0, etaMs: 0, done: true, startedAt: null };
+      try {
+        const parsed = JSON.parse(raw);
+        return {
+          completed: Number(parsed.completed ?? 0),
+          total: Number(parsed.total ?? 0),
+          etaMs: Number(parsed.etaMs ?? 0),
+          done: Boolean(parsed.done),
+          startedAt: parsed.startedAt ?? null,
+        };
+      } catch {
+        return { completed: 0, total: 0, etaMs: 0, done: true, startedAt: null };
+      }
     }),
 
     /**

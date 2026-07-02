@@ -685,15 +685,25 @@ const NON_AVIATION_PATTERNS = [
   /\b(restaurant|hotel\s+review|best\s+hotel|resort|spa\s+day|michelin\s+star|recipe|cookbook|chef|cuisine|foodie|wine\s+tasting|cocktail\s+bar)\b/i,
   // Travel guides / listicles (non-aviation)
   /\b(best\s+beaches|top\s+destinations|places\s+to\s+visit|travel\s+guide|bucket\s+list|hidden\s+gem|travel\s+tips|packing\s+tips|what\s+to\s+pack|travel\s+hack)\b/i,
+  // Road trips / driving content (non-aviation)
+  /\b(road\s+trip|road\s+trips|driving\s+route|scenic\s+drive|best\s+drives|cross.?country\s+drive|rv\s+trip|campervan|motorhome)\b/i,
+  // Hotel / accommodation listicles (non-aviation)
+  /\b(best\s+hotels?|hotel\s+deals?|luxury\s+hotels?|boutique\s+hotels?|airbnb|vacation\s+rental|best\s+resorts?|all.?inclusive|hotel\s+review|top\s+hotels?|hotels?\s+in\s+\w+|\d+\s+best\s+hotels?)\b/i,
+  // General travel listicles (non-aviation)
+  /\b(best\s+places|top\s+places|must.?see|must\s+visit|things\s+to\s+do|weekend\s+getaway|day\s+trip|staycation|city\s+guide|travel\s+itinerary|itinerary\s+for)\b/i,
   // Nature / wildlife (non-aviation)
   /\b(cactus|cacti|succulent|plant\s+collector|mushroom\s+foraging|forager|birdwatching|safari|whale\s+watching|coral\s+reef|national\s+park\s+guide)\b/i,
   // Celebrity gossip (non-aviation)
   /\b(royal\s+family|king\s+charles|prince\s+william|princess\s+kate|meghan|harry\s+and\s+meghan|sussex|archie\s+and\s+lilibet|kensington\s+palace)\b/i,
+  // Celebrity gossip — pop culture (non-aviation)
+  /\b(taylor\s+swift|beyonce|kardashian|kanye\s+west|drake|rihanna|celebrity\s+news|celebrity\s+gossip|red\s+carpet|grammy|oscar\s+winner|met\s+gala)\b/i,
+  // Immigration / visa / politics (non-aviation)
+  /\b(immigration\s+policy|visa\s+application|green\s+card|citizenship\s+test|border\s+wall|deportation\s+policy|asylum\s+seeker|refugee\s+crisis|migrant\s+caravan)\b/i,
 ];
 
 // Aviation content signals — if ANY of these are present, the non-aviation penalty is NOT applied
 const AVIATION_CONTENT_SIGNALS = [
-  /\b(flight|airline|airlines|airport|aircraft|plane|pilot|aviation|airfare|boeing|airbus|runway|cockpit|cabin\s+crew|flight\s+attendant|air\s+traffic|faa|ntsb|easa|turbulence|emergency\s+landing|plane\s+crash|helicopter)\b/i,
+  /\b(flight|airline|airlines|airport|aircraft|plane|planes|pilot|pilots|aviation|airfare|boeing|airbus|runway|cockpit|cabin\s+crew|flight\s+attendant|air\s+traffic|faa|ntsb|easa|turbulence|emergency\s+landing|plane\s+crash|helicopter|private\s+jet|private\s+jets|jet\s+plane|chartered\s+flight|charter\s+flight|air\s+travel|air\s+passenger|frequent\s+flyer|frequent\s+flier|miles\s+and\s+points|business\s+class|first\s+class\s+cabin|economy\s+class|seat\s+upgrade|seat\s+selection|boarding\s+pass|gate\s+agent|tsa|customs\s+and\s+immigration|baggage\s+claim|carry.?on|checked\s+bag)\b/i,
 ];
 
 export function scoreStory(title: string, content: string): ScoringResult {
