@@ -16,6 +16,7 @@ import { scheduledInstagramSyncHandler } from "../scheduledInstagramSync";
 import { scheduledPipelineHandler } from "../scheduledPipeline";
 import { scheduledDbCleanupHandler } from "../scheduledDbCleanup";
 import { seedOnStartup } from "../seed";
+import { recoverStaleProcessingPackages } from "../db";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -202,6 +203,8 @@ async function startServer() {
     console.log(`Server running on http://localhost:${port}/`);
     // Seed RSS sources on startup (no-op if already seeded)
     seedOnStartup().catch(err => console.warn("[Seed] Startup seed check failed:", err));
+    // Recover any packages stuck in 'processing' from a previous server crash
+    recoverStaleProcessingPackages().catch(err => console.warn("[Recovery] Stale processing recovery failed:", err));
   });
 }
 

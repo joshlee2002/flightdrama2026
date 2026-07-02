@@ -274,12 +274,39 @@ function FeedbackBar({ storyId, currentRating, currentNote }: { storyId: number;
   );
 }
 
-function ProcessingState({ storyId }: { storyId: number }) {
+function ProcessingState({ storyId, onForceReset }: { storyId: number; onForceReset?: () => void }) {
   const utils = trpc.useUtils();
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const STUCK_THRESHOLD_SECS = 10 * 60; // 10 minutes
+
   useEffect(() => {
-    const id = setInterval(() => { utils.stories.list.invalidate(); }, 5000);
-    return () => clearInterval(id);
+    const pollId = setInterval(() => { utils.stories.list.invalidate(); }, 5000);
+    const tickId = setInterval(() => { setElapsedSeconds(s => s + 1); }, 1000);
+    return () => { clearInterval(pollId); clearInterval(tickId); };
   }, [utils]);
+
+  const isStuck = elapsedSeconds >= STUCK_THRESHOLD_SECS;
+
+  if (isStuck) {
+    return (
+      <div className="flex flex-col items-center justify-center py-8 gap-3">
+        <div className="w-10 h-10 rounded-full bg-red-500/10 flex items-center justify-center">
+          <X className="w-5 h-5 text-red-400" />
+        </div>
+        <div className="text-center">
+          <p className="text-sm font-medium text-foreground">Research appears stuck</p>
+          <p className="text-xs text-muted-foreground mt-0.5 max-w-xs">
+            The pipeline has been running for over 10 minutes — it likely crashed silently (e.g. server restart). Click Re-Research to restart it.
+          </p>
+        </div>
+        {onForceReset && (
+          <Button size="sm" variant="outline" className="gap-1.5 text-xs" onClick={onForceReset}>
+            <RotateCcw className="w-3 h-3" /> Re-Research
+          </Button>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col items-center justify-center py-8 gap-3">
@@ -289,6 +316,9 @@ function ProcessingState({ storyId }: { storyId: number }) {
       <div className="text-center">
         <p className="text-sm font-medium text-foreground">Soyunci is researching &amp; writing</p>
         <p className="text-xs text-muted-foreground mt-0.5">Deep research → angle detection → article → headlines → images</p>
+        {elapsedSeconds > 90 && (
+          <p className="text-xs text-amber-400/80 mt-1.5">Taking longer than usual — still working…</p>
+        )}
       </div>
       <div className="flex gap-1">
         {[0, 1, 2].map(i => (
@@ -1195,7 +1225,7 @@ function ApprovedCard({ story, pkg, onUnapprove, isUnapproving, onMarkComplete, 
         </div>
       </div>
 
-      {isProcessing && <ProcessingState storyId={story.id} />}
+      {isProcessing && <ProcessingState storyId={story.id} onForceReset={() => reResearch.mutate({ storyId: story.id })} />}
       {isFailed && (
         <div className="px-4 py-4 text-center">
           <p className="text-sm text-destructive mb-2">Research pipeline failed</p>

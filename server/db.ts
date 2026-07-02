@@ -1104,3 +1104,41 @@ export async function getConfirmedDuplicatePairs(
     return getRecentDuplicatePairs(limit);
   }
 }
+
+/** On server startup, find any packages stuck in 'processing' for more than 10 minutes
+ * and mark them as 'failed'. This handles the case where a Railway restart killed the
+ * pipeline mid-run — without this, the story would spin forever in the approved queue.
+ */
+export async function recoverStaleProcessingPackages(): Promise<void> {
+  try {
+    const db = await getDb();
+    if (!db) return;
+    const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
+    const stale = await db
+      .select({ storyId: storyPackages.storyId })
+      .from(storyPackages)
+      .where(
+        and(
+          eq(storyPackages.processingStatus, "processing"),
+          lte(storyPackages.updatedAt, tenMinutesAgo)
+        )
+      );
+    if (stale.length === 0) {
+      console.log("[Recovery] No stale processing packages found.");
+      return;
+    }
+    const staleIds = stale.map(r => r.storyId);
+    const rawClient = (db as any).$client;
+    const placeholders = staleIds.map(() => "?").join(",");
+    const rawQuery = `UPDATE \`story_packages\` SET \`processingStatus\` = 'failed', \`processingError\` = ?, \`updatedAt\` = NOW() WHERE \`storyId\` IN (${placeholders})`;
+    const params = ["Pipeline interrupted — server was restarted while processing. Click Re-Research to retry.", ...staleIds];
+    if (typeof rawClient.execute === "function") {
+      await rawClient.execute(rawQuery, params);
+    } else {
+      await rawClient.query(rawQuery, params);
+    }
+    console.log(`[Recovery] Marked ${stale.length} stale processing package(s) as failed: storyIds=${staleIds.join(",")}`);
+  } catch (err) {
+    console.warn("[Recovery] recoverStaleProcessingPackages error:", err);
+  }
+}
