@@ -443,6 +443,49 @@ export async function scoreStoryWithLLM(
     }
   };
 
+  // ── Title gate: LLM reads the headline and decides if it's aviation-related ──
+  // This runs BEFORE rule scoring and BEFORE the full scoring prompt.
+  // It catches non-aviation stories (road trips, wellness, celebrity gossip, etc.)
+  // that slip through the keyword gate because their content contains incidental
+  // aviation words (e.g. "flight" in a sidebar link or footer).
+  // Uses the 8B model with maxTokens:5 — just YES or NO.
+  try {
+    const titleGateResponse = await invokeLLM({
+      model: scoringModel,
+      messages: [
+        {
+          role: "system",
+          content: `You are an aviation content filter for FlightDrama, an aviation Instagram account.
+Answer YES if the headline is about aviation, airlines, airports, aircraft, pilots, or anything directly related to the aviation industry.
+Answer NO if the headline is about road trips, motorcycles, trains, boats, canoes, hiking, wellness, food, hotels, celebrity gossip, politics, immigration, or any non-aviation topic.
+Respond with ONLY the word YES or NO. Nothing else.`,
+        },
+        { role: "user", content: `Headline: "${title}"` },
+      ],
+      maxTokens: 5,
+    });
+    const titleGateRaw = String(titleGateResponse?.choices?.[0]?.message?.content ?? "").trim().toUpperCase();
+    const isAviation = titleGateRaw.startsWith("YES");
+    if (!isAviation) {
+      console.log(`[TitleGate] REJECTED non-aviation headline: "${title.slice(0, 80)}"`);
+      return {
+        score: 5,
+        statusLabel: "reject" as ScoringResult["statusLabel"],
+        category: ruleResult.category,
+        viralReason: "Title gate: headline is not about aviation.",
+        triggers: ["Title gate: not aviation"],
+        viralExplanation: "This headline is not about aviation and was filtered before full scoring.",
+        ruleScore: ruleResult.score,
+        apprenticeConfidence: "High",
+        apprenticeReasoning: "LLM title gate determined this headline is not aviation-related.",
+        scoringMethod: "rule_based",
+      };
+    }
+  } catch (titleGateErr) {
+    // If the title gate fails, proceed with normal scoring — don't block on a gate error
+    console.warn("[TitleGate] Title gate failed, proceeding with normal scoring:", titleGateErr);
+  }
+
   try {
     const { systemPrompt, exampleTitles } = await buildScoringContext(title, ruleResult.category);
     const truncatedContent = content?.slice(0, 800) ?? ""; // 800 chars matches batch scoring — sufficient for LLM to understand the story
@@ -560,9 +603,59 @@ export async function batchScoreStoriesWithLLM(
   const scoringModel = ENV.scoringLlmModel || ENV.defaultLlmModel || "llama-3.1-8b-instant";
   const verifyModel = ENV.defaultLlmModel || "llama-3.3-70b-versatile";
 
-  // Build context using the first story's title/category as the anchor.
+  // ── Title gate: filter out non-aviation stories before the batch LLM call ──
+  // Ask the 8B model to classify all titles in one call (cheaper than individual calls).
+  // Stories that fail the gate get score=5/reject immediately without entering the batch.
+  const titleGateReject: LLMScoringResult = {
+    score: 5,
+    statusLabel: "reject" as ScoringResult["statusLabel"],
+    category: "Non-Aviation",
+    viralReason: "Title gate: headline is not about aviation.",
+    triggers: ["Title gate: not aviation"],
+    viralExplanation: "This headline is not about aviation and was filtered before full scoring.",
+    ruleScore: 5,
+    apprenticeConfidence: "High",
+    apprenticeReasoning: "LLM title gate determined this headline is not aviation-related.",
+    scoringMethod: "rule_based",
+  };
+  let aviationStories = stories;
+  const gateResults: Map<number, LLMScoringResult> = new Map();
+  try {
+    const titleList = stories.map((s, i) => `${i + 1}. "${s.title}"`).join("\n");
+    const gateResponse = await invokeLLM({
+      model: scoringModel,
+      messages: [
+        {
+          role: "system",
+          content: `You are an aviation content filter. For each numbered headline, answer YES if it is about aviation (airlines, airports, aircraft, pilots, crashes, aviation industry) or NO if it is not (road trips, trains, boats, wellness, food, hotels, celebrity gossip, politics, immigration, nature).\nRespond with ONLY a comma-separated list of YES or NO answers in order. Example: YES,NO,YES,YES,NO`,
+        },
+        { role: "user", content: titleList },
+      ],
+      maxTokens: stories.length * 5,
+    });
+    const gateRaw = String(gateResponse?.choices?.[0]?.message?.content ?? "").trim();
+    const gateAnswers = gateRaw.split(/[,\s]+/).map(a => a.trim().toUpperCase());
+    if (gateAnswers.length === stories.length) {
+      aviationStories = stories.filter((_, i) => {
+        const isAviation = gateAnswers[i]?.startsWith("YES");
+        if (!isAviation) {
+          console.log(`[TitleGate] Batch REJECTED: "${stories[i].title.slice(0, 80)}"`);
+          gateResults.set(i, { ...titleGateReject, category: stories[i].ruleScore.category, ruleScore: stories[i].ruleScore.score });
+        }
+        return isAviation;
+      });
+    }
+  } catch (gateErr) {
+    console.warn("[TitleGate] Batch title gate failed, proceeding without gate:", gateErr);
+  }
+  // If all stories were filtered out, return the gate results
+  if (aviationStories.length === 0) {
+    return stories.map((_, i) => gateResults.get(i) ?? { ...titleGateReject, category: stories[i].ruleScore.category, ruleScore: stories[i].ruleScore.score });
+  }
+
+  // Build context using the first aviation story's title/category as the anchor.
   // This gives the best coverage for homogeneous batches (same ingest run).
-  const firstStory = stories[0];
+  const firstStory = aviationStories[0];
   const { systemPrompt, exampleTitles } = await buildScoringContext(
     firstStory.title,
     firstStory.ruleScore.category
@@ -571,16 +664,16 @@ export async function batchScoreStoriesWithLLM(
   // Modify system prompt for batch output
   const batchSystemPrompt = systemPrompt.replace(
     /Respond ONLY with a valid JSON object[\s\S]*/,
-    `Respond ONLY with a valid JSON array of ${stories.length} objects, one per story, in the same order as the input. Each object must have:
+    `Respond ONLY with a valid JSON array of ${aviationStories.length} objects, one per story, in the same order as the input. Each object must have:
 { "score": <integer 0-100>, "statusLabel": "<must_post|strong_candidate|maybe|reject>", "category": "<category>", "viralReason": "<one sentence>", "viralExplanation": "<two to three sentences>", "triggers": ["<trigger 1>", "<trigger 2>"], "apprenticeConfidence": "<High|Medium|Low>", "apprenticeReasoning": "<one sentence on how past corrections influenced this score>" }
 Return ONLY the JSON array. No other text.`
   );
 
-  const storyList = stories
+  const storyList = aviationStories
     .map((s, i) => `Story ${i + 1}:\nTitle: "${s.title}"\nContent: "${s.content.slice(0, 800)}"`)
     .join("\n\n---\n\n");
 
-  const userMessage = `Score these ${stories.length} aviation stories:\n\n${storyList}`;
+  const userMessage = `Score these ${aviationStories.length} aviation stories:\n\n${storyList}`;
 
   try {
     const response = await invokeLLM({
@@ -595,7 +688,7 @@ Return ONLY the JSON array. No other text.`
     const jsonMatch = raw.match(/\[[\s\S]*\]/);
     if (!jsonMatch) {
       console.warn("[LLMScoring] Batch: no JSON array in response, falling back to individual scoring");
-      return Promise.all(stories.map(s => scoreStoryWithLLM(s.title, s.content)));
+      return Promise.all(aviationStories.map(s => scoreStoryWithLLM(s.title, s.content)));
     }
 
     const parsedArray = JSON.parse(jsonMatch[0]) as Array<{
@@ -609,16 +702,16 @@ Return ONLY the JSON array. No other text.`
       apprenticeReasoning?: string;
     }>;
 
-    if (!Array.isArray(parsedArray) || parsedArray.length !== stories.length) {
-      console.warn(`[LLMScoring] Batch: expected ${stories.length} results, got ${parsedArray?.length ?? 0}. Falling back.`);
-      return Promise.all(stories.map(s => scoreStoryWithLLM(s.title, s.content)));
+    if (!Array.isArray(parsedArray) || parsedArray.length !== aviationStories.length) {
+      console.warn(`[LLMScoring] Batch: expected ${aviationStories.length} results, got ${parsedArray?.length ?? 0}. Falling back.`);
+      return Promise.all(aviationStories.map(s => scoreStoryWithLLM(s.title, s.content)));
     }
 
     const validLabels = ["must_post", "strong_candidate", "maybe", "reject"];
-    const results: LLMScoringResult[] = [];
+    const aviationResults: LLMScoringResult[] = [];
 
-    for (let i = 0; i < stories.length; i++) {
-      const s = stories[i];
+    for (let i = 0; i < aviationStories.length; i++) {
+      const s = aviationStories[i];
       const p = parsedArray[i];
 
       if (
@@ -629,7 +722,7 @@ Return ONLY the JSON array. No other text.`
         !validLabels.includes(p.statusLabel)
       ) {
         // Invalid entry — fall back to rule-based for this story (no stat adjustment)
-        results.push({
+        aviationResults.push({
           ...s.ruleScore,
           ruleScore: s.ruleScore.score,
           scoringMethod: "rule_based",
@@ -641,7 +734,7 @@ Return ONLY the JSON array. No other text.`
       if (p.score >= 88 && scoringModel !== verifyModel) {
         try {
           const verified = await scoreStoryWithLLM(s.title, s.content);
-          results.push(verified);
+          aviationResults.push(verified);
           continue;
         } catch {
           // Verification failed — use batch result
@@ -651,7 +744,7 @@ Return ONLY the JSON array. No other text.`
       const llmCategory = p.category ?? s.ruleScore.category;
       const llmScore = Math.min(95, Math.round(p.score));
       const derivedLabel = labelFromScore(llmScore) as ScoringResult["statusLabel"];
-      results.push({
+      aviationResults.push({
         score: llmScore,
         statusLabel: derivedLabel,
         category: llmCategory,
@@ -666,10 +759,18 @@ Return ONLY the JSON array. No other text.`
       });
     }
 
-    return results;
+    // Merge gate-rejected results back in, preserving original order
+    if (gateResults.size === 0) return aviationResults;
+    const aviationIndexes = stories
+      .map((_, i) => i)
+      .filter(i => !gateResults.has(i));
+    const finalResults: LLMScoringResult[] = new Array(stories.length);
+    for (const [i, r] of gateResults) finalResults[i] = r;
+    for (let j = 0; j < aviationResults.length; j++) finalResults[aviationIndexes[j]] = aviationResults[j];
+    return finalResults;
   } catch (err) {
     console.error("[LLMScoring] Batch scoring failed, falling back to individual:", err);
-    return Promise.all(stories.map(s => scoreStoryWithLLM(s.title, s.content)));
+    return Promise.all(aviationStories.map(s => scoreStoryWithLLM(s.title, s.content)));
   }
 }
 
