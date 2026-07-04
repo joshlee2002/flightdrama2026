@@ -110,6 +110,25 @@ export const DEFAULT_RSS_SOURCES = [
   { name: "GNews: Pilot Error", url: "https://news.google.com/rss/search?q=pilot+error+crash+OR+cockpit+incident&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
   { name: "GNews: Airline Strike", url: "https://news.google.com/rss/search?q=airline+strike+OR+cabin+crew+strike&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
   { name: "GNews: Near Miss", url: "https://news.google.com/rss/search?q=near+miss+aircraft+OR+planes+collision&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
+  // Pilot & crew pay — proven top engagement category
+  { name: "GNews: Pilot Pay", url: "https://news.google.com/rss/search?q=pilot+salary+OR+pilot+pay+OR+captain+salary&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
+  { name: "GNews: Cabin Crew Pay", url: "https://news.google.com/rss/search?q=flight+attendant+salary+OR+cabin+crew+pay&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
+  // Passenger outrage — proven viral
+  { name: "GNews: Passenger Outrage", url: "https://news.google.com/rss/search?q=passenger+removed+flight+OR+passenger+banned+airline&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
+  { name: "GNews: Airline Lawsuit", url: "https://news.google.com/rss/search?q=airline+lawsuit+OR+suing+airline+OR+airline+sued&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
+  // Nostalgia & classic aircraft — proven high engagement
+  { name: "GNews: Classic Aircraft", url: "https://news.google.com/rss/search?q=747+OR+DC-8+OR+DC-10+OR+L-1011+OR+Concorde+aviation&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
+  { name: "GNews: Aircraft Retirement", url: "https://news.google.com/rss/search?q=aircraft+retirement+OR+final+flight+OR+last+flight+airline&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
+  // Weird human moments — proven viral
+  { name: "GNews: Weird Passenger", url: "https://news.google.com/rss/search?q=passenger+arrested+plane+OR+passenger+fight+flight+OR+passenger+drunk+plane&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
+  // Airline profit & revenue — proven engagement
+  { name: "GNews: Airline Profit", url: "https://news.google.com/rss/search?q=airline+profit+OR+airline+revenue+OR+airline+earnings&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
+  // Whistleblower & safety accountability
+  { name: "GNews: Aviation Whistleblower", url: "https://news.google.com/rss/search?q=aviation+whistleblower+OR+airline+safety+cover-up&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
+  // Military aviation — US Air Force, fighter jets
+  { name: "GNews: Military Aviation", url: "https://news.google.com/rss/search?q=air+force+jet+emergency+OR+military+aircraft+incident&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
+  // Rolls-Royce & engine manufacturers
+  { name: "GNews: Engine Manufacturers", url: "https://news.google.com/rss/search?q=Rolls-Royce+engine+aviation+OR+GE+Aviation+OR+Pratt+Whitney+engine&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
 
   // ── TIER 6: MAINSTREAM VIRAL SOURCES ─────────────────────────────────────
   // General news — strict aviation keyword gate applied.
@@ -183,6 +202,39 @@ const VIRAL_SOURCE_AVIATION_KEYWORDS = [
   "airline staff", "airline crew", "unruly passenger", "disruptive passenger",
   "passenger removed", "passenger arrested", "passenger banned",
   "mile high", "miles high",
+  // Passenger behaviour — proven viral story types that don't always use 'flight/airline'
+  "passenger", "cabin crew", "crew member", "on board", "onboard",
+  // Window seat, seat issues — 'Gayle King window seat' type stories
+  "window seat", "seat with no window", "broken seat", "seat belt",
+  // Pay/salary stories — 'Southwest crew', 'captain pay', etc. without 'airline' in title
+  "crew pay", "crew salary", "captain pay", "captain salary", "captain earn",
+  "crew earn", "crew wage", "crew now", "crew leads",
+  // Lawsuit/policy stories — 'no pay until doors close', 'pays for second seat'
+  "doors close", "second seat", "plus-size", "plus size",
+  // Stowaway / death on aircraft
+  "stowaway", "stowaways",
+  // Specific airlines without 'airlines' suffix that might be missed
+  "spirit ", "frontier ", "southwest ", "delta ", "united ", "american ",
+  // Military/defence aviation — 'US Air Force jet', 'F-35', 'Gripen', 'B-52'
+  "air force", "f-35", "f35", "gripen", "b-52", "b52", "fighter",
+  // Engine manufacturers — 'Rolls-Royce engine', 'GE engine'
+  "rolls-royce", "rolls royce", "ge aviation", "pratt & whitney", "pratt and whitney", "safran",
+  // Crash/incident without 'plane crash' exact phrase
+  "crash", "crashed", "grounded", "grounds ", "emergency", "declares emergency",
+  // Revenue/profit stories — 'American made $54.6 billion'
+  "revenue", "profit", "net income", "billion in",
+  // MD-11, DC-10, L-1011 and other classic jets not in model list
+  "md-11", "md11", "dc-10", "dc10", "dc-8", "dc8", "l-1011", "l1011", "tristar",
+  // Viral human interest without obvious aviation keyword
+  "farting", "fart", "cannabis", "drunk", "naked", "stowaway",
+  "duct-taped", "duct taped", "taped to seat",
+  "wine to", "serves wine",
+  // Death/casualty count stories — '67 dead', 'X killed', 'death toll'
+  " dead ", " dead,", " dead.", " dead", "killed", "deaths", "death toll", "fatalities",
+  "the system", "admits it failed", "failed",
+  // Airline brand names used alone (without 'airlines' suffix)
+  "alaska ", "hawaiian ", "virgin america", "virgin atlantic", "virgin australia",
+  "norwegian", "westjet", "porter ", "sunwing",
   // Aircraft types
   "helicopter", "private jet", "cargo plane", "cargo aircraft", "cargo flight",
   "low-cost carrier", "budget airline", "charter flight", "charter plane",
