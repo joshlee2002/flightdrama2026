@@ -305,7 +305,7 @@ export function isAviationRelevant(title: string, content: string, category: str
 }
 
 /** How far back (in days) to accept articles from RSS feeds. */
-const RSS_LOOKBACK_DAYS = 2;
+const RSS_LOOKBACK_DAYS = 3;
 
 /**
  * Fetch and parse a single RSS feed.

@@ -207,11 +207,20 @@ export async function getStoriesWithPackages(filters?: {
   if (filters?.approvalStatus) {
     conditions.push(eq(stories.approvalStatus, filters.approvalStatus as any));
   } else {
-    // Default: exclude rejected, dismissed, duplicate, and completed stories from the dashboard
+    // Default: exclude rejected, dismissed, duplicate, completed, AND approved stories from the dashboard.
+    // Approved stories have been actioned by the editor — they live in the Approved Queue, not here.
+    // Completed stories have been fully processed and posted — they should never return.
     conditions.push(ne(stories.approvalStatus, "rejected" as any));
     conditions.push(ne(stories.approvalStatus, "dismissed" as any));
     conditions.push(ne(stories.approvalStatus, "duplicate" as any));
     conditions.push(ne(stories.approvalStatus, "completed" as any));
+    conditions.push(ne(stories.approvalStatus, "approved" as any));
+    // Only show stories from the last 3 days on the main dashboard.
+    // Stories older than 3 days are stale news and should not clutter the queue.
+    const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+    conditions.push(
+      sql`COALESCE(${stories.publishedAt}, ${stories.createdAt}) >= ${threeDaysAgo}`
+    );
   }
   if (filters?.minScore !== undefined) {
     conditions.push(gte(stories.viralScore, filters.minScore));
