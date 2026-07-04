@@ -207,6 +207,7 @@ async function buildScoringContext(
     const pct = (n: number) => Math.round((n / scores.length) * 100);
 
     const sortedScores = [...scores].sort((a, b) => a - b);
+    const p50 = sortedScores[Math.floor(sortedScores.length * 0.5)] ?? avgScore; // median
     const p75 = sortedScores[Math.floor(sortedScores.length * 0.75)] ?? maxScore;
     const p90 = sortedScores[Math.min(Math.floor(sortedScores.length * 0.9), sortedScores.length - 1)] ?? maxScore;
     const highThreshold = Math.max(p75, 75);
@@ -239,19 +240,21 @@ async function buildScoringContext(
     return [
       `## CALIBRATION — You MUST match this editor's exact scoring scale`,
       `This editor has scored ${scores.length} stories. Their real distribution is:`,
-      `- Score range seen so far: ${minScore}–${maxScore} | Average: ${avgScore}`,
+      `- Score range seen so far: ${minScore}–${maxScore} | Median: ${p50} | Average: ${avgScore}`,
       `- Distribution: ${pct(bucket0_30)}% score 0–30 | ${pct(bucket31_60)}% score 31–60 | ${pct(bucket61_80)}% score 61–80 | ${pct(bucket81_100)}% score 81–100`,
       softCeilingNote,
+      `- The MEDIAN score is ${p50}. This is your anchor. A typical story should score around ${p50}, not at the top of the range.`,
       `- Most strong stories score ${strongThreshold}–${mustPostThreshold - 1}. Reserve ${mustPostThreshold}+ for genuinely shocking events.`,
       `- DISTRIBUTION RULE: Do NOT cluster scores at the top. If you are scoring a batch of mixed stories, they CANNOT all be the same score. Spread scores across the full range. Score lower and let the editor correct upward.`,
-      `- CRITICAL: If ${pct(bucket81_100)}% of this editor's overrides are above 80, that means only ${pct(bucket81_100)}% of stories deserve 80+. The rest should be scored proportionally lower.`,
-      ...(anchors.length > 0 ? [`- Recent real score anchors from this editor:`, ...anchors] : []),
+      `- CRITICAL: Only ${pct(bucket81_100)}% of this editor's overrides are above 80. That means ${100 - pct(bucket81_100)}% of stories score 80 or below. If you are giving more than ${pct(bucket81_100)}% of stories a score above 80, you are wrong.`,
+      `- DEFAULT ASSUMPTION: When uncertain, score at or below the median (${p50}). The editor will correct upward if needed. It is much better to score too low than too high.`,
+      ...(anchors.length > 0 ? [`- Real score anchors from this editor (use these to calibrate your scale):`, ...anchors] : []),
       ``,
       `Score thresholds (calibrated to this editor's scale):`,
-      `- ${mustPostThreshold}–100 = must_post`,
+      `- ${mustPostThreshold}–100 = must_post (only ${pct(bucket81_100)}% of stories reach this)`,
       `- ${strongThreshold}–${mustPostThreshold - 1} = strong_candidate`,
       `- 50–${strongThreshold - 1} = maybe`,
-      `- 0–49 = reject`,
+      `- 0–49 = reject (${pct(bucket0_30 + bucket31_60)}% of this editor's stories land here)`,
       `- AUTOMATIC REJECT (score 0–15): listicles, travel guides, product reviews, opinion columns, sponsored content, award announcements.`,
     ].join("\n");
   })();
