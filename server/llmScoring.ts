@@ -159,18 +159,36 @@ async function getRelevantOverrides(
  */
 async function buildScoringContext(
   title: string,
-  category: string
+  category: string,
+  additionalCategories?: string[]
 ): Promise<{
   systemPrompt: string;
   hasExamples: boolean;
   exampleTitles: string[];
 }> {
-  const [relevantExamples, config, historicalPosts, allExamplesForCalibration] = await Promise.all([
-    getRelevantOverrides(title, category, 20),
+  // For mixed-category batches, fetch examples for each category and merge them.
+  // This ensures the LLM sees relevant corrections for all story types in the batch,
+  // not just the dominant category — which was causing uniform high scores on batches
+  // that mixed high-value and low-value story types.
+  const extraCategoryExamples = additionalCategories && additionalCategories.length > 0
+    ? await Promise.all(
+        additionalCategories
+          .filter(c => c.toLowerCase() !== category.toLowerCase())
+          .map(c => getRelevantOverrides(c, c, 8)) // 8 examples per extra category
+      )
+    : [];
+
+  const [primaryExamples, config, historicalPosts, allExamplesForCalibration] = await Promise.all([
+    getRelevantOverrides(title, category, additionalCategories && additionalCategories.length > 1 ? 12 : 20),
     getAllScoringConfig(),
     getHistoricalPosts(30),
     getOverrideExamplesFromDb(500),
   ]);
+
+  // Merge examples: primary first, then extra-category examples (deduplicated by id)
+  const seenIds = new Set(primaryExamples.map(e => e.id));
+  const mergedExtras = extraCategoryExamples.flat().filter(e => !seenIds.has(e.id));
+  const relevantExamples = [...primaryExamples, ...mergedExtras].slice(0, 25);
 
   // ── Score calibration: compute editor's actual distribution ──────────────
   const calibrationBlock = (() => {
@@ -225,7 +243,8 @@ async function buildScoringContext(
       `- Distribution: ${pct(bucket0_30)}% score 0–30 | ${pct(bucket31_60)}% score 31–60 | ${pct(bucket61_80)}% score 61–80 | ${pct(bucket81_100)}% score 81–100`,
       softCeilingNote,
       `- Most strong stories score ${strongThreshold}–${mustPostThreshold - 1}. Reserve ${mustPostThreshold}+ for genuinely shocking events.`,
-      `- DISTRIBUTION RULE: Do NOT cluster scores at the top. Score lower and let the editor correct upward.`,
+      `- DISTRIBUTION RULE: Do NOT cluster scores at the top. If you are scoring a batch of mixed stories, they CANNOT all be the same score. Spread scores across the full range. Score lower and let the editor correct upward.`,
+      `- CRITICAL: If ${pct(bucket81_100)}% of this editor's overrides are above 80, that means only ${pct(bucket81_100)}% of stories deserve 80+. The rest should be scored proportionally lower.`,
       ...(anchors.length > 0 ? [`- Recent real score anchors from this editor:`, ...anchors] : []),
       ``,
       `Score thresholds (calibrated to this editor's scale):`,
@@ -243,6 +262,13 @@ async function buildScoringContext(
 - Score 88+ (must_post) for no more than 15% of stories.
 - DISTRIBUTION RULE: Do NOT cluster scores at the top. Spread scores across 45–85.
 - AUTOMATIC REJECT (score 0–15): listicles, travel guides, product reviews, opinion columns, sponsored content, award announcements.`;
+
+  // ── Pattern library — per-category scoring rules derived from all overrides ──
+  // BUG FIX: patternLibrary was referenced at line ~367 but never declared here.
+  // This caused Layer 2 (the most important learned signal) to be silently skipped
+  // in every single scoring call, meaning the LLM never saw the per-category rules
+  // derived from the editor's 500 overrides.
+  const patternLibrary = config["pattern_library"] ?? null;
 
   // ── Editorial philosophy (plain English, replaces JSON weight matrix) ─────
   const editorialPhilosophy = config["editorial_philosophy"] ?? null;
@@ -695,6 +721,10 @@ export async function batchScoreStoriesWithLLM(
 
   // Build context using the most common category in the batch as the anchor.
   // This gives better coverage for mixed-category batches than always using the first story.
+  // NOTE: We still build one shared prompt per batch (for cost efficiency), but we now
+  // pull override examples for ALL unique categories in the batch, not just the dominant one.
+  // This means a batch with 3 Boeing stories + 2 Passenger Outrage stories will get
+  // relevant examples for both categories injected into the shared prompt.
   const categoryCounts: Record<string, number> = {};
   for (const s of aviationStories) {
     const cat = s.ruleScore.category ?? "General Aviation";
@@ -702,9 +732,15 @@ export async function batchScoreStoriesWithLLM(
   }
   const dominantCategory = Object.entries(categoryCounts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? "General Aviation";
   const anchorStory = aviationStories.find(s => (s.ruleScore.category ?? "General Aviation") === dominantCategory) ?? aviationStories[0];
+
+  // Collect unique categories in this batch (up to 3 to keep prompt size reasonable)
+  const batchCategories = [...new Set(aviationStories.map(s => s.ruleScore.category ?? "General Aviation"))].slice(0, 3);
+  const isMixedBatch = batchCategories.length > 1;
+
   const { systemPrompt, exampleTitles } = await buildScoringContext(
     anchorStory.title,
-    dominantCategory
+    dominantCategory,
+    isMixedBatch ? batchCategories : undefined
   );
 
   // Modify system prompt for batch output

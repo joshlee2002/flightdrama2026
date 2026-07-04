@@ -62,7 +62,7 @@ async function llmAviationRescue(title: string, content: string): Promise<boolea
       ],
       maxTokens: 5,
     });
-    const answer = result.choices?.[0]?.message?.content?.trim().toUpperCase() ?? "NO";
+    const answer = String(result.choices?.[0]?.message?.content ?? "").trim().toUpperCase();
     return answer.startsWith("YES");
   } catch {
     return false; // On error, keep the gate's decision (drop)
