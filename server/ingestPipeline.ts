@@ -34,6 +34,7 @@ import {
   getLocationIncidentMatches,
   llmDedupCheck,
   isAviationRelevant,
+  isNonEnglish,
 } from "./ingestion";
 import { buildEventFingerprint, buildContentHash } from "./eventFingerprint";
 import { invokeLLM as _invokeLLM } from "./_core/llm";
@@ -238,6 +239,23 @@ export async function runIngestPipeline(label = "Ingest"): Promise<IngestResult>
       if (seenUrlSet.has(item.sourceUrl)) {
         // already_seen: URL was processed in a previous ingest run — skip silently (no log entry,
         // this would generate thousands of rows for normal dedup)
+        skippedCount++;
+        continue;
+      }
+
+      // ── Language filter: drop non-English stories before any further processing ──
+      // AeroTelegraph and some other aviation sources publish in German/French/Dutch.
+      // These stories are irrelevant to an English-language Instagram audience.
+      if (isNonEnglish(item.title || "", item.content || "")) {
+        logDrop({
+          title: item.title || "Untitled",
+          sourceUrl: item.sourceUrl,
+          sourceName: source.name,
+          dropReason: "not_aviation",
+          dropDetail: `Non-English story filtered out. Title: "${(item.title || "").slice(0, 120)}"`,
+          publishedAt: item.publishedAt ?? null,
+        });
+        markSeenBatch.push({ url: item.sourceUrl, reason: "non_english" });
         skippedCount++;
         continue;
       }

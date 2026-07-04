@@ -280,6 +280,65 @@ const VIRAL_SOURCE_AVIATION_KEYWORDS = [
   "istanbul airport", "athens airport", "amsterdam airport",
 ];
 
+/**
+ * Detects if a story is written in a non-English language.
+ * Uses a fast heuristic: checks for high-frequency German, French, Spanish,
+ * Italian, Dutch, and Portuguese function words that are unambiguous in context.
+ * Returns true if the story appears to be non-English (should be filtered out).
+ */
+export function isNonEnglish(title: string, content: string): boolean {
+  const sample = `${title} ${content.slice(0, 400)}`.toLowerCase();
+
+  // German — very distinctive function words and compounds
+  const germanWords = [
+    " die ", " der ", " das ", " den ", " dem ", " des ",
+    " und ", " oder ", " aber ", " auch ", " nicht ", " noch ",
+    " mit ", " von ", " aus ", " bei ", " nach ", " über ",
+    " für ", " als ", " wie ", " wenn ", " dass ", " sich ",
+    " wird ", " wurde ", " haben ", " hatte ", " sein ", " sind ",
+    " eine ", " einen ", " einem ", " einer ", " eines ",
+    " mehr ", " neue ", " neuen ", " neuer ",
+    "flugzeug", "flughafen", "lufthansa", "fluggesellschaft",
+    "passagiere", "piloten", "sicherheit", "unfall",
+  ];
+  // French
+  const frenchWords = [
+    " les ", " des ", " une ", " est ", " sont ", " dans ",
+    " pour ", " avec ", " sur ", " par ", " qui ", " que ",
+    " pas ", " plus ", " tout ", " cette ", " leur ",
+    "avion", "aéroport", "compagnie aérienne", "pilote",
+  ];
+  // Spanish
+  const spanishWords = [
+    " los ", " las ", " del ", " una ", " por ", " con ",
+    " que ", " más ", " está ", " han ", " fue ", " ser ",
+    "avión", "aeropuerto", "aerolínea",
+  ];
+  // Italian
+  const italianWords = [
+    " gli ", " del ", " della ", " delle ", " degli ",
+    " per ", " con ", " una ", " che ", " non ", " sono ",
+    "aereo", "aeroporto", "compagnia aerea",
+  ];
+  // Dutch
+  const dutchWords = [
+    " het ", " een ", " van ", " met ", " zijn ", " voor ",
+    " naar ", " ook ", " maar ", " door ", " over ",
+    "vliegtuig", "luchthaven",
+  ];
+
+  // Count hits per language — need at least 3 matches to be confident
+  const countHits = (words: string[]) => words.filter(w => sample.includes(w)).length;
+
+  if (countHits(germanWords) >= 3) return true;
+  if (countHits(frenchWords) >= 3) return true;
+  if (countHits(spanishWords) >= 3) return true;
+  if (countHits(italianWords) >= 3) return true;
+  if (countHits(dutchWords) >= 3) return true;
+
+  return false;
+}
+
 export function isAviationRelevant(title: string, content: string, category: string): boolean {
   // Aviation-native sources: trust the source, pass everything through.
   // These are dedicated aviation publications — every story is relevant by definition.
