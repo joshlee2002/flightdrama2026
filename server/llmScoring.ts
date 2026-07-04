@@ -123,7 +123,7 @@ async function getRelevantOverrides(
   viralTriggers: string[] | null;
   updatedAt: Date | null;
 }>> {
-  const allExamples = await getOverrideExamplesFromDb(200);
+  const allExamples = await getOverrideExamplesFromDb(500);
   if (allExamples.length === 0) return [];
 
   const now = Date.now();
@@ -169,7 +169,7 @@ async function buildScoringContext(
     getRelevantOverrides(title, category, 20),
     getAllScoringConfig(),
     getHistoricalPosts(30),
-    getOverrideExamplesFromDb(200),
+    getOverrideExamplesFromDb(500),
   ]);
 
   // ── Score calibration: compute editor's actual distribution ──────────────
@@ -281,6 +281,34 @@ async function buildScoringContext(
       ].join("\n")
     : null;
 
+  // ── Drift calibration hint — built from stored per-category offsets ─────────
+  // This was previously undefined (a bug), causing the drift offsets to never
+  // be injected into the prompt. Now built from drift_calibration_offsets config.
+  const driftCalibrationHint = (() => {
+    const raw = config["drift_calibration_offsets"] ?? null;
+    if (!raw) return null;
+    let offsets: Record<string, { offset: number; avgJoshua: number; sampleSize: number }>;
+    try {
+      offsets = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+    const entries = Object.entries(offsets)
+      .filter(([, v]) => v.sampleSize >= 3 && Math.abs(v.offset) >= 5)
+      .sort((a, b) => Math.abs(b[1].offset) - Math.abs(a[1].offset))
+      .slice(0, 12);
+    if (entries.length === 0) return null;
+    const lines = entries.map(([cat, v]) => {
+      const dir = v.offset < 0
+        ? `AI scores ${Math.abs(v.offset)} pts TOO HIGH — score ${Math.abs(v.offset)} pts LOWER than your instinct`
+        : `AI scores ${v.offset} pts TOO LOW — score ${v.offset} pts HIGHER than your instinct`;
+      return `  ${cat}: ${dir} (Joshua avg: ${v.avgJoshua}, n=${v.sampleSize})`;
+    }).join("\n");
+    return `## SYSTEMATIC BIAS CORRECTIONS (MANDATORY — apply these before finalising your score)
+Statistical analysis of ${Object.values(offsets).reduce((s, v) => s + v.sampleSize, 0)} overrides shows the AI has systematic biases per category. Correct for them:
+${lines}`;
+  })();
+
   // ── Statistical signals — light guidance only ─────────────────────────────
   const statWeights = config["stat_category_weights"] ?? null;
   const statKeywordBoosts = config["stat_keyword_boosts"] ?? null;
@@ -369,6 +397,18 @@ CRITICAL: Look at the range of scores above. If Joshua's corrections cluster in 
 - CRITICAL: A score of 100 means a once-in-a-year story. Do not give 100 unless the story is genuinely unprecedented.
 - WHEN IN DOUBT about a story type you have not seen before: score it 30–45 so Joshua can see it and make the call. Do NOT score 0 just because you are uncertain — reserve 0–20 for stories with zero aviation relevance whatsoever.
 - FlightDrama covers more than crashes and fights. Quirky, fun, or surprising aviation stories are valid content: unusual airline menus, pilot pay reveals, celebrity private planes, unusual liveries, strange airport incidents, and aviation curiosities. If a story is genuinely interesting aviation content but not dramatic, score it 30–50 rather than 0.`;
+
+  // ── Hard ceiling rules based on production data analysis ─────────────────
+  // These rules correct systematic over-scoring patterns observed in production.
+  systemPrompt += `\n\n## HARD CEILING RULES (override everything else — these are non-negotiable)
+- "Celebrity Involvement" category: Joshua's average score for this category is 38. The AI consistently over-scores these. MAXIMUM score for Celebrity Involvement is 75 UNLESS the story involves a named celebrity in an actual aviation incident (crash, emergency, arrest). Airline news tagged as Celebrity Involvement (new routes, orders, CEO statements) scores 40-65.
+- Points/miles/credit card stories: MAXIMUM 30. These are travel rewards content, not aviation drama. Reject unless the story is about a major program collapse or fraud.
+- Hotel/resort reviews: MAXIMUM 15. These are not aviation content.
+- "Passenger Outrage" category: Joshua's average score is 45. Score 55-75 only for genuinely dramatic incidents (assault, removal, medical emergency). Routine complaints (lost luggage, delays, refunds) score 30-50.
+- "Pilot & Crew Pay" category: Joshua's average score is 38. Score 50-70 only for major strikes, contract battles, or dramatic pay reveals. Generic salary articles score 25-45.
+- Reddit/forum posts ("r/", "How do I", "Tips?", "Anyone else", "RANT:", "Help me"): MAXIMUM 45. These are community posts, not news stories.
+- Planespotter photos (planespotters.net, registration codes like "LY-MAU"): MAXIMUM 20. These are hobbyist content.
+- Award/points redemption guides ("How to book", "Best ways to use", "Points for", "Miles for"): MAXIMUM 25.`;
 
   systemPrompt += `\n\nRespond ONLY with a valid JSON object in this exact format:
 {
@@ -653,12 +693,18 @@ export async function batchScoreStoriesWithLLM(
     return stories.map((_, i) => gateResults.get(i) ?? { ...titleGateReject, category: stories[i].ruleScore.category, ruleScore: stories[i].ruleScore.score });
   }
 
-  // Build context using the first aviation story's title/category as the anchor.
-  // This gives the best coverage for homogeneous batches (same ingest run).
-  const firstStory = aviationStories[0];
+  // Build context using the most common category in the batch as the anchor.
+  // This gives better coverage for mixed-category batches than always using the first story.
+  const categoryCounts: Record<string, number> = {};
+  for (const s of aviationStories) {
+    const cat = s.ruleScore.category ?? "General Aviation";
+    categoryCounts[cat] = (categoryCounts[cat] ?? 0) + 1;
+  }
+  const dominantCategory = Object.entries(categoryCounts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? "General Aviation";
+  const anchorStory = aviationStories.find(s => (s.ruleScore.category ?? "General Aviation") === dominantCategory) ?? aviationStories[0];
   const { systemPrompt, exampleTitles } = await buildScoringContext(
-    firstStory.title,
-    firstStory.ruleScore.category
+    anchorStory.title,
+    dominantCategory
   );
 
   // Modify system prompt for batch output
@@ -804,7 +850,7 @@ export async function learnFromOverridesStatistical(): Promise<{
     .from(storiesTable)
     .where(and(isNotNull(storiesTable.overrideScore), isNotNull(storiesTable.overrideLabel)))
     .orderBy(desc(storiesTable.updatedAt))
-    .limit(200);
+    .limit(500);
 
   if (examples.length < 3) {
     return {
@@ -1109,7 +1155,15 @@ Your job is to build a STRUCTURED PATTERN LIBRARY from Joshua's score correction
 This is NOT a prose summary — it is a structured set of rules per story category.
 Each category must have: a score range, the key factors that push scores up or down, and what Joshua rejects.
 Be specific and concrete. Use the actual examples to derive the rules.
-The Instagram performance data is secondary context — Joshua's explicit corrections are the primary signal.`;
+The Instagram performance data is secondary context — Joshua's explicit corrections are the primary signal.
+
+CRITICAL CALIBRATION FACTS (derived from statistical analysis of all 500+ overrides):
+- "Celebrity Involvement" average Joshua score: 38. The AI over-scores this category by ~50 points. Cap at 75 unless actual aviation incident.
+- "Passenger Outrage" average Joshua score: 45. Routine complaints score 30-50. Dramatic incidents (assault, removal) score 55-75.
+- "Pilot & Crew Pay" average Joshua score: 38. Generic salary articles score 25-45. Major strikes/contracts score 50-70.
+- Points/miles/credit card content: Joshua rejects these (score 5-25). Not aviation drama.
+- Reddit/forum posts: Joshua scores these 20-45 maximum. Not publishable news.
+- Overall drift: AI scores 25 pts HIGHER than Joshua on average. The pattern library MUST correct for this downward.`;
 
   const userMessage = `Analyse these ${validExamples.length} editor override examples (grouped by category) and build a structured pattern library:
 
