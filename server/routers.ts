@@ -49,7 +49,7 @@ import {
   getIngestLog,
   getIngestLogSummary,
 } from "./db";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { stories } from "../drizzle/schema";
 import { fetchArticleContent, fetchRssFeed, isSimilarTitle, getLocationIncidentMatches, llmDedupCheck, isAviationRelevant, DEFAULT_RSS_SOURCES } from "./ingestion";
 import { invokeLLM } from "./_core/llm";
@@ -167,10 +167,16 @@ export const appRouter = router({
     pendingCount: publicProcedure.query(async () => {
       const db = await getDb();
       if (!db) return 0;
+      const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
       const result = await db
         .select({ count: sql<number>`COUNT(*)` })
         .from(stories)
-        .where(eq(stories.approvalStatus, "pending"));
+        .where(
+          and(
+            eq(stories.approvalStatus, "pending"),
+            sql`COALESCE(${stories.publishedAt}, ${stories.createdAt}) >= ${threeDaysAgo}`
+          )
+        );
       return Number(result[0]?.count ?? 0);
     }),
 
