@@ -139,6 +139,18 @@ export async function runIngestPipeline(label = "Ingest"): Promise<IngestResult>
   }
 
   const sources = await getActiveRssSources();
+
+  // ── Write ingest_progress to DB so the UI can poll it ────────────────────
+  const { setScoringConfig } = await import("./db");
+  await setScoringConfig("ingest_progress", JSON.stringify({
+    phase: "fetching",
+    sourcesTotal: sources.length,
+    sourcesDone: 0,
+    newCount: 0,
+    startedAt: Date.now(),
+    done: false,
+  }));
+
   const [recentTitles, learnedDuplicatePairs] = await Promise.all([
     getRecentStoryTitles(5000),
     getConfirmedDuplicatePairs(20), // Use editor-confirmed pairs as high-quality training data
@@ -206,6 +218,16 @@ export async function runIngestPipeline(label = "Ingest"): Promise<IngestResult>
 
   const feedResults = await pLimit(feedTasks, FEED_CONCURRENCY);
   console.log(`[${label}] Phase 1a: Fetched ${activeSources.length} feeds in ${Date.now() - t0}ms`);
+
+  // Update progress: feeds fetched
+  await setScoringConfig("ingest_progress", JSON.stringify({
+    phase: "filtering",
+    sourcesTotal: activeSources.length,
+    sourcesDone: activeSources.length,
+    newCount: 0,
+    startedAt: t0,
+    done: false,
+  })).catch(() => {});
 
   Promise.all(feedResults.map(r => updateRssSourceLastFetched(r.source.id))).catch(() => {});
 
@@ -533,6 +555,19 @@ export async function runIngestPipeline(label = "Ingest"): Promise<IngestResult>
     similarExamplesUsed?: string[];
   }> = [];
 
+  // Update progress: entering scoring phase
+  await setScoringConfig("ingest_progress", JSON.stringify({
+    phase: "scoring",
+    sourcesTotal: activeSources.length,
+    sourcesDone: activeSources.length,
+    scoringTotal: llmCandidates.length,
+    scoringDone: 0,
+    newCount: 0,
+    startedAt: t0,
+    done: false,
+  })).catch(() => {});
+
+  let scoringDone = 0;
   for (let i = 0; i < llmCandidates.length; i += LLM_BATCH_SIZE) {
     const batch = llmCandidates.slice(i, i + LLM_BATCH_SIZE);
     const batchInputs: BatchScoringInput[] = batch.map(s => ({
@@ -546,6 +581,18 @@ export async function runIngestPipeline(label = "Ingest"): Promise<IngestResult>
     } catch {
       batchResults = batch.map(s => ({ ...s.ruleScore, scoringMethod: "rule_based" as const }));
     }
+    scoringDone += batch.length;
+    // Update scoring progress every batch
+    setScoringConfig("ingest_progress", JSON.stringify({
+      phase: "scoring",
+      sourcesTotal: activeSources.length,
+      sourcesDone: activeSources.length,
+      scoringTotal: llmCandidates.length,
+      scoringDone,
+      newCount,
+      startedAt: t0,
+      done: false,
+    })).catch(() => {});
     for (let j = 0; j < batch.length; j++) {
       const s = batch[j];
       const r = batchResults[j] ?? { ...s.ruleScore, scoringMethod: "rule_based" as const };
@@ -630,6 +677,19 @@ export async function runIngestPipeline(label = "Ingest"): Promise<IngestResult>
 
   const durationMs = Date.now() - t0;
   console.log(`[${label}] Complete — ${newCount} new stories, ${skippedCount} skipped, ${durationMs}ms (runId: ${runId})`);
+
+  // Mark ingest as done
+  setScoringConfig("ingest_progress", JSON.stringify({
+    phase: "done",
+    sourcesTotal: activeSources.length,
+    sourcesDone: activeSources.length,
+    scoringTotal: llmCandidates.length,
+    scoringDone: llmCandidates.length,
+    newCount,
+    durationMs,
+    startedAt: t0,
+    done: true,
+  })).catch(() => {});
 
   // Flush all log entries to DB — fire-and-forget so it doesn't block the response
   batchInsertIngestLog(logEntries).catch(err =>

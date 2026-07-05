@@ -1169,6 +1169,27 @@ export const appRouter = router({
      * Returns the latest progress snapshot written to scoringConfig by the rerank mutation.
      * The client polls this every 2 seconds while reranking is active.
      */
+    ingestProgress: publicProcedure.query(async () => {
+      const raw = await getScoringConfig("ingest_progress");
+      if (!raw) return { phase: "idle", sourcesTotal: 0, sourcesDone: 0, scoringTotal: 0, scoringDone: 0, newCount: 0, done: true, startedAt: null };
+      try {
+        const p = JSON.parse(raw);
+        return {
+          phase: String(p.phase ?? "idle"),
+          sourcesTotal: Number(p.sourcesTotal ?? 0),
+          sourcesDone: Number(p.sourcesDone ?? 0),
+          scoringTotal: Number(p.scoringTotal ?? 0),
+          scoringDone: Number(p.scoringDone ?? 0),
+          newCount: Number(p.newCount ?? 0),
+          durationMs: p.durationMs ? Number(p.durationMs) : null,
+          done: Boolean(p.done),
+          startedAt: p.startedAt ?? null,
+        };
+      } catch {
+        return { phase: "idle", sourcesTotal: 0, sourcesDone: 0, scoringTotal: 0, scoringDone: 0, newCount: 0, done: true, startedAt: null };
+      }
+    }),
+
     rerankProgress: publicProcedure.query(async () => {
       const raw = await getScoringConfig("rerank_progress");
       if (!raw) return { completed: 0, total: 0, etaMs: 0, done: true, startedAt: null };

@@ -73,15 +73,15 @@ export default function FlightLayout({ children }: FlightLayoutProps) {
   }, [drawerOpen]);
 
   // ── Rerank progress polling ──────────────────────────────────────────────
-  // Poll every 2 seconds while a rerank is in progress; stop when done.
   const { data: rerankProgress } = trpc.stories.rerankProgress.useQuery(undefined, {
-    refetchInterval: reranking ? 2000 : false,
-    // Don't stale-invalidate while we're actively polling
-    staleTime: reranking ? 0 : 60000,
+    // Always poll every 3s — this way the bar shows even if the user didn't click rerank
+    refetchInterval: 3000,
+    staleTime: 0,
   });
 
-  // When the server reports done=true, clear the local reranking state and
-  // refresh the story list so the new scores appear immediately.
+  // Derive reranking state from server data (not just local click)
+  const isReranking = rerankProgress ? (!rerankProgress.done && rerankProgress.total > 0) : reranking;
+
   useEffect(() => {
     if (reranking && rerankProgress?.done && rerankProgress.total > 0) {
       setReranking(false);
@@ -95,20 +95,62 @@ export default function FlightLayout({ children }: FlightLayoutProps) {
     ? Math.round((rerankProgress.completed / rerankProgress.total) * 100)
     : 0;
   const rerankEtaSec = rerankProgress?.etaMs ? Math.ceil(rerankProgress.etaMs / 1000) : null;
+
+  // ── Ingest (refresh) progress polling ────────────────────────────────────
+  const { data: ingestProgress } = trpc.stories.ingestProgress.useQuery(undefined, {
+    refetchInterval: 2000,
+    staleTime: 0,
+  });
+
+  // Derive refreshing state from server data too
+  const isRefreshing = ingestProgress ? (!ingestProgress.done && ingestProgress.startedAt !== null) : refreshing;
+
+  useEffect(() => {
+    if (refreshing && ingestProgress?.done && ingestProgress.startedAt !== null) {
+      setRefreshing(false);
+      const newCount = ingestProgress.newCount ?? 0;
+      toast.success(`Ingest complete — ${newCount} new ${newCount === 1 ? "story" : "stories"} added`);
+      utils.stories.list.invalidate();
+      utils.stories.pendingCount.invalidate();
+      utils.stories.lastIngestTime.invalidate();
+    }
+  }, [refreshing, ingestProgress?.done, ingestProgress?.startedAt]);
+
+  // Ingest progress label and percentage
+  const getIngestLabel = () => {
+    if (!ingestProgress || ingestProgress.done) return null;
+    const phase = ingestProgress.phase;
+    if (phase === "fetching") return `Fetching feeds…`;
+    if (phase === "filtering") return `Filtering stories…`;
+    if (phase === "scoring") {
+      const total = ingestProgress.scoringTotal ?? 0;
+      const done = ingestProgress.scoringDone ?? 0;
+      return total > 0 ? `Scoring ${done}/${total} stories…` : `Scoring stories…`;
+    }
+    return `Processing…`;
+  };
+
+  const ingestPct = (() => {
+    if (!ingestProgress || ingestProgress.done) return 0;
+    const phase = ingestProgress.phase;
+    if (phase === "fetching") return 10;
+    if (phase === "filtering") return 35;
+    if (phase === "scoring") {
+      const total = ingestProgress.scoringTotal ?? 0;
+      const done = ingestProgress.scoringDone ?? 0;
+      if (total === 0) return 40;
+      return Math.round(35 + (done / total) * 60);
+    }
+    return 50;
+  })();
+
+  const ingestLabel = getIngestLabel();
   // ────────────────────────────────────────────────────────────────────────
 
   const refreshFeeds = trpc.stories.refreshFeeds.useMutation({
     onSuccess: () => {
-      toast.success("Ingest started — new stories will appear shortly");
-      setRefreshing(false);
-      const intervals = [5000, 15000, 30000, 60000, 120000, 180000];
-      intervals.forEach(delay => {
-        setTimeout(() => {
-          utils.stories.list.invalidate();
-          utils.stories.pendingCount.invalidate();
-          utils.stories.lastIngestTime.invalidate();
-        }, delay);
-      });
+      // Don't clear refreshing here — let the ingestProgress polling handle it
+      // so the progress bar stays visible until done
     },
     onError: (err) => {
       toast.error(`Refresh failed: ${err.message}`);
@@ -149,9 +191,6 @@ export default function FlightLayout({ children }: FlightLayoutProps) {
 
   const rerank = trpc.stories.rerank.useMutation({
     onSuccess: (data) => {
-      // Don't show toast here — the progress polling useEffect will handle it
-      // when done=true. Just keep reranking=true so polling stays active.
-      // If the server returns 0 stories (nothing to rerank), clear immediately.
       if (data.total === 0) {
         toast.info("No stories to re-rank (all have manual overrides)");
         setReranking(false);
@@ -192,37 +231,63 @@ export default function FlightLayout({ children }: FlightLayoutProps) {
     return new Date(lastIngestTime).toLocaleDateString();
   };
 
-  /** Rerank progress bar component — shown in both sidebar and drawer */
-  const RerankProgressBar = () => {
-    if (!reranking) return null;
-    return (
-      <div className="px-3 pt-1 pb-2">
-        <div className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 space-y-1.5">
-          <div className="flex items-center justify-between">
-            <span className="text-[10px] font-medium text-primary">Re-ranking stories…</span>
-            <span className="text-[10px] text-muted-foreground tabular-nums">
-              {rerankProgress ? `${rerankProgress.completed}/${rerankProgress.total}` : "…"}
-            </span>
-          </div>
-          {/* Progress track */}
-          <div className="h-1.5 rounded-full bg-primary/10 overflow-hidden">
-            <div
-              className="h-full rounded-full bg-primary transition-all duration-500"
-              style={{ width: `${rerankPct}%` }}
-            />
-          </div>
-          <div className="flex items-center justify-between">
-            <span className="text-[10px] text-muted-foreground">{rerankPct}%</span>
-            {rerankEtaSec !== null && rerankEtaSec > 0 && (
-              <span className="text-[10px] text-muted-foreground tabular-nums">
-                ~{rerankEtaSec < 60 ? `${rerankEtaSec}s` : `${Math.ceil(rerankEtaSec / 60)}m`} left
-              </span>
-            )}
+  /** Shared progress bar block — used in both sidebar and mobile drawer */
+  const ProgressBars = () => (
+    <div className="space-y-0">
+      {/* Ingest progress */}
+      {isRefreshing && ingestLabel && (
+        <div className="px-3 pt-2 pb-1">
+          <div className="rounded-lg border border-sky-500/30 bg-sky-500/8 px-3 py-2.5 space-y-2">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5">
+                <RefreshCw className="w-3 h-3 text-sky-400 animate-spin" />
+                <span className="text-[11px] font-semibold text-sky-400">Refreshing Feeds</span>
+              </div>
+              <span className="text-[10px] text-muted-foreground tabular-nums font-medium">{ingestPct}%</span>
+            </div>
+            <div className="h-2 rounded-full bg-sky-500/15 overflow-hidden">
+              <div
+                className="h-full rounded-full bg-sky-400 transition-all duration-700"
+                style={{ width: `${ingestPct}%` }}
+              />
+            </div>
+            <p className="text-[10px] text-muted-foreground leading-tight">{ingestLabel}</p>
           </div>
         </div>
-      </div>
-    );
-  };
+      )}
+
+      {/* Rerank progress */}
+      {isReranking && (
+        <div className="px-3 pt-2 pb-1">
+          <div className="rounded-lg border border-primary/30 bg-primary/8 px-3 py-2.5 space-y-2">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5">
+                <LayoutDashboard className="w-3 h-3 text-primary animate-pulse" />
+                <span className="text-[11px] font-semibold text-primary">Re-ranking Stories</span>
+              </div>
+              <span className="text-[10px] text-muted-foreground tabular-nums font-medium">
+                {rerankProgress ? `${rerankProgress.completed}/${rerankProgress.total}` : "…"}
+              </span>
+            </div>
+            <div className="h-2 rounded-full bg-primary/15 overflow-hidden">
+              <div
+                className="h-full rounded-full bg-primary transition-all duration-500"
+                style={{ width: `${rerankPct}%` }}
+              />
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] text-muted-foreground">{rerankPct}% complete</span>
+              {rerankEtaSec !== null && rerankEtaSec > 0 && (
+                <span className="text-[10px] text-muted-foreground tabular-nums">
+                  ~{rerankEtaSec < 60 ? `${rerankEtaSec}s` : `${Math.ceil(rerankEtaSec / 60)}m`} left
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 
   return (
     <div className="flex min-h-screen bg-background">
@@ -283,63 +348,129 @@ export default function FlightLayout({ children }: FlightLayoutProps) {
           <p className="text-[11px] text-muted-foreground mt-0.5">{formatLastIngest()}</p>
         </div>
 
-        {/* Rerank progress bar (desktop) */}
-        <RerankProgressBar />
+        {/* Progress bars (desktop) */}
+        <ProgressBars />
 
         {/* Quick actions */}
         <div className="px-3 pb-4 space-y-2 border-t border-sidebar-border pt-3">
-          <Button variant="outline" size="sm" className="w-full justify-start gap-2 text-xs" disabled={refreshing}
-            onClick={() => { setRefreshing(true); refreshFeeds.mutate(); }}>
-            <RefreshCw className={cn("w-3.5 h-3.5", refreshing && "animate-spin")} />
-            {refreshing ? "Refreshing..." : "Refresh Feeds"}
+          <Button
+            variant="outline"
+            size="sm"
+            className={cn(
+              "w-full justify-start gap-2 text-xs",
+              isRefreshing && "border-sky-500/40 text-sky-400"
+            )}
+            disabled={isRefreshing}
+            onClick={() => { setRefreshing(true); refreshFeeds.mutate(); }}
+          >
+            <RefreshCw className={cn("w-3.5 h-3.5", isRefreshing && "animate-spin text-sky-400")} />
+            {isRefreshing ? "Refreshing…" : "Refresh Feeds"}
           </Button>
-          <Button variant="outline" size="sm" className="w-full justify-start gap-2 text-xs" disabled={reranking}
-            onClick={() => { setReranking(true); rerank.mutate(); }}>
-            <LayoutDashboard className={cn("w-3.5 h-3.5", reranking && "animate-pulse")} />
-            {reranking ? "Re-ranking..." : "Re-rank All"}
+          <Button
+            variant="outline"
+            size="sm"
+            className={cn(
+              "w-full justify-start gap-2 text-xs",
+              isReranking && "border-primary/40 text-primary"
+            )}
+            disabled={isReranking}
+            onClick={() => { setReranking(true); rerank.mutate(); }}
+          >
+            <LayoutDashboard className={cn("w-3.5 h-3.5", isReranking && "animate-pulse text-primary")} />
+            {isReranking ? `Re-ranking… ${rerankPct}%` : "Re-rank All"}
           </Button>
-          <Button variant="outline" size="sm" className="w-full justify-start gap-2 text-xs border-violet-500/30 text-violet-400 hover:bg-violet-500/10 hover:text-violet-300" disabled={learning}
-            onClick={() => { setLearning(true); learnFromOverrides.mutate(); }}>
+          <Button
+            variant="outline"
+            size="sm"
+            className="w-full justify-start gap-2 text-xs border-violet-500/30 text-violet-400 hover:bg-violet-500/10 hover:text-violet-300"
+            disabled={learning}
+            onClick={() => { setLearning(true); learnFromOverrides.mutate(); }}
+          >
             <BrainCircuit className={cn("w-3.5 h-3.5", learning && "animate-pulse")} />
-            {learning ? "Learning..." : "Learn from Overrides"}
+            {learning ? "Learning…" : "Learn from Overrides"}
           </Button>
         </div>
       </aside>
 
       {/* ── Mobile top bar (< lg) ─────────────────────────────────────────── */}
-      <div className="lg:hidden fixed top-0 left-0 right-0 z-40 h-14 bg-sidebar border-b border-sidebar-border flex items-center px-4 gap-3">
-        <button
-          onClick={() => setDrawerOpen(true)}
-          className="w-9 h-9 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/50 transition-colors"
-          aria-label="Open menu"
-        >
-          <Menu className="w-5 h-5" />
-        </button>
-        <div className="flex items-center gap-2 flex-1">
-          <div className="w-7 h-7 rounded-lg bg-primary flex items-center justify-center shrink-0">
-            <Plane className="w-3.5 h-3.5 text-primary-foreground" strokeWidth={2.5} />
+      <div className="lg:hidden fixed top-0 left-0 right-0 z-40 bg-sidebar border-b border-sidebar-border">
+        <div className="h-14 flex items-center px-4 gap-3">
+          <button
+            onClick={() => setDrawerOpen(true)}
+            className="w-9 h-9 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/50 transition-colors"
+            aria-label="Open menu"
+          >
+            <Menu className="w-5 h-5" />
+          </button>
+          <div className="flex items-center gap-2 flex-1">
+            <div className="w-7 h-7 rounded-lg bg-primary flex items-center justify-center shrink-0">
+              <Plane className="w-3.5 h-3.5 text-primary-foreground" strokeWidth={2.5} />
+            </div>
+            <p className="font-bold text-sm text-sidebar-foreground" style={{ fontFamily: "Space Grotesk, sans-serif" }}>
+              Soyunci
+            </p>
           </div>
-          <p className="font-bold text-sm text-sidebar-foreground" style={{ fontFamily: "Space Grotesk, sans-serif" }}>
-            Soyunci
-          </p>
+          {/* Quick action buttons in top bar */}
+          <button
+            className={cn(
+              "w-9 h-9 flex items-center justify-center rounded-md transition-colors disabled:opacity-40",
+              isRefreshing
+                ? "text-sky-400 bg-sky-500/10"
+                : "text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/50"
+            )}
+            disabled={isRefreshing}
+            title="Refresh Feeds"
+            onClick={() => { setRefreshing(true); refreshFeeds.mutate(); }}
+          >
+            <RefreshCw className={cn("w-4 h-4", isRefreshing && "animate-spin")} />
+          </button>
+          <button
+            className="w-9 h-9 flex items-center justify-center rounded-md text-violet-400 hover:text-violet-300 hover:bg-violet-500/10 transition-colors disabled:opacity-40"
+            disabled={learning}
+            title="Learn from Overrides"
+            onClick={() => { setLearning(true); learnFromOverrides.mutate(); }}
+          >
+            <BrainCircuit className={cn("w-4 h-4", learning && "animate-pulse")} />
+          </button>
         </div>
-        {/* Quick action buttons in top bar */}
-        <button
-          className="w-9 h-9 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/50 transition-colors disabled:opacity-40"
-          disabled={refreshing}
-          title="Refresh Feeds"
-          onClick={() => { setRefreshing(true); refreshFeeds.mutate(); }}
-        >
-          <RefreshCw className={cn("w-4 h-4", refreshing && "animate-spin")} />
-        </button>
-        <button
-          className="w-9 h-9 flex items-center justify-center rounded-md text-violet-400 hover:text-violet-300 hover:bg-violet-500/10 transition-colors disabled:opacity-40"
-          disabled={learning}
-          title="Learn from Overrides"
-          onClick={() => { setLearning(true); learnFromOverrides.mutate(); }}
-        >
-          <BrainCircuit className={cn("w-4 h-4", learning && "animate-pulse")} />
-        </button>
+
+        {/* Mobile inline progress bars — shown below the top bar when active */}
+        {(isRefreshing || isReranking) && (
+          <div className="px-4 pb-2 space-y-1.5">
+            {isRefreshing && ingestLabel && (
+              <div className="flex items-center gap-2">
+                <RefreshCw className="w-3 h-3 text-sky-400 animate-spin shrink-0" />
+                <div className="flex-1">
+                  <div className="flex justify-between mb-0.5">
+                    <span className="text-[10px] text-sky-400 font-medium">{ingestLabel}</span>
+                    <span className="text-[10px] text-muted-foreground">{ingestPct}%</span>
+                  </div>
+                  <div className="h-1.5 rounded-full bg-sky-500/15 overflow-hidden">
+                    <div className="h-full rounded-full bg-sky-400 transition-all duration-700" style={{ width: `${ingestPct}%` }} />
+                  </div>
+                </div>
+              </div>
+            )}
+            {isReranking && (
+              <div className="flex items-center gap-2">
+                <LayoutDashboard className="w-3 h-3 text-primary animate-pulse shrink-0" />
+                <div className="flex-1">
+                  <div className="flex justify-between mb-0.5">
+                    <span className="text-[10px] text-primary font-medium">
+                      Re-ranking {rerankProgress?.completed ?? 0}/{rerankProgress?.total ?? 0}
+                    </span>
+                    <span className="text-[10px] text-muted-foreground">
+                      {rerankEtaSec && rerankEtaSec > 0 ? `~${rerankEtaSec < 60 ? `${rerankEtaSec}s` : `${Math.ceil(rerankEtaSec / 60)}m`}` : `${rerankPct}%`}
+                    </span>
+                  </div>
+                  <div className="h-1.5 rounded-full bg-primary/15 overflow-hidden">
+                    <div className="h-full rounded-full bg-primary transition-all duration-500" style={{ width: `${rerankPct}%` }} />
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* ── Mobile drawer overlay ─────────────────────────────────────────── */}
@@ -411,25 +542,40 @@ export default function FlightLayout({ children }: FlightLayoutProps) {
               <p className="text-[10px] text-muted-foreground/60">Last ingested: {formatLastIngest()}</p>
             </div>
 
-            {/* Rerank progress bar (mobile drawer) */}
-            <RerankProgressBar />
+            {/* Progress bars (mobile drawer) */}
+            <ProgressBars />
 
             {/* Quick actions */}
             <div className="px-3 pb-6 pt-3 space-y-2 border-t border-sidebar-border">
-              <Button variant="outline" size="sm" className="w-full justify-start gap-2 text-xs" disabled={refreshing}
-                onClick={() => { setRefreshing(true); refreshFeeds.mutate(); setDrawerOpen(false); }}>
-                <RefreshCw className={cn("w-3.5 h-3.5", refreshing && "animate-spin")} />
-                {refreshing ? "Refreshing..." : "Refresh Feeds"}
+              <Button
+                variant="outline"
+                size="sm"
+                className={cn("w-full justify-start gap-2 text-xs", isRefreshing && "border-sky-500/40 text-sky-400")}
+                disabled={isRefreshing}
+                onClick={() => { setRefreshing(true); refreshFeeds.mutate(); setDrawerOpen(false); }}
+              >
+                <RefreshCw className={cn("w-3.5 h-3.5", isRefreshing && "animate-spin text-sky-400")} />
+                {isRefreshing ? "Refreshing…" : "Refresh Feeds"}
               </Button>
-              <Button variant="outline" size="sm" className="w-full justify-start gap-2 text-xs" disabled={reranking}
-                onClick={() => { setReranking(true); rerank.mutate(); setDrawerOpen(false); }}>
-                <LayoutDashboard className={cn("w-3.5 h-3.5", reranking && "animate-pulse")} />
-                {reranking ? "Re-ranking..." : "Re-rank All"}
+              <Button
+                variant="outline"
+                size="sm"
+                className={cn("w-full justify-start gap-2 text-xs", isReranking && "border-primary/40 text-primary")}
+                disabled={isReranking}
+                onClick={() => { setReranking(true); rerank.mutate(); setDrawerOpen(false); }}
+              >
+                <LayoutDashboard className={cn("w-3.5 h-3.5", isReranking && "animate-pulse text-primary")} />
+                {isReranking ? `Re-ranking… ${rerankPct}%` : "Re-rank All"}
               </Button>
-              <Button variant="outline" size="sm" className="w-full justify-start gap-2 text-xs border-violet-500/30 text-violet-400 hover:bg-violet-500/10 hover:text-violet-300" disabled={learning}
-                onClick={() => { setLearning(true); learnFromOverrides.mutate(); setDrawerOpen(false); }}>
+              <Button
+                variant="outline"
+                size="sm"
+                className="w-full justify-start gap-2 text-xs border-violet-500/30 text-violet-400 hover:bg-violet-500/10 hover:text-violet-300"
+                disabled={learning}
+                onClick={() => { setLearning(true); learnFromOverrides.mutate(); setDrawerOpen(false); }}
+              >
                 <BrainCircuit className={cn("w-3.5 h-3.5", learning && "animate-pulse")} />
-                {learning ? "Learning..." : "Learn from Overrides"}
+                {learning ? "Learning…" : "Learn from Overrides"}
               </Button>
             </div>
           </div>
@@ -437,7 +583,7 @@ export default function FlightLayout({ children }: FlightLayoutProps) {
       )}
 
       {/* ── Main content ──────────────────────────────────────────────────── */}
-      <main className="flex-1 overflow-auto min-w-0 lg:pt-0 pt-14 pb-20 lg:pb-0">
+      <main className={cn("flex-1 overflow-auto min-w-0 lg:pt-0 pb-20 lg:pb-0", (isRefreshing || isReranking) ? "pt-28" : "pt-14")}>
         {children}
       </main>
 
