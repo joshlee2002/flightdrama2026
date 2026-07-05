@@ -1223,6 +1223,19 @@ export const appRouter = router({
     }),
 
     /**
+     * Force-clear stale progress bars (rerank + ingest).
+     * Marks both progress records as done so the UI bars disappear.
+     * Use when a background job was killed mid-run and left stale state.
+     */
+    clearProgress: protectedProcedure.mutation(async () => {
+      await Promise.all([
+        setScoringConfig("rerank_progress", JSON.stringify({ completed: 0, total: 0, etaMs: 0, done: true, startedAt: null })),
+        setScoringConfig("ingest_progress", JSON.stringify({ phase: "idle", sourcesTotal: 0, sourcesDone: 0, scoringTotal: 0, scoringDone: 0, newCount: 0, done: true, startedAt: null })),
+      ]);
+      return { cleared: true };
+    }),
+
+    /**
      * Set or clear a manual score override for a story.
      * When set, the story's displayed score and label use the override values.
      * Re-rank skips overridden stories so the editor's judgement is preserved.
