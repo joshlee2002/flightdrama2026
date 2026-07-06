@@ -560,7 +560,7 @@ const AIRCRAFT_ENTITY_KEYWORDS = [
   "etihad", "qatar airways", "saudia", "ethiopian airlines",
   // Additional aircraft types
   "a319", "a318", "a310", "a300", "717", "727", "707", "max 8", "max 9",
-  "dreamliner", "concorde", "superjet", "crj", "atr", "dash 8",
+  "dreamliner",   "concorde", "superjet", "crj", "atr", "dash 8", "seaplane", "skydiving",
 ];
 
 // Stop-words to strip before Jaccard — these words are so common in aviation
@@ -581,9 +581,9 @@ const LOCATION_KEYWORDS = [
   "beijing", "shanghai", "tokyo", "seoul", "dubai", "london", "paris", "berlin",
   "amsterdam", "frankfurt", "madrid", "rome", "istanbul", "moscow", "delhi",
   "mumbai", "singapore", "bangkok", "jakarta", "sydney", "melbourne", "auckland",
-  "toronto", "montreal", "vancouver", "new york", "chicago", "los angeles",
-  "miami", "houston", "dallas", "seattle", "denver", "atlanta", "boston",
-  "washington", "san francisco", "las vegas", "phoenix", "orlando",
+  "toronto", "montreal", "vancouver",   "new york", "chicago", "los angeles", "east river", "nottinghamshire",
+	  "miami", "houston", "dallas", "seattle", "denver", "atlanta", "boston",
+	  "washington", "san francisco", "las vegas", "phoenix", "orlando",
   "mexico city", "bogota", "lima", "santiago", "sao paulo", "buenos aires",
   "cairo", "nairobi", "lagos", "johannesburg", "casablanca", "addis ababa",
   "karachi", "lahore", "dhaka", "kathmandu", "colombo", "kabul", "tehran",
@@ -672,7 +672,7 @@ export function isSimilarTitle(
     const intersection = newWordsArr.filter((w) => existingWords.has(w));
     const unionSize = new Set(newWordsArr.concat(existingWordsArr)).size;
     const similarity = unionSize > 0 ? intersection.length / unionSize : 0;
-    if (similarity > 0.35) return true;
+    if (similarity > 0.32) return true; // Slightly more sensitive to word overlap
 
     const existingLc = existing.toLowerCase();
 
@@ -719,9 +719,9 @@ export function getLocationIncidentMatches(
   // Also extract airline and aircraft entity keywords from the new title
   const newAirlines = AIRLINE_KEYWORDS.filter(k => newLc.includes(k));
   const newAircraft = AIRCRAFT_ENTITY_KEYWORDS.filter(k => newLc.includes(k));
-  // If the new title has no airline or aircraft entity, the location+incident
-  // overlap alone is too weak to justify an LLM call — skip it entirely.
-  if (newAirlines.length === 0 && newAircraft.length === 0) return [];
+  
+  // Extract specific details like numbers (age, death count, people on board)
+  const newNumbers = newTitle.match(/\b\d+\b/g) || [];
 
   const matches: string[] = [];
   for (const existing of existingTitles) {
@@ -730,12 +730,21 @@ export function getLocationIncidentMatches(
     const existingIncident = INCIDENT_KEYWORDS.filter(k => existingLc.includes(k));
     const sharesLocation = newLocations.some(k => existingLocations.includes(k));
     const sharesIncident = newIncident.some(k => existingIncident.includes(k));
+    
     if (!sharesLocation || !sharesIncident) continue;
 
-    // Require a shared airline or aircraft entity to confirm it is worth LLM adjudication
+    // Trigger LLM if:
+    // 1. Shared airline OR aircraft
+    // 2. Shared specific number (like "Woman, 22" or "10 people")
+    // 3. Location is highly specific (e.g. "East River")
     const sharesAirline = newAirlines.length > 0 && newAirlines.some(k => existingLc.includes(k));
     const sharesAircraft = newAircraft.length > 0 && newAircraft.some(k => existingLc.includes(k));
-    if (sharesAirline || sharesAircraft) matches.push(existing);
+    const sharesNumber = newNumbers.length > 0 && newNumbers.some(n => existing.includes(n));
+    const isSpecificLocation = newLocations.some(loc => ["east river", "nottinghamshire", "jfk", "heathrow"].includes(loc));
+
+    if (sharesAirline || sharesAircraft || sharesNumber || isSpecificLocation) {
+      matches.push(existing);
+    }
   }
   return matches;
 }
