@@ -34,6 +34,49 @@ import { labelFromScore } from "@shared/const";
 import { stories } from "../drizzle/schema";
 import { and, desc, isNotNull, or, sql } from "drizzle-orm";
 
+// ── Run-scoped cache for expensive DB reads ───────────────────────────────────
+// buildScoringContext() is called once per batch of 10 stories. Without caching,
+// every batch independently fetches getAllScoringConfig, getOverrideExamplesFromDb(500),
+// and getHistoricalPosts(30) from the DB — for a 128-story rerank that's 39 redundant
+// DB round-trips for data that doesn't change during the run.
+//
+// This cache stores the results for 60 seconds. All batches in the same run share
+// one fetch. The cache expires automatically so the next run always gets fresh data.
+
+type ScoringContextCache = {
+  config: Record<string, string>;
+  overrideExamples: Awaited<ReturnType<typeof getOverrideExamplesFromDb>>;
+  historicalPosts: Awaited<ReturnType<typeof getHistoricalPosts>>;
+  fetchedAt: number;
+};
+
+let _scoringContextCache: ScoringContextCache | null = null;
+const CACHE_TTL_MS = 60_000; // 60 seconds
+
+async function getCachedScoringContext(): Promise<{
+  config: Record<string, string>;
+  overrideExamples: Awaited<ReturnType<typeof getOverrideExamplesFromDb>>;
+  historicalPosts: Awaited<ReturnType<typeof getHistoricalPosts>>;
+}> {
+  const now = Date.now();
+  if (_scoringContextCache && (now - _scoringContextCache.fetchedAt) < CACHE_TTL_MS) {
+    return _scoringContextCache;
+  }
+  // Cache miss or expired — fetch all three in parallel
+  const [config, overrideExamples, historicalPosts] = await Promise.all([
+    getAllScoringConfig(),
+    getOverrideExamplesFromDb(500),
+    getHistoricalPosts(30),
+  ]);
+  _scoringContextCache = { config, overrideExamples, historicalPosts, fetchedAt: now };
+  return _scoringContextCache;
+}
+
+/** Call this at the start of a rerank or ingest run to pre-warm the cache in one shot. */
+export async function prewarmScoringCache(): Promise<void> {
+  await getCachedScoringContext();
+}
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export type LLMScoringResult = ScoringResult & {
@@ -111,7 +154,8 @@ function similarityScore(
 async function getRelevantOverrides(
   title: string,
   category: string,
-  limit = 20
+  limit = 20,
+  preloadedExamples?: Awaited<ReturnType<typeof getOverrideExamplesFromDb>>
 ): Promise<Array<{
   id: number;
   title: string | null;
@@ -123,7 +167,8 @@ async function getRelevantOverrides(
   viralTriggers: string[] | null;
   updatedAt: Date | null;
 }>> {
-  const allExamples = await getOverrideExamplesFromDb(500);
+  // Use pre-loaded examples from the run-scoped cache if available, otherwise fetch
+  const allExamples = preloadedExamples ?? await getOverrideExamplesFromDb(500);
   if (allExamples.length === 0) return [];
 
   const now = Date.now();
@@ -166,24 +211,29 @@ async function buildScoringContext(
   hasExamples: boolean;
   exampleTitles: string[];
 }> {
+  // Pre-warm the run-scoped cache first so all getRelevantOverrides calls below
+  // use in-memory data rather than hitting the DB individually.
+  const cachedCtx = await getCachedScoringContext();
+  const config = cachedCtx.config;
+  const historicalPosts = cachedCtx.historicalPosts;
+  const allExamplesForCalibration = cachedCtx.overrideExamples;
+
   // For mixed-category batches, fetch examples for each category and merge them.
-  // This ensures the LLM sees relevant corrections for all story types in the batch,
-  // not just the dominant category — which was causing uniform high scores on batches
-  // that mixed high-value and low-value story types.
+  // These calls now use the cached override list — zero extra DB round-trips.
   const extraCategoryExamples = additionalCategories && additionalCategories.length > 0
     ? await Promise.all(
         additionalCategories
           .filter(c => c.toLowerCase() !== category.toLowerCase())
-          .map(c => getRelevantOverrides(c, c, 8)) // 8 examples per extra category
+          .map(c => getRelevantOverrides(c, c, 8, cachedCtx.overrideExamples)) // pass cached list
       )
     : [];
 
-  const [primaryExamples, config, historicalPosts, allExamplesForCalibration] = await Promise.all([
-    getRelevantOverrides(title, category, additionalCategories && additionalCategories.length > 1 ? 12 : 20),
-    getAllScoringConfig(),
-    getHistoricalPosts(30),
-    getOverrideExamplesFromDb(500),
-  ]);
+  const primaryExamples = await getRelevantOverrides(
+    title,
+    category,
+    additionalCategories && additionalCategories.length > 1 ? 12 : 20,
+    cachedCtx.overrideExamples // pass cached list
+  );
 
   // Merge examples: primary first, then extra-category examples (deduplicated by id)
   const seenIds = new Set(primaryExamples.map(e => e.id));
