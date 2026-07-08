@@ -1189,6 +1189,15 @@ export const appRouter = router({
       if (!raw) return { phase: "idle", sourcesTotal: 0, sourcesDone: 0, scoringTotal: 0, scoringDone: 0, newCount: 0, done: true, startedAt: null };
       try {
         const p = JSON.parse(raw);
+        // Staleness guard: if a job has been "running" for more than 15 minutes it
+        // almost certainly died mid-run (server restart, crash). Auto-mark as done
+        // so the UI progress bar doesn't stay stuck forever.
+        const STALE_MS = 15 * 60 * 1000;
+        const isStale = !p.done && p.startedAt && (Date.now() - Number(p.startedAt)) > STALE_MS;
+        if (isStale) {
+          setScoringConfig("ingest_progress", JSON.stringify({ phase: "idle", sourcesTotal: 0, sourcesDone: 0, scoringTotal: 0, scoringDone: 0, newCount: 0, done: true, startedAt: null })).catch(() => {});
+          return { phase: "idle", sourcesTotal: 0, sourcesDone: 0, scoringTotal: 0, scoringDone: 0, newCount: 0, done: true, startedAt: null };
+        }
         return {
           phase: String(p.phase ?? "idle"),
           sourcesTotal: Number(p.sourcesTotal ?? 0),
@@ -1210,6 +1219,13 @@ export const appRouter = router({
       if (!raw) return { completed: 0, total: 0, etaMs: 0, done: true, startedAt: null };
       try {
         const parsed = JSON.parse(raw);
+        // Staleness guard: auto-clear if job has been "running" for more than 15 minutes
+        const STALE_MS = 15 * 60 * 1000;
+        const isStale = !parsed.done && parsed.startedAt && (Date.now() - Number(parsed.startedAt)) > STALE_MS;
+        if (isStale) {
+          setScoringConfig("rerank_progress", JSON.stringify({ completed: 0, total: 0, etaMs: 0, done: true, startedAt: null })).catch(() => {});
+          return { completed: 0, total: 0, etaMs: 0, done: true, startedAt: null };
+        }
         return {
           completed: Number(parsed.completed ?? 0),
           total: Number(parsed.total ?? 0),

@@ -80,7 +80,10 @@ export default function FlightLayout({ children }: FlightLayoutProps) {
   });
 
   // Derive reranking state from server data (not just local click)
-  const isReranking = rerankProgress ? (!rerankProgress.done && rerankProgress.total > 0) : reranking;
+  // Also treat as not-reranking if startedAt is older than 10 minutes (stale/crashed job)
+  const STALE_THRESHOLD_MS = 10 * 60 * 1000;
+  const rerankIsStale = rerankProgress && !rerankProgress.done && rerankProgress.startedAt && (Date.now() - Number(rerankProgress.startedAt)) > STALE_THRESHOLD_MS;
+  const isReranking = rerankIsStale ? false : (rerankProgress ? (!rerankProgress.done && rerankProgress.total > 0) : reranking);
 
   useEffect(() => {
     if (reranking && rerankProgress?.done && rerankProgress.total > 0) {
@@ -103,7 +106,9 @@ export default function FlightLayout({ children }: FlightLayoutProps) {
   });
 
   // Derive refreshing state from server data too
-  const isRefreshing = ingestProgress ? (!ingestProgress.done && ingestProgress.startedAt !== null) : refreshing;
+  // Also treat as not-refreshing if startedAt is older than 10 minutes (stale/crashed job)
+  const ingestIsStale = ingestProgress && !ingestProgress.done && ingestProgress.startedAt && (Date.now() - Number(ingestProgress.startedAt)) > STALE_THRESHOLD_MS;
+  const isRefreshing = ingestIsStale ? false : (ingestProgress ? (!ingestProgress.done && ingestProgress.startedAt !== null) : refreshing);
 
   useEffect(() => {
     if (refreshing && ingestProgress?.done && ingestProgress.startedAt !== null) {
@@ -201,6 +206,27 @@ export default function FlightLayout({ children }: FlightLayoutProps) {
       setReranking(false);
     },
   });
+
+  const clearProgress = trpc.stories.clearProgress.useMutation({
+    onSuccess: () => {
+      setRefreshing(false);
+      setReranking(false);
+      toast.success("Progress cleared — buttons are ready again");
+    },
+    onError: () => {
+      // Even if the server call fails, reset local state so buttons unblock
+      setRefreshing(false);
+      setReranking(false);
+    },
+  });
+
+  // Auto-clear stale progress from DB when we detect a stuck job
+  useEffect(() => {
+    if (rerankIsStale || ingestIsStale) {
+      clearProgress.mutate();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rerankIsStale, ingestIsStale]);
 
   useEffect(() => {
     if (!loading && !isAuthenticated) {
@@ -389,6 +415,18 @@ export default function FlightLayout({ children }: FlightLayoutProps) {
             <BrainCircuit className={cn("w-3.5 h-3.5", learning && "animate-pulse")} />
             {learning ? "Learning…" : "Learn from Overrides"}
           </Button>
+          {/* Show a manual clear button when a job appears stuck (>10 min with done=false) */}
+          {(rerankIsStale || ingestIsStale) && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="w-full justify-start gap-2 text-xs border-orange-500/40 text-orange-400 hover:bg-orange-500/10 hover:text-orange-300"
+              onClick={() => clearProgress.mutate()}
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              Clear Stuck Progress
+            </Button>
+          )}
         </div>
       </aside>
 
