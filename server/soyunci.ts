@@ -327,7 +327,17 @@ async function deepResearch(title: string, sourceUrl: string, rssContent = ""): 
   }
 
   try {
-    const searchQuery = title.replace(/[^\w\s]/g, " ").trim().slice(0, 120);
+    // Build a focused search query: strip punctuation, keep the most informative words.
+    // For widely-reported breaking news (crashes, incidents), a shorter, punchier query
+    // returns more results than the full verbose headline.
+    const rawQuery = title.replace(/[^\w\s]/g, " ").trim();
+    // Extract the core noun-phrase: drop trailing publisher attribution (" - AOL.com" etc.)
+    const queryNoAttrib = rawQuery.replace(/\s[-–|]\s+\S+\.\S+\s*$/, "").trim();
+    // If the query is very long (>80 chars), use only the first 10 significant words
+    const queryWords = queryNoAttrib.split(/\s+/).filter(w => w.length > 2);
+    const searchQuery = queryWords.length > 10
+      ? queryWords.slice(0, 10).join(" ")
+      : queryNoAttrib.slice(0, 120);
     const sourceParts: string[] = [];
     let sourcesResearched = 0;
     let primarySourceText = "";
@@ -379,10 +389,11 @@ async function deepResearch(title: string, sourceUrl: string, rssContent = ""): 
       if (newsItems.length > 0) {
         // ── Relevance filter: only accept secondary sources that are clearly about the same story ──
         // Extract significant words from the primary title (ignore stop words)
+        // Note: aviation entity words (flight, plane, aircraft, boeing, crash etc.) are intentionally
+        // NOT in the stop list — they are the primary matching signal for aviation stories.
         const STOP_WORDS = new Set(["a","an","the","and","or","but","in","on","at","to","for",
           "of","with","by","from","is","was","are","were","be","been","has","have","had",
-          "it","its","this","that","as","after","over","into","about","up","out","after",
-          "flight","airline","aircraft","plane","airport"]);
+          "it","its","this","that","as","after","over","into","about","up","out"]);
         const titleWords = title.toLowerCase()
           .replace(/[^a-z0-9\s]/g, " ")
           .split(/\s+/)
@@ -393,9 +404,13 @@ async function deepResearch(title: string, sourceUrl: string, rssContent = ""): 
             .replace(/[^a-z0-9\s]/g, " ")
             .split(/\s+/)
             .filter(w => w.length > 3 && !STOP_WORDS.has(w));
-          // Count how many significant words from the primary title appear in the candidate
+          // Count how many significant words from the primary title appear in the candidate.
+          // Threshold: 1 word overlap (down from 2) — widely-reported breaking news stories
+          // often get very different headlines (e.g. "Boeing 737 wreck found" vs
+          // "Plane crash in sea after mayday") but still share 1 key entity word.
+          // This avoids rejecting legitimate corroborating coverage.
           const overlap = titleWords.filter(w => candidateWords.some(cw => cw.includes(w) || w.includes(cw)));
-          return overlap.length >= 2;
+          return overlap.length >= 1;
         };
 
         const relevantItems = newsItems.filter(item => isRelevantSecondary(item.title));
