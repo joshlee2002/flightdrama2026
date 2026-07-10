@@ -53,7 +53,7 @@ import { and, eq, sql } from "drizzle-orm";
 import { stories } from "../drizzle/schema";
 import { fetchArticleContent, fetchRssFeed, isSimilarTitle, getLocationIncidentMatches, llmDedupCheck, isAviationRelevant, DEFAULT_RSS_SOURCES } from "./ingestion";
 import { invokeLLM } from "./_core/llm";
-import { scoreStory, clearStatAdjustCache } from "./viralScoring";
+import { scoreStory, clearStatAdjustCache, clearDistNormCache } from "./viralScoring";
 import { scoreStoryWithLLM, batchScoreStoriesWithLLM, learnFromOverrides, learnFromOverridesStatistical, prewarmScoringCache, type BatchScoringInput } from "./llmScoring";
 import { runFullSoyunciPipeline, rewriteArticleOnly, runResearchAndWrite, extractResearchPackage, clearDeepResearchCache } from "./soyunci";
 import { analysePerformance, getPerformanceInsights, analysePerformanceStatistical, getStatPerformanceInsights, analyseArticleStyle, getArticleStyleInsights, calculatePerformanceScore } from "./performanceAnalysis";
@@ -634,6 +634,7 @@ export const appRouter = router({
         // feeds into the keyword penalty and category weight calculations.
         await updateStoryOverride(input.id, 0, "reject");
         clearStatAdjustCache();
+        clearDistNormCache(); // invalidate distribution norm so next scoring uses fresh override data
         setImmediate(() => {
           learnFromOverridesStatistical().catch(err =>
             console.warn("[StatLearn] Post-reject learn failed:", err)
@@ -1298,6 +1299,7 @@ export const appRouter = router({
         // Previously the cache had a 5-minute TTL, so overrides felt like they
         // weren't working. Now the next scoring call always picks up fresh weights.
         clearStatAdjustCache();
+        clearDistNormCache(); // invalidate distribution norm so next scoring uses fresh override data
 
         // ── Step 2: Run statistical learner immediately (free, no LLM) ─────────
         // Updates category weights and keyword boost/penalty lists from override history.

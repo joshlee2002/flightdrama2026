@@ -49,6 +49,93 @@ let _statAdjustCache: {
   loadedAt: number;
 } | null = null;
 
+// ── Distribution normalisation cache ─────────────────────────────────────────
+// Stores Joshua's real score distribution computed from override history.
+// Used to map raw LLM scores (which cluster at 95) to Joshua's actual scale.
+let _distNormCache: {
+  sortedScores: number[];   // all override scores, sorted ascending
+  loadedAt: number;
+} | null = null;
+const DIST_NORM_CACHE_TTL_MS = 5 * 60 * 1000;
+
+/**
+ * Loads Joshua's real score distribution from override history.
+ * Cached for 5 minutes — same TTL as stat adjustments.
+ */
+async function loadDistributionNorm(): Promise<number[] | null> {
+  if (_distNormCache && Date.now() - _distNormCache.loadedAt < DIST_NORM_CACHE_TTL_MS) {
+    return _distNormCache.sortedScores;
+  }
+  try {
+    const { getOverrideExamplesFromDb } = await import('./db');
+    const examples = await getOverrideExamplesFromDb(500);
+    const scores = examples
+      .map(e => e.overrideScore)
+      .filter((s): s is number => typeof s === 'number' && s >= 0 && s <= 100);
+    if (scores.length < 10) return null; // not enough data yet
+    const sorted = [...scores].sort((a, b) => a - b);
+    _distNormCache = { sortedScores: sorted, loadedAt: Date.now() };
+    return sorted;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Clears the distribution normalisation cache.
+ * Call this after every override (alongside clearStatAdjustCache).
+ */
+export function clearDistNormCache(): void {
+  _distNormCache = null;
+}
+
+/**
+ * Maps a raw LLM score to Joshua's actual score distribution using percentile normalisation.
+ *
+ * The LLM clusters scores at the top of its allowed range (e.g. 95 for anything "good").
+ * This function treats the LLM score as a percentile signal and maps it to the
+ * corresponding percentile in Joshua's real override distribution.
+ *
+ * Example: if the LLM gives 95 to 40% of stories, but Joshua only scores above 85
+ * for 5% of stories, then a raw LLM score of 95 maps to Joshua's 95th percentile
+ * score — which might be 82 in his actual distribution.
+ *
+ * The mapping is intentionally conservative: the LLM percentile is blended 50/50
+ * with the raw score to avoid over-correcting when Joshua's override sample is small.
+ * As more overrides accumulate, the distribution correction becomes stronger.
+ *
+ * Returns the raw score unchanged if there is not enough override data (< 10 examples).
+ */
+export async function normaliseToEditorDistribution(rawLlmScore: number): Promise<number> {
+  const sortedScores = await loadDistributionNorm();
+  if (!sortedScores || sortedScores.length < 10) return rawLlmScore;
+
+  const n = sortedScores.length;
+
+  // Treat the raw LLM score as a percentile: score 95 → top 5%, score 50 → median, etc.
+  // We use a simple linear mapping: score 0 → 0th percentile, score 100 → 100th percentile.
+  const llmPercentile = rawLlmScore / 100;
+
+  // Find the score at that percentile in Joshua's real distribution
+  const targetIdx = Math.min(n - 1, Math.max(0, Math.round(llmPercentile * (n - 1))));
+  const editorScore = sortedScores[targetIdx];
+
+  // Blend: 60% editor distribution, 40% raw LLM score.
+  // This ensures the correction is meaningful but not jarring when the sample is small.
+  // Blend weight increases with sample size: at 10 examples → 50/50, at 100+ → 70/30.
+  const blendWeight = Math.min(0.70, 0.50 + (n / 1000));
+  const normalised = Math.round(blendWeight * editorScore + (1 - blendWeight) * rawLlmScore);
+
+  // Hard floor: never normalise below 5 (reserved for title-gate rejects)
+  // Hard ceiling: 95 (manual override territory above this)
+  const clamped = Math.max(5, Math.min(95, normalised));
+
+  if (Math.abs(clamped - rawLlmScore) >= 5) {
+    console.log(`[DistNorm] raw=${rawLlmScore} → editor_p${Math.round(llmPercentile * 100)}=${editorScore} → blended=${normalised} → final=${clamped} (n=${n})`);
+  }
+  return clamped;
+}
+
 const STAT_CACHE_TTL_MS = 5 * 60 * 1000; // refresh every 5 minutes (was 10)
 
 /**

@@ -29,7 +29,7 @@ import { ENV } from "./_core/env";
 import { invokeLLM } from "./_core/llm";
 import { getOverrideExamplesFromDb, getAllScoringConfig, setScoringConfig, getDb, getHistoricalPosts } from "./db";
 import { calculatePerformanceScore } from "./performanceAnalysis";
-import { scoreStory, applyStatAdjustments, type ScoringResult } from "./viralScoring";
+import { scoreStory, applyStatAdjustments, normaliseToEditorDistribution, type ScoringResult } from "./viralScoring";
 import { labelFromScore } from "@shared/const";
 import { stories } from "../drizzle/schema";
 import { and, desc, isNotNull, or, sql } from "drizzle-orm";
@@ -648,9 +648,12 @@ Respond with ONLY the word YES or NO. Nothing else.`,
         if (parsed70b) {
           const llmCategory = parsed70b.category ?? ruleResult.category;
           const rawLlmScore = Math.round(parsed70b.score);
-          // Post-LLM stat adjustment: apply editor's historical override patterns
-          // (category drift + keyword boosts/penalties, capped at ±40)
-          const llmScore = await applyStatAdjustments(rawLlmScore, llmCategory, title);
+          // Step 1: Distribution normalisation — maps raw LLM score to Joshua's actual
+          // score distribution. Fixes the 95-clustering problem where the LLM gives 95
+          // to everything it considers good, regardless of Joshua's real scale.
+          const normalisedScore = await normaliseToEditorDistribution(rawLlmScore);
+          // Step 2: Stat adjustment — applies category drift + keyword boosts/penalties
+          const llmScore = await applyStatAdjustments(normalisedScore, llmCategory, title);
           const derivedLabel70b = labelFromScore(llmScore) as ScoringResult["statusLabel"];
           console.log(`[LLMScoring] 70B result: 8B=${parsed8b.score} → 70B=${rawLlmScore} → stat-adj=${llmScore} label=${derivedLabel70b}`);
           return {
@@ -675,9 +678,10 @@ Respond with ONLY the word YES or NO. Nothing else.`,
     // ── Use 8B result ─────────────────────────────────────────────────────
     const llmCategory = parsed8b.category ?? ruleResult.category;
     const rawLlmScore8b = Math.round(parsed8b.score);
-    // Post-LLM stat adjustment: apply editor's historical override patterns
-    // (category drift + keyword boosts/penalties, capped at ±40)
-    const llmScore = await applyStatAdjustments(rawLlmScore8b, llmCategory, title);
+    // Step 1: Distribution normalisation
+    const normalisedScore8b = await normaliseToEditorDistribution(rawLlmScore8b);
+    // Step 2: Stat adjustment
+    const llmScore = await applyStatAdjustments(normalisedScore8b, llmCategory, title);
     const derivedLabel8b = labelFromScore(llmScore) as ScoringResult["statusLabel"];
     return {
       score: llmScore,
@@ -884,9 +888,10 @@ Return ONLY the JSON array. No other text.`
 
       const llmCategory = p.category ?? s.ruleScore.category;
       const rawBatchScore = Math.min(95, Math.round(p.score));
-      // Post-LLM stat adjustment: apply editor's historical override patterns
-      // (category drift + keyword boosts/penalties, capped at ±40)
-      const llmScore = await applyStatAdjustments(rawBatchScore, llmCategory, s.title);
+      // Step 1: Distribution normalisation — corrects LLM score clustering at 95
+      const normalisedBatchScore = await normaliseToEditorDistribution(rawBatchScore);
+      // Step 2: Stat adjustment — category drift + keyword boosts/penalties
+      const llmScore = await applyStatAdjustments(normalisedBatchScore, llmCategory, s.title);
       const derivedLabel = labelFromScore(llmScore) as ScoringResult["statusLabel"];
       aviationResults.push({
         score: llmScore,
