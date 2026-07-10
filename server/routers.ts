@@ -1107,10 +1107,9 @@ export const appRouter = router({
      * Uses batch scoring (10 stories per LLM call) for ~10x cost/speed efficiency.
      */
     rerank: protectedProcedure.mutation(async () => {
-      // Only rerank stories from the last 3 days — matches the dashboard display window.
-      // Scoring 1500+ historical stories that will never appear on the dashboard wastes
-      // credits and makes the progress bar look stuck for 30+ minutes.
-      const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+      // Only rerank stories from the last 7 days — wide enough to catch all stories
+      // currently visible on the dashboard and ensure normalised scores apply to everything.
+      const threeDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
       const allStories = await getStoriesWithPackages({ approvalStatus: "pending", limit: 2000 });
       const toRerank = allStories.filter(
         ({ story }) => {
