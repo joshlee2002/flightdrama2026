@@ -859,3 +859,110 @@ ${comparisons}`;
     return false;
   }
 }
+
+/**
+ * Semantic LLM dedup — always-on, no keyword pre-filter.
+ *
+ * Replaces the isSimilarTitle + getLocationIncidentMatches + llmDedupCheck
+ * three-step chain. Instead of using keyword lists to decide whether to call
+ * the LLM, this function always calls the LLM with the full list of recent
+ * titles. The LLM understands meaning — it can match "K2 Cargo plane vanishes"
+ * to "Pakistani freighter drops off radar" without any keyword lists.
+ *
+ * Design:
+ * - Fast path first: if the title has no words in common with ANY recent title
+ *   (after stop-word removal), skip the LLM call entirely — it's definitely new.
+ * - Otherwise: send the new title + up to 40 recent titles to the LLM in one call.
+ * - The LLM returns: DUPLICATE (same event, different outlet) | NEW_ANGLE (new info)
+ *   | UNRELATED (completely different story).
+ * - Falls back to false (let through) on any LLM error.
+ *
+ * Cost: ~$0.00002 per call (tiny fast model, short prompt). For a typical ingest
+ * of 30 new stories, this is ~$0.0006 total — negligible.
+ */
+export async function llmSemanticDedupCheck(
+  newTitle: string,
+  existingTitles: string[],
+  invokeLLMFn: (params: {
+    model?: string;
+    messages: Array<{ role: "system" | "user"; content: string }>;
+    maxTokens?: number;
+  }) => Promise<{ choices: Array<{ message: { content: string } }> }>,
+  learnedPairs?: Array<{ dismissed: string; canonical: string }>
+): Promise<{ isDuplicate: boolean; matchedTitle?: string }> {
+  if (existingTitles.length === 0) return { isDuplicate: false };
+
+  // Fast path: if the new title shares zero significant words with all recent
+  // titles combined, it's definitely a new story — skip the LLM call.
+  const normalise = (t: string) =>
+    t.toLowerCase().replace(/[^a-z0-9 ]/g, "").split(/\s+/)
+      .filter(w => w.length > 3 && !STOP_WORDS.has(w));
+
+  const newWords = new Set(normalise(newTitle));
+  if (newWords.size > 0) {
+    const allRecentWords = new Set(existingTitles.flatMap(t => normalise(t)));
+    const hasAnyOverlap = [...newWords].some(w => allRecentWords.has(w));
+    if (!hasAnyOverlap) {
+      // Zero word overlap with all recent titles — definitely a new story
+      return { isDuplicate: false };
+    }
+  }
+
+  // Cap at 40 recent titles to keep the prompt tight
+  const candidates = existingTitles.slice(0, 40);
+
+  const numberedList = candidates
+    .map((t, i) => `${i + 1}. "${t}"`)
+    .join("\n");
+
+  const learnedExamplesBlock = learnedPairs && learnedPairs.length > 0
+    ? `\n\nEDITOR-CONFIRMED DUPLICATE PAIRS (use these to calibrate):\n` +
+      learnedPairs.slice(0, 8).map((p, i) =>
+        `${i + 1}. SAME EVENT: "${p.canonical}" ↔ "${p.dismissed}"`
+      ).join("\n")
+    : "";
+
+  const prompt = `You are a duplicate detector for an aviation news Instagram account.
+
+NEW STORY: "${newTitle}"
+
+RECENT STORIES (last 7 days):
+${numberedList}${learnedExamplesBlock}
+
+Task: Does the NEW STORY describe the same real-world event as any story in the list?
+
+Rules:
+- DUPLICATE = same physical event (same crash/incident/emergency), even if wording is completely different or from a different outlet
+- NEW_ANGLE = genuinely new development: wreckage found, investigation launched, cause revealed, charges filed, victims named, safety directive issued
+- UNRELATED = completely different story
+
+If DUPLICATE or NEW_ANGLE, return the number of the matching story.
+If multiple matches, return the closest one.
+
+Respond with JSON only:
+{"verdict": "DUPLICATE"|"NEW_ANGLE"|"UNRELATED", "matchIndex": <number or null>}`;
+
+  try {
+    const response = await invokeLLMFn({
+      messages: [{ role: "user", content: prompt }],
+      maxTokens: 60,
+    });
+
+    const raw = String(response?.choices?.[0]?.message?.content ?? "").trim();
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      console.warn("[SemanticDedup] Could not parse response, letting through:", raw.slice(0, 100));
+      return { isDuplicate: false };
+    }
+
+    const result = JSON.parse(jsonMatch[0]) as { verdict: string; matchIndex: number | null };
+    const isDuplicate = result.verdict === "DUPLICATE";
+    const matchedTitle = result.matchIndex != null ? candidates[result.matchIndex - 1] : undefined;
+
+    console.log(`[SemanticDedup] "${newTitle.slice(0, 60)}" → ${result.verdict}${matchedTitle ? ` (matched: "${matchedTitle.slice(0, 60)}")` : ""}`);
+    return { isDuplicate, matchedTitle };
+  } catch (err) {
+    console.warn("[SemanticDedup] LLM call failed, letting through:", err instanceof Error ? err.message : err);
+    return { isDuplicate: false };
+  }
+}

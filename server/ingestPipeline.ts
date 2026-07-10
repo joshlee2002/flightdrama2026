@@ -30,9 +30,7 @@ import {
 import {
   fetchRssFeed,
   fetchArticleContent,
-  isSimilarTitle,
-  getLocationIncidentMatches,
-  llmDedupCheck,
+  llmSemanticDedupCheck,
   isAviationRelevant,
   isNonEnglish,
 } from "./ingestion";
@@ -69,7 +67,7 @@ async function llmAviationRescue(title: string, content: string): Promise<boolea
     return false; // On error, keep the gate's decision (drop)
   }
 }
-// Cast to the narrower signature expected by llmDedupCheck
+// Cast to the narrower signature expected by llmSemanticDedupCheck
 const invokeLLM = _invokeLLM as unknown as (params: {
   model?: string;
   messages: Array<{ role: "system" | "user"; content: string }>;
@@ -373,47 +371,39 @@ export async function runIngestPipeline(label = "Ingest"): Promise<IngestResult>
     Promise.all(structuralDupUrls.map(url => markUrlAsSeen(url, "duplicate_event"))).catch(() => {});
   }
 
-  // ── Phase 1e: Title-similarity + LLM dedup ────────────────────────────────
+  // ── Phase 1e: Semantic LLM dedup (always-on, no keyword pre-filter) ─────────
+  // Instead of using keyword lists to decide whether to call the LLM, we always
+  // call the LLM with the full list of recent titles. The LLM understands meaning
+  // and catches paraphrases, synonyms, and different-outlet same-event stories
+  // that keyword matching misses (e.g. "737 vanishes" vs "Pakistani plane missing").
   const titleDupUrls: string[] = [];
   const afterTitle: CandidateItem[] = [];
 
   for (const item of afterStructural) {
-    if (isSimilarTitle(item.title, recentTitles, learnedDuplicatePairs)) {
+    const { isDuplicate, matchedTitle } = await llmSemanticDedupCheck(
+      item.title,
+      recentTitles,
+      invokeLLM,
+      learnedDuplicatePairs
+    );
+    if (isDuplicate) {
       logDrop({
         title: item.title,
         sourceUrl: item.sourceUrl,
         sourceName: item.sourceName,
         dropReason: "duplicate_title",
-        dropDetail: "Title-similarity fuzzy match against recent stories",
+        dropDetail: `Semantic LLM dedup: same event as "${(matchedTitle ?? recentTitles[0] ?? "").slice(0, 120)}"`,
         publishedAt: item.publishedAt,
       });
       titleDupUrls.push(item.sourceUrl);
       skippedCount++;
       continue;
     }
-
-    const locationMatches = getLocationIncidentMatches(item.title, recentTitles);
-    if (locationMatches.length > 0) {
-      const isDup = await llmDedupCheck(item.title, locationMatches, invokeLLM, learnedDuplicatePairs);
-      if (isDup) {
-        logDrop({
-          title: item.title,
-          sourceUrl: item.sourceUrl,
-          sourceName: item.sourceName,
-          dropReason: "duplicate_title",
-          dropDetail: `LLM dedup: matched location/incident pattern. Similar to: "${locationMatches[0]?.slice(0, 120)}"`,
-          publishedAt: item.publishedAt,
-        });
-        titleDupUrls.push(item.sourceUrl);
-        skippedCount++;
-        continue;
-      }
-    }
-
     afterTitle.push(item);
   }
 
   if (titleDupUrls.length > 0) {
+    console.log(`[${label}] Phase 1e: Semantic dedup removed ${titleDupUrls.length} duplicate(s)`);
     Promise.all(titleDupUrls.map(url => markUrlAsSeen(url, "duplicate_title"))).catch(() => {});
   }
 
@@ -447,32 +437,23 @@ export async function runIngestPipeline(label = "Ingest"): Promise<IngestResult>
       });
       batchDupUrls.push(item.sourceUrl); skippedCount++; continue;
     }
-    if (batchSeenTitles.length > 0 && isSimilarTitle(item.title, batchSeenTitles, learnedDuplicatePairs)) {
-      logDrop({
-        title: item.title,
-        sourceUrl: item.sourceUrl,
-        sourceName: item.sourceName,
-        dropReason: "duplicate_batch",
-        dropDetail: "Title-similarity duplicate within this ingest batch",
-        publishedAt: item.publishedAt,
-      });
-      batchDupUrls.push(item.sourceUrl); skippedCount++; continue;
-    }
     if (batchSeenTitles.length > 0) {
-      const batchLocMatches = getLocationIncidentMatches(item.title, batchSeenTitles);
-      if (batchLocMatches.length > 0) {
-        const isDup = await llmDedupCheck(item.title, batchLocMatches, invokeLLM, learnedDuplicatePairs);
-        if (isDup) {
-          logDrop({
-            title: item.title,
-            sourceUrl: item.sourceUrl,
-            sourceName: item.sourceName,
-            dropReason: "duplicate_batch",
-            dropDetail: `LLM dedup: batch location/incident match. Similar to: "${batchLocMatches[0]?.slice(0, 120)}"`,
-            publishedAt: item.publishedAt,
-          });
-          batchDupUrls.push(item.sourceUrl); skippedCount++; continue;
-        }
+      const { isDuplicate: isBatchDup, matchedTitle: batchMatch } = await llmSemanticDedupCheck(
+        item.title,
+        batchSeenTitles,
+        invokeLLM,
+        learnedDuplicatePairs
+      );
+      if (isBatchDup) {
+        logDrop({
+          title: item.title,
+          sourceUrl: item.sourceUrl,
+          sourceName: item.sourceName,
+          dropReason: "duplicate_batch",
+          dropDetail: `Semantic LLM dedup: same event as "${(batchMatch ?? batchSeenTitles[0] ?? "").slice(0, 120)}" (within batch)`,
+          publishedAt: item.publishedAt,
+        });
+        batchDupUrls.push(item.sourceUrl); skippedCount++; continue;
       }
     }
     batchSeenTitles.push(item.title);
