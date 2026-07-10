@@ -303,8 +303,11 @@ export async function applyStatAdjustments(
       if (adj.lowKws.has(token)) delta -= adj.lowKws.get(token)!;
     }
 
-    // ── Cap: ±40 so strong override signals can move stories across tiers ───
-    delta = Math.max(-40, Math.min(40, delta));
+    // ── Cap: ±15 — distribution normalisation now handles the bulk of the correction.
+    // Stat adjustments are a fine-tuning layer only: they nudge scores based on
+    // category drift and keyword signals, but should not override the normalised
+    // distribution. ±15 is enough to move a story across one tier boundary.
+    delta = Math.max(-15, Math.min(15, delta));
     const finalScore = Math.max(0, Math.min(95, score + delta)); // Stat cap: 95 — only manual editor override reaches 96-100
     if (Math.abs(delta) >= 5) {
       console.log(`[StatAdj] "${title.slice(0, 55)}" base=${score} delta=${delta > 0 ? '+' : ''}${delta} final=${finalScore} cat=${category}`);
