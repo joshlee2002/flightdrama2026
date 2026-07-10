@@ -544,6 +544,9 @@ const INCIDENT_KEYWORDS = [
   "missing", "overrun", "excursion", "depressurisation", "decompression",
   "turbulence", "mayday", "ditching", "ditched", "belly landing", "hard landing",
   "near miss", "close call", "runway incursion", "mid-air",
+  "vanish", "vanishes", "vanished", "disappear", "disappears", "disappeared",
+  "wreckage", "wreck", "debris", "plunge", "plunges", "plunged", "plummeted",
+  "search", "rescue", "crew lost", "lost contact", "radar",
 ];
 const AIRCRAFT_ENTITY_KEYWORDS = [
   "737", "747", "757", "767", "777", "787", "a220", "a320", "a321", "a330", "a350", "a380",
@@ -601,6 +604,11 @@ const LOCATION_KEYWORDS = [
   "heathrow", "gatwick", "stansted", "schiphol", "charles de gaulle",
   "jfk", "lax", "ohare", "dulles", "miami airport", "newark",
   "changi", "narita", "haneda", "incheon",
+  // Seas, oceans, and bodies of water used in aviation incident headlines
+  "arabian sea", "red sea", "black sea", "caspian sea", "mediterranean",
+  "north sea", "south china sea", "java sea", "celebes sea", "timor sea",
+  "pacific ocean", "atlantic ocean", "indian ocean", "caribbean",
+  "gulf of mexico", "persian gulf", "bay of bengal",
 ];
 
 // Airline-specific keywords — used for airline+incident dedup
@@ -675,6 +683,15 @@ export function isSimilarTitle(
     if (similarity > 0.32) return true; // Slightly more sensitive to word overlap
 
     const existingLc = existing.toLowerCase();
+
+    // Strategy 1b: lower threshold when both titles share a specific aircraft type AND
+    // an incident keyword — e.g. "Boeing 737" + "crash/vanish/wreckage" is highly
+    // specific and 0.22 overlap is enough to flag as likely same-event.
+    if (similarity > 0.22 && newAircraft.length > 0 && newIncident.length > 0) {
+      const sharesAircraft = newAircraft.some(k => existingLc.includes(k));
+      const sharesIncident = newIncident.some(k => existingLc.includes(k));
+      if (sharesAircraft && sharesIncident) return true;
+    }
 
     // Strategy 2: same aircraft entity + same incident type
     if (newAircraft.length > 0 && newIncident.length > 0) {
@@ -796,9 +813,19 @@ export async function llmDedupCheck(
 
 A story is a DUPLICATE if it describes the SAME physical event (same crash, same incident, same emergency) as the existing story, even if the wording is completely different. Different outlets often report the same event with different headlines.
 
-A story is a NEW_ANGLE only if it contains genuinely NEW information that was not available at the time of the original report — for example: an investigation being launched, charges filed, victims identified by name, cause of the incident revealed, survivors speaking out, or a safety review ordered.
+A story is a NEW_ANGLE only if it contains genuinely NEW information that was not available at the time of the original report. Examples of NEW_ANGLE:
+- Wreckage or debris found after a disappearance (new development)
+- Investigation launched or cause of crash revealed
+- Charges filed, arrests made, or legal action taken
+- Survivors or victims identified by name
+- Safety review or airworthiness directive issued
+- Rescue operation concluded with confirmed outcome
 
-Breaking news follow-ups that just add a death toll or injury count to the same event are still DUPLICATES.${learnedExamplesBlock}
+Examples of DUPLICATE (same event, different outlet or minor update):
+- Different outlet reporting the same crash/incident with different wording
+- Breaking news follow-ups that only add a death toll or injury count
+- "Search underway" stories when the original already said plane went missing
+- Multiple outlets all saying the same plane "vanished" or "crashed"${learnedExamplesBlock}
 
 For each pair, respond with DUPLICATE or NEW_ANGLE.
 
