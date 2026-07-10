@@ -211,294 +211,77 @@ async function buildScoringContext(
   hasExamples: boolean;
   exampleTitles: string[];
 }> {
-  // Pre-warm the run-scoped cache first so all getRelevantOverrides calls below
-  // use in-memory data rather than hitting the DB individually.
   const cachedCtx = await getCachedScoringContext();
-  const config = cachedCtx.config;
-  const historicalPosts = cachedCtx.historicalPosts;
-  const allExamplesForCalibration = cachedCtx.overrideExamples;
 
-  // For mixed-category batches, fetch examples for each category and merge them.
-  // These calls now use the cached override list — zero extra DB round-trips.
+  // Gather examples for all categories in the batch
   const extraCategoryExamples = additionalCategories && additionalCategories.length > 0
     ? await Promise.all(
         additionalCategories
           .filter(c => c.toLowerCase() !== category.toLowerCase())
-          .map(c => getRelevantOverrides(c, c, 8, cachedCtx.overrideExamples)) // pass cached list
+          .map(c => getRelevantOverrides(c, c, 8, cachedCtx.overrideExamples))
       )
     : [];
 
   const primaryExamples = await getRelevantOverrides(
     title,
     category,
-    additionalCategories && additionalCategories.length > 1 ? 12 : 20,
-    cachedCtx.overrideExamples // pass cached list
+    additionalCategories && additionalCategories.length > 1 ? 12 : 25,
+    cachedCtx.overrideExamples
   );
 
-  // Merge examples: primary first, then extra-category examples (deduplicated by id)
   const seenIds = new Set(primaryExamples.map(e => e.id));
   const mergedExtras = extraCategoryExamples.flat().filter(e => !seenIds.has(e.id));
-  const relevantExamples = [...primaryExamples, ...mergedExtras].slice(0, 25);
+  const relevantExamples = [...primaryExamples, ...mergedExtras].slice(0, 30);
 
-  // ── Score calibration: compute editor's actual distribution ──────────────
-  const calibrationBlock = (() => {
-    const scored = allExamplesForCalibration.filter(e => e.overrideScore !== null);
-    if (scored.length < 5) return null;
-
-    const scores = scored.map(e => e.overrideScore as number);
-    const maxScore = Math.max(...scores);
-    const minScore = Math.min(...scores);
-    const avgScore = Math.round(scores.reduce((a, b) => a + b, 0) / scores.length);
-
-    const bucket0_30 = scores.filter(s => s <= 30).length;
-    const bucket31_60 = scores.filter(s => s > 30 && s <= 60).length;
-    const bucket61_80 = scores.filter(s => s > 60 && s <= 80).length;
-    const bucket81_100 = scores.filter(s => s > 80).length;
-    const pct = (n: number) => Math.round((n / scores.length) * 100);
-
-    const sortedScores = [...scores].sort((a, b) => a - b);
-    const p50 = sortedScores[Math.floor(sortedScores.length * 0.5)] ?? avgScore; // median
-    const p75 = sortedScores[Math.floor(sortedScores.length * 0.75)] ?? maxScore;
-    const p90 = sortedScores[Math.min(Math.floor(sortedScores.length * 0.9), sortedScores.length - 1)] ?? maxScore;
-    const highThreshold = Math.max(p75, 75);
-    const mustPostThreshold = Math.max(p90, 70);
-    const strongThreshold = Math.max(Math.min(mustPostThreshold - 12, 75), 55);
-
-    const byRecencyThenScore = (a: typeof scored[0], b: typeof scored[0]) => {
-      const aTime = a.updatedAt ? new Date(a.updatedAt).getTime() : 0;
-      const bTime = b.updatedAt ? new Date(b.updatedAt).getTime() : 0;
-      if (bTime !== aTime) return bTime - aTime;
-      return (b.overrideScore ?? 0) - (a.overrideScore ?? 0);
-    };
-    const highEx = [...scored].filter(e => (e.overrideScore ?? 0) >= highThreshold).sort(byRecencyThenScore)[0];
-    const midEx = [...scored].filter(e => (e.overrideScore ?? 0) >= 55 && (e.overrideScore ?? 0) < highThreshold).sort(byRecencyThenScore)[0];
-    const lowEx = [...scored].filter(e => (e.overrideScore ?? 0) <= 35).sort((a, b) => {
-      const aTime = a.updatedAt ? new Date(a.updatedAt).getTime() : 0;
-      const bTime = b.updatedAt ? new Date(b.updatedAt).getTime() : 0;
-      if (bTime !== aTime) return bTime - aTime;
-      return (a.overrideScore ?? 0) - (b.overrideScore ?? 0);
-    })[0];
-
-    const anchors = [highEx, midEx, lowEx]
-      .filter(Boolean)
-      .map(e => `  Score ${e!.overrideScore}: "${(e!.title ?? "").slice(0, 70)}"`);
-
-    const softCeilingNote = scores.length >= 20
-      ? `- Scores above ${maxScore} are very rare for this editor — only use them for genuinely exceptional, once-in-a-year stories`
-      : `- This editor's highest score so far is ${maxScore} — calibrate accordingly`;
-
-    return [
-      `## CALIBRATION — You MUST match this editor's exact scoring scale`,
-      `This editor has scored ${scores.length} stories. Their real distribution is:`,
-      `- Score range seen so far: ${minScore}–${maxScore} | Median: ${p50} | Average: ${avgScore}`,
-      `- Distribution: ${pct(bucket0_30)}% score 0–30 | ${pct(bucket31_60)}% score 31–60 | ${pct(bucket61_80)}% score 61–80 | ${pct(bucket81_100)}% score 81–100`,
-      softCeilingNote,
-      `- The MEDIAN score is ${p50}. This is your anchor. A typical story should score around ${p50}, not at the top of the range.`,
-      `- Most strong stories score ${strongThreshold}–${mustPostThreshold - 1}. Reserve ${mustPostThreshold}+ for genuinely shocking events.`,
-      `- DISTRIBUTION RULE: Do NOT cluster scores at the top. If you are scoring a batch of mixed stories, they CANNOT all be the same score. Spread scores across the full range. Score lower and let the editor correct upward.`,
-      `- CRITICAL: Only ${pct(bucket81_100)}% of this editor's overrides are above 80. That means ${100 - pct(bucket81_100)}% of stories score 80 or below. If you are giving more than ${pct(bucket81_100)}% of stories a score above 80, you are wrong.`,
-      `- DEFAULT ASSUMPTION: When uncertain, score at or below the median (${p50}). The editor will correct upward if needed. It is much better to score too low than too high.`,
-      ...(anchors.length > 0 ? [`- Real score anchors from this editor (use these to calibrate your scale):`, ...anchors] : []),
-      ``,
-      `Score thresholds (calibrated to this editor's scale):`,
-      `- ${mustPostThreshold}–100 = must_post (only ${pct(bucket81_100)}% of stories reach this)`,
-      `- ${strongThreshold}–${mustPostThreshold - 1} = strong_candidate`,
-      `- 50–${strongThreshold - 1} = maybe`,
-      `- 0–49 = reject (${pct(bucket0_30 + bucket31_60)}% of this editor's stories land here)`,
-      `- AUTOMATIC REJECT (score 0–15): listicles, travel guides, product reviews, opinion columns, sponsored content, award announcements.`,
-    ].join("\n");
-  })();
-
-  const staticScoreRanges = `Score this story RELATIVE to what a typical aviation editor would find exceptional.
-- Most aviation stories are routine. Score 50–75 for stories with a real hook but nothing extraordinary.
-- Score 85+ ONLY if this story is clearly better than a typical aviation incident.
-- Score 88+ (must_post) for no more than 15% of stories.
-- DISTRIBUTION RULE: Do NOT cluster scores at the top. Spread scores across 45–85.
-- AUTOMATIC REJECT (score 0–15): listicles, travel guides, product reviews, opinion columns, sponsored content, award announcements.`;
-
-  // ── Pattern library — per-category scoring rules derived from all overrides ──
-  // BUG FIX: patternLibrary was referenced at line ~367 but never declared here.
-  // This caused Layer 2 (the most important learned signal) to be silently skipped
-  // in every single scoring call, meaning the LLM never saw the per-category rules
-  // derived from the editor's 500 overrides.
-  const patternLibrary = config["pattern_library"] ?? null;
-
-  // ── Editorial philosophy (plain English, replaces JSON weight matrix) ─────
-  const editorialPhilosophy = config["editorial_philosophy"] ?? null;
-
-  // ── Instagram performance data — SECONDARY context ────────────────────────
-  const postsWithMetrics = historicalPosts.filter(
-    p => (p.views ?? 0) > 0 || (p.likes ?? 0) > 0 || (p.shares ?? 0) > 0
-  );
-  const rankedPosts = postsWithMetrics
-    .map(p => ({ ...p, _perfScore: calculatePerformanceScore(p) }))
-    .filter(p => p._perfScore > 0)
-    .sort((a, b) => b._perfScore - a._perfScore);
-
-  const topPerformers = rankedPosts.slice(0, 10);
-  const bottomPerformers = rankedPosts.slice(-5);
-  const toEngagementRank = (s: number) => Math.max(1, Math.min(10, Math.round(s / 10)));
-
-  const instagramBlock = topPerformers.length > 0
-    ? [
-        `## SECONDARY CONTEXT: Real FlightDrama Instagram Performance`,
-        `These are actual posts and their real engagement. Use these to understand what topics and angles resonate with the audience.`,
-        `NOTE: This is secondary context. Joshua's explicit score corrections (above) always take precedence over audience performance data.`,
-        `The engagement-rank (e.g. "eng:9/10") is a relative engagement metric — it is NOT your story quality score.`,
-        ``,
-        `### TOP PERFORMERS:`,
-        ...topPerformers.map((p, i) => {
-          const stats = [
-            p.views ? `${(p.views / 1000).toFixed(0)}k views` : null,
-            p.likes ? `${p.likes.toLocaleString()} likes` : null,
-          ].filter(Boolean).join(" | ");
-          return `#${i + 1} [eng:${toEngagementRank(p._perfScore)}/10] "${p.headline}" | ${p.category ?? "unknown"} | ${stats}`;
-        }),
-        ``,
-        `### BOTTOM PERFORMERS:`,
-        ...bottomPerformers.map(p => `[eng:${toEngagementRank(p._perfScore)}/10] "${p.headline}" | ${p.category ?? "unknown"}`),
-      ].join("\n")
-    : null;
-
-  // ── Drift calibration hint — built from stored per-category offsets ─────────
-  // This was previously undefined (a bug), causing the drift offsets to never
-  // be injected into the prompt. Now built from drift_calibration_offsets config.
-  const driftCalibrationHint = (() => {
-    const raw = config["drift_calibration_offsets"] ?? null;
-    if (!raw) return null;
-    let offsets: Record<string, { offset: number; avgJoshua: number; sampleSize: number }>;
-    try {
-      offsets = JSON.parse(raw);
-    } catch {
-      return null;
-    }
-    const entries = Object.entries(offsets)
-      .filter(([, v]) => v.sampleSize >= 3 && Math.abs(v.offset) >= 5)
-      .sort((a, b) => Math.abs(b[1].offset) - Math.abs(a[1].offset))
-      .slice(0, 12);
-    if (entries.length === 0) return null;
-    const lines = entries.map(([cat, v]) => {
-      const dir = v.offset < 0
-        ? `AI scores ${Math.abs(v.offset)} pts TOO HIGH — score ${Math.abs(v.offset)} pts LOWER than your instinct`
-        : `AI scores ${v.offset} pts TOO LOW — score ${v.offset} pts HIGHER than your instinct`;
-      return `  ${cat}: ${dir} (Joshua avg: ${v.avgJoshua}, n=${v.sampleSize})`;
-    }).join("\n");
-    return `## SYSTEMATIC BIAS CORRECTIONS (MANDATORY — apply these before finalising your score)
-Statistical analysis of ${Object.values(offsets).reduce((s, v) => s + v.sampleSize, 0)} overrides shows the AI has systematic biases per category. Correct for them:
-${lines}`;
-  })();
-
-  // ── Statistical signals — light guidance only ─────────────────────────────
-  const statWeights = config["stat_category_weights"] ?? null;
-  const statKeywordBoosts = config["stat_keyword_boosts"] ?? null;
-  const statKeywordPenalties = config["stat_keyword_penalties"] ?? null;
-
-  // ── Build the examples block ──────────────────────────────────────────────
-  const now = Date.now();
-  const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
-
+  // Build the examples block — this is the ENTIRE instruction
   const exampleTitles: string[] = [];
   const examplesBlock = relevantExamples.length > 0
     ? relevantExamples
         .map((e, i) => {
-          const drift = (e.overrideScore ?? 0) - (e.viralScore ?? 0);
-          const driftStr = drift > 0
-            ? `+${drift} (Joshua scored HIGHER — AI undervalued this)`
-            : drift < 0
-            ? `${drift} (Joshua scored LOWER — AI overvalued this)`
-            : `0 (agreed)`;
-          const recency = e.updatedAt && (now - new Date(e.updatedAt).getTime()) < thirtyDaysMs ? " [recent]" : "";
           exampleTitles.push(e.title ?? "");
-          return `${i + 1}.${recency} "${e.title}"\n   AI: ${e.viralScore} → Joshua: ${e.overrideScore} (${e.overrideLabel}) | Drift: ${driftStr}\n   Category: ${e.category ?? "unknown"}`;
+          return `${i + 1}. [Score: ${e.overrideScore}] "${e.title}" (${e.category ?? "unknown"})`;
         })
-        .join("\n\n")
+        .join("\n")
     : null;
 
-  // ── Build the full system prompt ──────────────────────────────────────────
-  // STRUCTURE:
-  // 1. Persona — editorial apprentice, not a generic scoring engine
-  // 2. Editor's past corrections — PRIMARY SIGNAL (most similar examples first)
-  // 3. Editorial philosophy — plain-English taste summary
-  // 4. Instagram performance — SECONDARY context
-  // 5. Statistical signals — light guidance
-  // 6. Hard scoring constraints — LAST
+  // ── Clean few-shot prompt — examples only ────────────────────────────────
+  // The LLM has 593+ real scored examples. The examples ARE the instruction.
+  // All calibration blocks, philosophy, drift hints, and stat signals have been
+  // removed because they were overriding the examples and causing score clustering.
+  let systemPrompt = `You are scoring stories for FlightDrama, an aviation Instagram account run by Joshua.
 
-  let systemPrompt = `You are Joshua's editorial apprentice for FlightDrama, an aviation Instagram/TikTok/YouTube account.
+Your job: predict the score Joshua would give this story. Use ONLY his past scores below as your guide.
+Do not use your own judgment about what is "good" aviation content. Match Joshua's pattern exactly.
 
-Your ONLY goal is to predict the score Joshua would give this story, based on his past corrections.
-Do NOT use generic "aviation drama = high score" logic. Study Joshua's actual corrections and apply his specific taste.
-When Joshua has corrected similar stories before, those corrections are your most important instruction.`;
+Joshua's scoring scale (inferred from his history):
+- 90–95: catastrophic or shocking events — fatal crashes, major scandals, dramatic footage. Very rare.
+- 80–89: serious incidents, safety failures, major aviation news with real drama.
+- 70–79: notable stories — interesting incidents, significant industry news.
+- 60–69: solid aviation stories worth covering but not urgent.
+- 40–59: routine aviation news, minor incidents, industry updates.
+- 0–39: low-interest content, non-aviation topics, foreign language, sponsored content.
 
-  // 1. Editor's past corrections — PRIMARY SIGNAL
+Score 0 for: non-aviation content, foreign language stories, travel guides, hotel reviews, points/miles articles, planespotter photos.
+
+Here are Joshua's most relevant past scores (most similar to the story you are about to score):`;
+
   if (examplesBlock) {
-    systemPrompt += `\n\n## JOSHUA'S PAST CORRECTIONS — YOUR PRIMARY INSTRUCTION
-These are the most relevant stories Joshua has already scored. They are selected because they are similar to the story you are about to score.
-[recent] = last 30 days (most representative of current taste).
-
-PAY ATTENTION TO THE DRIFT: when Joshua scored LOWER than the AI, the AI overvalued that type of story. When he scored HIGHER, the AI undervalued it. Apply this directly to the new story.
-
-${examplesBlock}
-
-CRITICAL: Look at the range of scores above. If Joshua's corrections cluster in the 45–70 range for similar stories, the new story should land there too unless it is clearly exceptional. Do NOT score above Joshua's typical range for this story type unless the new story is genuinely more dramatic.`;
+    systemPrompt += `\n\n${examplesBlock}`;
+    systemPrompt += `\n\nLook at the scores above carefully. The new story should score similarly to the most similar examples. If the examples cluster around 60–75, score the new story in that range unless it is clearly more dramatic.`;
+  } else {
+    systemPrompt += `\n\n(No similar past examples found — use the scale above as your guide.)`;
   }
-
-  // 2a. Structured pattern library — per-category rules (Layer 2, strongest qualitative signal)
-  if (patternLibrary) {
-    systemPrompt += `\n\n## JOSHUA'S SCORING RULES BY CATEGORY (derived from all his corrections — apply these directly)\n${patternLibrary}\n\nFor any story whose category matches one of the above, apply those rules first. The score range and conditions listed are based on Joshua's actual historical corrections.`;
-  }
-
-  // 2b. Editorial philosophy — fallback for categories not in the pattern library
-  if (editorialPhilosophy) {
-    systemPrompt += `\n\n## JOSHUA'S OVERALL EDITORIAL PHILOSOPHY (fallback for story types not in the pattern library above)\n${editorialPhilosophy}`;
-  }
-
-  // 2c. Drift calibration offsets — Layer 3 systematic bias correction
-  if (driftCalibrationHint) {
-    systemPrompt += `\n\n${driftCalibrationHint}`;
-  }
-
-  // 3. Instagram performance — SECONDARY context
-  if (instagramBlock) {
-    systemPrompt += `\n\n${instagramBlock}`;
-  }
-
-  // 4. Statistical signals — light guidance
-  if (statWeights || statKeywordBoosts || statKeywordPenalties) {
-    systemPrompt += `\n\n## Statistical Patterns (light guidance — Joshua's corrections above take precedence)`;
-    if (statWeights) systemPrompt += `\nCategory tendencies: ${statWeights}`;
-    if (statKeywordBoosts) systemPrompt += `\nKeywords Joshua tends to score HIGHER: ${statKeywordBoosts}`;
-    if (statKeywordPenalties) systemPrompt += `\nKeywords Joshua tends to score LOWER: ${statKeywordPenalties}`;
-  }
-
-  // 5. Hard scoring constraints — LAST
-  systemPrompt += `\n\n## SCORING RULES (MANDATORY)\n${calibrationBlock ?? staticScoreRanges}
-- CRITICAL: The engagement ranks (eng:X/10) in the Instagram data above are engagement metrics, NOT score targets. Do not copy them into your score.
-- CRITICAL: A score of 100 means a once-in-a-year story. Do not give 100 unless the story is genuinely unprecedented.
-- WHEN IN DOUBT about a story type you have not seen before: score it 30–45 so Joshua can see it and make the call. Do NOT score 0 just because you are uncertain — reserve 0–20 for stories with zero aviation relevance whatsoever.
-- FlightDrama covers more than crashes and fights. Quirky, fun, or surprising aviation stories are valid content: unusual airline menus, pilot pay reveals, celebrity private planes, unusual liveries, strange airport incidents, and aviation curiosities. If a story is genuinely interesting aviation content but not dramatic, score it 30–50 rather than 0.`;
-
-  // ── Hard ceiling rules based on production data analysis ─────────────────
-  // These rules correct systematic over-scoring patterns observed in production.
-  systemPrompt += `\n\n## HARD CEILING RULES (override everything else — these are non-negotiable)
-- "Celebrity Involvement" category: Joshua's average score for this category is 38. The AI consistently over-scores these. MAXIMUM score for Celebrity Involvement is 75 UNLESS the story involves a named celebrity in an actual aviation incident (crash, emergency, arrest). Airline news tagged as Celebrity Involvement (new routes, orders, CEO statements) scores 40-65.
-- Points/miles/credit card stories: MAXIMUM 30. These are travel rewards content, not aviation drama. Reject unless the story is about a major program collapse or fraud.
-- Hotel/resort reviews: MAXIMUM 15. These are not aviation content.
-- "Passenger Outrage" category: Joshua's average score is 45. Score 55-75 only for genuinely dramatic incidents (assault, removal, medical emergency). Routine complaints (lost luggage, delays, refunds) score 30-50.
-- "Pilot & Crew Pay" category: Joshua's average score is 38. Score 50-70 only for major strikes, contract battles, or dramatic pay reveals. Generic salary articles score 25-45.
-- Reddit/forum posts ("r/", "How do I", "Tips?", "Anyone else", "RANT:", "Help me"): MAXIMUM 45. These are community posts, not news stories.
-- Planespotter photos (planespotters.net, registration codes like "LY-MAU"): MAXIMUM 20. These are hobbyist content.
-- Award/points redemption guides ("How to book", "Best ways to use", "Points for", "Miles for"): MAXIMUM 25.`;
 
   systemPrompt += `\n\nRespond ONLY with a valid JSON object in this exact format:
 {
-  "score": <integer 0-100>,
+  "score": <integer 0-95>,
   "statusLabel": "<must_post|strong_candidate|maybe|reject>",
   "category": "<category string>",
   "viralReason": "<one sentence explanation of the score>",
   "viralExplanation": "<two to three sentences explaining WHY this would or would not go viral>",
   "triggers": ["<trigger 1>", "<trigger 2>"],
-  "apprenticeConfidence": "<High|Medium|Low — High if 3+ very similar past corrections exist, Low if no similar examples>",
-  "apprenticeReasoning": "<one to two sentences explaining how Joshua's past corrections influenced this specific score>"
+  "apprenticeConfidence": "<High|Medium|Low — High if 3+ very similar past scores exist, Low if no similar examples>",
+  "apprenticeReasoning": "<one sentence: which past example most influenced this score and why>"
 }`;
 
   return {
@@ -647,15 +430,9 @@ Respond with ONLY the word YES or NO. Nothing else.`,
         const parsed70b = parseScoringResponse(raw70b, ruleResult);
         if (parsed70b) {
           const llmCategory = parsed70b.category ?? ruleResult.category;
-          const rawLlmScore = Math.round(parsed70b.score);
-          // Step 1: Distribution normalisation — maps raw LLM score to Joshua's actual
-          // score distribution. Fixes the 95-clustering problem where the LLM gives 95
-          // to everything it considers good, regardless of Joshua's real scale.
-          const normalisedScore = await normaliseToEditorDistribution(rawLlmScore);
-          // Step 2: Stat adjustment — applies category drift + keyword boosts/penalties
-          const llmScore = await applyStatAdjustments(normalisedScore, llmCategory, title);
+          const llmScore = Math.min(95, Math.round(parsed70b.score));
           const derivedLabel70b = labelFromScore(llmScore) as ScoringResult["statusLabel"];
-          console.log(`[LLMScoring] 70B result: 8B=${parsed8b.score} → 70B=${rawLlmScore} → stat-adj=${llmScore} label=${derivedLabel70b}`);
+          console.log(`[LLMScoring] 70B result: 8B=${parsed8b.score} → 70B=${llmScore} label=${derivedLabel70b}`);
           return {
             score: llmScore,
             statusLabel: derivedLabel70b,
@@ -677,11 +454,7 @@ Respond with ONLY the word YES or NO. Nothing else.`,
 
     // ── Use 8B result ─────────────────────────────────────────────────────
     const llmCategory = parsed8b.category ?? ruleResult.category;
-    const rawLlmScore8b = Math.round(parsed8b.score);
-    // Step 1: Distribution normalisation
-    const normalisedScore8b = await normaliseToEditorDistribution(rawLlmScore8b);
-    // Step 2: Stat adjustment
-    const llmScore = await applyStatAdjustments(normalisedScore8b, llmCategory, title);
+    const llmScore = Math.min(95, Math.round(parsed8b.score));
     const derivedLabel8b = labelFromScore(llmScore) as ScoringResult["statusLabel"];
     return {
       score: llmScore,
@@ -887,11 +660,7 @@ Return ONLY the JSON array. No other text.`
       }
 
       const llmCategory = p.category ?? s.ruleScore.category;
-      const rawBatchScore = Math.min(95, Math.round(p.score));
-      // Step 1: Distribution normalisation — corrects LLM score clustering at 95
-      const normalisedBatchScore = await normaliseToEditorDistribution(rawBatchScore);
-      // Step 2: Stat adjustment — category drift + keyword boosts/penalties
-      const llmScore = await applyStatAdjustments(normalisedBatchScore, llmCategory, s.title);
+      const llmScore = Math.min(95, Math.round(p.score));
       const derivedLabel = labelFromScore(llmScore) as ScoringResult["statusLabel"];
       aviationResults.push({
         score: llmScore,
