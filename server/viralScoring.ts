@@ -502,6 +502,31 @@ const MONEY_EXACT_KEYWORDS = [
 /** Exact money pattern — "$54.6 billion", "€338,282", "$200,000" */
 const MONEY_AMOUNT_PATTERN = /[\$£€]\s*[\d,]+(\.\d+)?\s*(billion|million|thousand|k\b)?/i;
 
+/**
+ * Airline M&A / takeover / acquisition — proven high-engagement category
+ * easyJet takeover battle, Castlelake/Apollo bidding war, airline mergers
+ * These stories drive massive engagement because they affect passengers directly.
+ */
+const AIRLINE_MA_KEYWORDS = [
+  // Takeover / acquisition language
+  "takeover", "takeover bid", "takeover battle", "takeover offer", "takeover deal",
+  "acquisition", "acquired", "acquires", "acquiring",
+  "buyout", "buy out", "bought out", "buying out",
+  "merger", "merging", "merged", "merge with",
+  "bid for", "bidding for", "bidding war", "rival bid", "counter bid", "competing bid",
+  "offer for", "offer to buy", "offer to acquire",
+  "private equity", "castlelake", "blackstone", "carlyle", "kkr",
+  // Airline-specific M&A signals
+  "easyjet takeover", "ryanair bid", "british airways owner", "iag bid",
+  "airline deal", "airline merger", "airline acquisition", "airline buyout",
+  "stake in", "majority stake", "minority stake", "controlling stake",
+  "shareholders approve", "shareholders vote", "board approves", "board rejects",
+  "agreed in principle", "agreed to sell", "agreed to buy", "agreed to merge",
+  "per share", "share price", "stock deal", "all-cash deal", "cash offer",
+  "hostile takeover", "friendly takeover", "unsolicited bid",
+  "outbid", "topped the bid", "raised its offer", "upped its offer",
+];
+
 // ─── Tier 3: Reliable mid-range performers ───────────────────────────────────
 
 /** NTSB, FAA, court, official accountability */
@@ -580,6 +605,20 @@ const WEIRD_HUMAN_KEYWORDS = [
   "opens emergency exit", "opened emergency door", "opened exit door",
   "slides deployed", "evacuation slide",
   "passenger strips", "passenger undresses",
+  // Instructor / pilot incapacitation — student alone
+  "instructor jumps", "instructor jumped", "instructor leapt", "instructor fell",
+  "student pilot alone", "student pilot forced", "student pilot had to",
+  "student lands alone", "student landed alone", "student pilot lands",
+  "forced to land alone", "had to land alone", "landed alone",
+  "solo landing", "first solo", "unexpected solo",
+  "pilot jumps", "pilot jumped", "pilot fell out", "pilot fell from",
+  "pilot ejected", "co-pilot jumps", "copilot jumps",
+  "instructor dies", "instructor died", "instructor unconscious", "instructor incapacitated",
+  "instructor suicide", "jumped to his death", "jumped to her death",
+  "jumped from the plane", "fell from the plane", "fell out of the plane",
+  "fell out of the aircraft", "fell out of the cockpit",
+  "sucked out", "sucked through", "pulled through window", "pulled out window",
+  "nearly sucked", "partially sucked", "blown out", "blown through",
 ];
 
 /** Safety incidents — emergency, mayday, engine failure */
@@ -1078,6 +1117,18 @@ export function scoreStory(title: string, content: string): ScoringResult {
     triggers.push(`Systemic failure: ${systemicFailureMatches[0]}`);
   }
 
+  // ── Bonus: Airline M&A / takeover / acquisition ─────────────────────────────────────
+  // easyJet/Apollo/Castlelake bidding war, airline mergers — high engagement because
+  // passengers care deeply about who owns their airline.
+  const airlineMaMatches = getMatchedKeywords(fullText, AIRLINE_MA_KEYWORDS);
+  if (airlineMaMatches.length >= 2) {
+    score += 40;
+    triggers.push(`Airline takeover/M&A: ${airlineMaMatches.slice(0, 2).join(", ")}`);
+  } else if (airlineMaMatches.length === 1) {
+    score += 28;
+    triggers.push(`Airline M&A: ${airlineMaMatches[0]}`);
+  }
+
   // ── Bonus: Comeback / return after years ─────────────────────────────────────────
   // "SAS returned to India after 17 years, first flight turned around" = 70k
   const comebackPattern = /\b(after\s+\d+\s+years?|returns?\s+after|returned\s+after|back\s+after|first\s+time\s+since|resumes?|resumed)\b/i;
@@ -1174,7 +1225,8 @@ export function scoreStory(title: string, content: string): ScoringResult {
     t.includes("outrage") || t.includes("pay") || t.includes("weird") ||
     t.includes("celebrity") || t.includes("money") || t.includes("safety") ||
     t.includes("NTSB") || t.includes("FAA") || t.includes("lawsuit") ||
-    t.includes("nostalgia") || t.includes("Nostalgia") || t.includes("route launch")
+    t.includes("nostalgia") || t.includes("Nostalgia") || t.includes("route launch") ||
+    t.includes("M&A") || t.includes("takeover") || t.includes("acquisition")
   );
 
   if (weakMatches.length >= 2 && !hasStrongTrigger) {
@@ -1220,6 +1272,8 @@ export function scoreStory(title: string, content: string): ScoringResult {
     category = "First / Last / Only / Biggest";
   } else if (nostalgiaMatches.length >= 2) {
     category = "Nostalgia & Finality";
+  } else if (airlineMaMatches.length >= 1) {
+    category = "Airline Takeover & M&A";
   } else if (pilotPayMatches.length >= 1) {
     category = "Pilot & Crew Pay";
   }

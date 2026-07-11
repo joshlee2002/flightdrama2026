@@ -129,6 +129,13 @@ export const DEFAULT_RSS_SOURCES = [
   { name: "GNews: Military Aviation", url: "https://news.google.com/rss/search?q=air+force+jet+emergency+OR+military+aircraft+incident&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
   // Rolls-Royce & engine manufacturers
   { name: "GNews: Engine Manufacturers", url: "https://news.google.com/rss/search?q=Rolls-Royce+engine+aviation+OR+GE+Aviation+OR+Pratt+Whitney+engine&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
+  // Airline M&A, takeover battles, private equity bids
+  { name: "GNews: Airline Takeover", url: "https://news.google.com/rss/search?q=airline+takeover+OR+airline+acquisition+OR+airline+merger&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
+  { name: "GNews: Airline Buyout", url: "https://news.google.com/rss/search?q=easyjet+takeover+OR+ryanair+takeover+OR+airline+buyout+OR+airline+bid&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
+  // Student pilot / instructor incidents
+  { name: "GNews: Student Pilot", url: "https://news.google.com/rss/search?q=student+pilot+incident+OR+flight+instructor+death+OR+instructor+crash&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
+  // Drunk crew / crew misconduct
+  { name: "GNews: Crew Misconduct", url: "https://news.google.com/rss/search?q=drunk+pilot+OR+drunk+crew+OR+pilot+arrested+flight+OR+crew+arrested+flight&hl=en-US&gl=US&ceid=US:en", category: "viral" as const },
 
   // ── TIER 6: MAINSTREAM VIRAL SOURCES ─────────────────────────────────────
   // General news — strict aviation keyword gate applied.
@@ -892,21 +899,12 @@ export async function llmSemanticDedupCheck(
 ): Promise<{ isDuplicate: boolean; matchedTitle?: string }> {
   if (existingTitles.length === 0) return { isDuplicate: false };
 
-  // Fast path: if the new title shares zero significant words with all recent
-  // titles combined, it's definitely a new story — skip the LLM call.
-  const normalise = (t: string) =>
-    t.toLowerCase().replace(/[^a-z0-9 ]/g, "").split(/\s+/)
-      .filter(w => w.length > 3 && !STOP_WORDS.has(w));
-
-  const newWords = new Set(normalise(newTitle));
-  if (newWords.size > 0) {
-    const allRecentWords = new Set(existingTitles.flatMap(t => normalise(t)));
-    const hasAnyOverlap = [...newWords].some(w => allRecentWords.has(w));
-    if (!hasAnyOverlap) {
-      // Zero word overlap with all recent titles — definitely a new story
-      return { isDuplicate: false };
-    }
-  }
+  // NOTE: The fast-path skip (zero word overlap → skip LLM) was removed because
+  // STOP_WORDS includes "flight", "plane", "aircraft", "airline", "aviation" —
+  // the most common words in aviation headlines. After stripping them, many
+  // stories about the same event (e.g. an Arabian Sea crash) share zero words
+  // with each other, causing the fast-path to fire and the LLM to never run.
+  // The LLM call costs ~$0.00002 — the false-negative cost is far higher.
 
   // Cap at 40 recent titles to keep the prompt tight
   const candidates = existingTitles.slice(0, 40);
@@ -932,11 +930,17 @@ ${numberedList}${learnedExamplesBlock}
 Task: Does the NEW STORY describe the same real-world event as any story in the list?
 
 Rules:
-- DUPLICATE = same physical event (same crash/incident/emergency), even if wording is completely different or from a different outlet
-- NEW_ANGLE = genuinely new development: wreckage found, investigation launched, cause revealed, charges filed, victims named, safety directive issued
-- UNRELATED = completely different story
+- DUPLICATE = same physical event/incident/crash, even if wording, outlet, or framing is completely different. Be aggressive — if two stories are clearly about the same event, mark DUPLICATE.
+  Examples of DUPLICATE pairs:
+  * "Boeing 737 Crashes Into Arabian Sea" ↔ "Search underway for crew of Pakistani cargo plane"
+  * "K2 Cargo flight missing over Pakistan" ↔ "Plane disappears near Karachi coast"
+  * "Delta cancels 200 flights" ↔ "Delta passengers stranded as airline grounds fleet"
+- NEW_ANGLE = same underlying event BUT with genuinely new information that changes the story: wreckage found, survivor rescued, investigation launched, cause officially revealed, charges filed, victims named, safety directive issued, death toll updated significantly
+- UNRELATED = completely different event/story
 
-If DUPLICATE or NEW_ANGLE, return the number of the matching story.
+Key insight: Different headlines about the same crash/incident are DUPLICATE, not NEW_ANGLE, unless they contain new factual developments.
+
+If DUPLICATE or NEW_ANGLE, return the number of the best-matching story.
 If multiple matches, return the closest one.
 
 Respond with JSON only:
